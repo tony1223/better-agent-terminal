@@ -66,6 +66,13 @@ export class PtyManager {
     const shell = shellOverride || this.getDefaultShell()
     let args: string[] = []
 
+    // For macOS/Linux shells (bash/zsh), use login shell to load full PATH
+    // This ensures environment variables and PATH from ~/.zshrc or ~/.bash_profile are loaded
+    if ((process.platform === 'darwin' || process.platform === 'linux') &&
+        (shell.includes('bash') || shell.includes('zsh'))) {
+      args = ['-l']
+    }
+
     // For PowerShell (pwsh or powershell), bypass execution policy to allow unsigned scripts
     if (shell.includes('powershell') || shell.includes('pwsh')) {
       args = ['-ExecutionPolicy', 'Bypass', '-NoLogo']
