@@ -1,21 +1,34 @@
 import { useEffect, useState, useCallback } from 'react'
 import { workspaceStore } from './stores/workspace-store'
+import { settingsStore } from './stores/settings-store'
 import { Sidebar } from './components/Sidebar'
 import { WorkspaceView } from './components/WorkspaceView'
+import { SettingsPanel } from './components/SettingsPanel'
 import type { AppState } from './types'
 
 export default function App() {
   const [state, setState] = useState<AppState>(workspaceStore.getState())
+  const [showSettings, setShowSettings] = useState(false)
 
   useEffect(() => {
     const unsubscribe = workspaceStore.subscribe(() => {
       setState(workspaceStore.getState())
     })
 
-    // Load saved workspaces on startup
-    workspaceStore.load()
+    // Global listener for all terminal output - updates activity for ALL terminals
+    // This is needed because WorkspaceView only renders terminals for the active workspace
+    const unsubscribeOutput = window.electronAPI.pty.onOutput((id) => {
+      workspaceStore.updateTerminalActivity(id)
+    })
 
-    return unsubscribe
+    // Load saved workspaces and settings on startup
+    workspaceStore.load()
+    settingsStore.load()
+
+    return () => {
+      unsubscribe()
+      unsubscribeOutput()
+    }
   }, [])
 
   const handleAddWorkspace = useCallback(async () => {
@@ -40,6 +53,11 @@ export default function App() {
           workspaceStore.removeWorkspace(id)
           workspaceStore.save()
         }}
+        onRenameWorkspace={(id, alias) => {
+          workspaceStore.renameWorkspace(id, alias)
+          workspaceStore.save()
+        }}
+        onOpenSettings={() => setShowSettings(true)}
       />
       <main className="main-content">
         {activeWorkspace ? (
@@ -55,6 +73,9 @@ export default function App() {
           </div>
         )}
       </main>
+      {showSettings && (
+        <SettingsPanel onClose={() => setShowSettings(false)} />
+      )}
     </div>
   )
 }

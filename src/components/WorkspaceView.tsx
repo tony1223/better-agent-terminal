@@ -1,14 +1,25 @@
 import { useEffect, useCallback, useState } from 'react'
 import type { Workspace, TerminalInstance } from '../types'
 import { workspaceStore } from '../stores/workspace-store'
+import { settingsStore } from '../stores/settings-store'
 import { TerminalPanel } from './TerminalPanel'
 import { ThumbnailBar } from './ThumbnailBar'
 import { CloseConfirmDialog } from './CloseConfirmDialog'
+import { ActivityIndicator } from './ActivityIndicator'
 
 interface WorkspaceViewProps {
   workspace: Workspace
   terminals: TerminalInstance[]
   focusedTerminalId: string | null
+}
+
+// Helper to get shell path from settings
+async function getShellFromSettings(): Promise<string | undefined> {
+  const settings = settingsStore.getSettings()
+  if (settings.shell === 'custom' && settings.customShellPath) {
+    return settings.customShellPath
+  }
+  return window.electronAPI.settings.getShellPath(settings.shell)
 }
 
 export function WorkspaceView({ workspace, terminals, focusedTerminalId }: WorkspaceViewProps) {
@@ -23,24 +34,34 @@ export function WorkspaceView({ workspace, terminals, focusedTerminalId }: Works
   // Initialize Claude Code terminal when workspace loads
   useEffect(() => {
     if (!claudeCode) {
-      const terminal = workspaceStore.addTerminal(workspace.id, 'claude-code')
-      window.electronAPI.pty.create({
-        id: terminal.id,
-        cwd: workspace.folderPath,
-        type: 'claude-code'
-      })
+      const createClaudeCode = async () => {
+        const terminal = workspaceStore.addTerminal(workspace.id, 'claude-code')
+        const shell = await getShellFromSettings()
+        window.electronAPI.pty.create({
+          id: terminal.id,
+          cwd: workspace.folderPath,
+          type: 'claude-code',
+          shell
+        })
+      }
+      createClaudeCode()
     }
   }, [workspace.id, claudeCode])
 
   // Auto-create first terminal if none exists
   useEffect(() => {
     if (regularTerminals.length === 0 && claudeCode) {
-      const terminal = workspaceStore.addTerminal(workspace.id, 'terminal')
-      window.electronAPI.pty.create({
-        id: terminal.id,
-        cwd: workspace.folderPath,
-        type: 'terminal'
-      })
+      const createTerminal = async () => {
+        const terminal = workspaceStore.addTerminal(workspace.id, 'terminal')
+        const shell = await getShellFromSettings()
+        window.electronAPI.pty.create({
+          id: terminal.id,
+          cwd: workspace.folderPath,
+          type: 'terminal',
+          shell
+        })
+      }
+      createTerminal()
     }
   }, [workspace.id, regularTerminals.length, claudeCode])
 
@@ -51,12 +72,14 @@ export function WorkspaceView({ workspace, terminals, focusedTerminalId }: Works
     }
   }, [focusedTerminalId, claudeCode])
 
-  const handleAddTerminal = useCallback(() => {
+  const handleAddTerminal = useCallback(async () => {
     const terminal = workspaceStore.addTerminal(workspace.id, 'terminal')
+    const shell = await getShellFromSettings()
     window.electronAPI.pty.create({
       id: terminal.id,
       cwd: workspace.folderPath,
-      type: 'terminal'
+      type: 'terminal',
+      shell
     })
   }, [workspace.id, workspace.folderPath])
 
@@ -82,7 +105,8 @@ export function WorkspaceView({ workspace, terminals, focusedTerminalId }: Works
     const terminal = terminals.find(t => t.id === id)
     if (terminal) {
       const cwd = await window.electronAPI.pty.getCwd(id) || terminal.cwd
-      await window.electronAPI.pty.restart(id, cwd)
+      const shell = await getShellFromSettings()
+      await window.electronAPI.pty.restart(id, cwd, shell)
       workspaceStore.updateTerminalCwd(id, cwd)
     }
   }, [terminals])
@@ -113,6 +137,10 @@ export function WorkspaceView({ workspace, terminals, focusedTerminalId }: Works
                   <span>{terminal.title}</span>
                 </div>
                 <div className="main-panel-actions">
+                  <ActivityIndicator
+                    terminalId={terminal.id}
+                    size="small"
+                  />
                   <button
                     className="action-btn"
                     onClick={() => handleRestart(terminal.id)}
@@ -130,7 +158,10 @@ export function WorkspaceView({ workspace, terminals, focusedTerminalId }: Works
                 </div>
               </div>
               <div className="main-panel-content">
-                <TerminalPanel terminalId={terminal.id} />
+                <TerminalPanel
+                  terminalId={terminal.id}
+                  isActive={terminal.id === mainTerminal?.id}
+                />
               </div>
             </div>
           </div>

@@ -1,6 +1,6 @@
 {
   "name": "better-agent-terminal",
-  "version": "1.0.0",
+  "version": "1.25.1217183610",
   "description": "Windows terminal aggregator with multi-workspace support and Claude Code integration",
   "main": "dist-electron/main.js",
   "scripts": {
@@ -8,10 +8,13 @@
     "compile": "vite build",
     "start": "electron .",
     "build": "vite build && electron-builder",
+    "build:release": "node scripts/build-version.js",
     "postinstall": "echo 'Run electron-rebuild manually if node-pty is needed'"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.10.0",
+    "@xterm/addon-unicode11": "^0.8.0",
+    "@xterm/addon-web-links": "^0.11.0",
     "@xterm/xterm": "^5.5.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",

@@ -1,16 +1,124 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
+import { WebLinksAddon } from '@xterm/addon-web-links'
+import { Unicode11Addon } from '@xterm/addon-unicode11'
+import { workspaceStore } from '../stores/workspace-store'
 import '@xterm/xterm/css/xterm.css'
 
 interface TerminalPanelProps {
   terminalId: string
+  isActive?: boolean
 }
 
-export function TerminalPanel({ terminalId }: TerminalPanelProps) {
+interface ContextMenu {
+  x: number
+  y: number
+  hasSelection: boolean
+}
+
+export function TerminalPanel({ terminalId, isActive = true }: TerminalPanelProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const terminalRef = useRef<Terminal | null>(null)
   const fitAddonRef = useRef<FitAddon | null>(null)
+  const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null)
+
+  // Handle paste with text size checking
+  const handlePasteText = (text: string) => {
+    if (!text) return
+
+    // For very long text (> 2000 chars), split into smaller chunks
+    if (text.length > 2000) {
+      const chunks = []
+      for (let i = 0; i < text.length; i += 1000) {
+        chunks.push(text.slice(i, i + 1000))
+      }
+
+      // Send chunks with small delays to prevent overwhelming the terminal
+      chunks.forEach((chunk, index) => {
+        setTimeout(() => {
+          window.electronAPI.pty.write(terminalId, chunk)
+        }, index * 50) // 50ms delay between chunks
+      })
+    } else {
+      // Normal sized text, send directly
+      window.electronAPI.pty.write(terminalId, text)
+    }
+  }
+
+  // Handle context menu actions
+  const handleCopy = () => {
+    if (terminalRef.current) {
+      const selection = terminalRef.current.getSelection()
+      if (selection) {
+        navigator.clipboard.writeText(selection)
+      }
+    }
+    setContextMenu(null)
+  }
+
+  const handlePaste = async () => {
+    try {
+      const text = await navigator.clipboard.readText()
+      if (text) {
+        handlePasteText(text)
+      }
+    } catch (err) {
+      console.error('Failed to read clipboard:', err)
+    }
+    setContextMenu(null)
+  }
+
+  // Close context menu when clicking outside
+  useEffect(() => {
+    const handleClickOutside = () => setContextMenu(null)
+    document.addEventListener('click', handleClickOutside)
+    return () => document.removeEventListener('click', handleClickOutside)
+  }, [])
+
+  // Handle terminal resize and focus when becoming active
+  useEffect(() => {
+    if (isActive && fitAddonRef.current && terminalRef.current) {
+      // Small delay to ensure DOM is updated
+      const timeoutId = setTimeout(() => {
+        if (fitAddonRef.current && terminalRef.current) {
+          fitAddonRef.current.fit()
+          const { cols, rows } = terminalRef.current
+          window.electronAPI.pty.resize(terminalId, cols, rows)
+          terminalRef.current.focus()
+        }
+      }, 100)
+
+      return () => clearTimeout(timeoutId)
+    }
+  }, [isActive, terminalId])
+
+  // Add intersection observer to detect when terminal becomes visible
+  useEffect(() => {
+    if (!containerRef.current || !fitAddonRef.current || !terminalRef.current) return
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting && isActive && fitAddonRef.current && terminalRef.current) {
+            // Terminal became visible, resize it
+            setTimeout(() => {
+              if (fitAddonRef.current && terminalRef.current) {
+                fitAddonRef.current.fit()
+                const { cols, rows } = terminalRef.current
+                window.electronAPI.pty.resize(terminalId, cols, rows)
+              }
+            }, 50)
+          }
+        })
+      },
+      { threshold: 0.1 }
+    )
+
+    observer.observe(containerRef.current)
+
+    return () => observer.disconnect()
+  }, [isActive, terminalId])
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -44,13 +152,26 @@ export function TerminalPanel({ terminalId }: TerminalPanelProps) {
       fontFamily: 'Consolas, Monaco, "Courier New", monospace',
       cursorBlink: true,
       scrollback: 10000,
-      convertEol: true
+      convertEol: true,
+      allowProposedApi: true,
+      allowTransparency: true,
+      scrollOnOutput: true,
+      windowsMode: true
     })
 
     const fitAddon = new FitAddon()
+    const unicode11Addon = new Unicode11Addon()
     terminal.loadAddon(fitAddon)
     terminal.open(containerRef.current)
-    fitAddon.fit()
+
+    // Load unicode11 addon after terminal is open
+    terminal.loadAddon(unicode11Addon)
+    terminal.unicode.activeVersion = '11'
+
+    // Delay fit to ensure terminal is fully initialized
+    requestAnimationFrame(() => {
+      fitAddon.fit()
+    })
 
     terminalRef.current = terminal
     fitAddonRef.current = fitAddon
@@ -60,7 +181,7 @@ export function TerminalPanel({ terminalId }: TerminalPanelProps) {
       window.electronAPI.pty.write(terminalId, data)
     })
 
-    // Handle copy with Ctrl+Shift+C or selection
+    // Handle copy and paste shortcuts
     terminal.attachCustomKeyEventHandler((event) => {
       // Ctrl+Shift+C for copy
       if (event.ctrlKey && event.shiftKey && event.key === 'C') {
@@ -73,31 +194,48 @@ export function TerminalPanel({ terminalId }: TerminalPanelProps) {
       // Ctrl+Shift+V for paste
       if (event.ctrlKey && event.shiftKey && event.key === 'V') {
         navigator.clipboard.readText().then((text) => {
-          window.electronAPI.pty.write(terminalId, text)
+          handlePasteText(text)
         })
         return false
+      }
+      // Ctrl+V for paste (standard shortcut)
+      if (event.ctrlKey && !event.shiftKey && event.key === 'v') {
+        event.preventDefault()
+        navigator.clipboard.readText().then((text) => {
+          handlePasteText(text)
+        })
+        return false
+      }
+      // Ctrl+C for copy when there's a selection
+      if (event.ctrlKey && !event.shiftKey && event.key === 'c') {
+        const selection = terminal.getSelection()
+        if (selection) {
+          navigator.clipboard.writeText(selection)
+          return false
+        }
+        // If no selection, let Ctrl+C pass through for interrupt signal
+        return true
       }
       return true
     })
 
     // Right-click context menu for copy/paste
-    containerRef.current.addEventListener('contextmenu', async (e) => {
+    containerRef.current.addEventListener('contextmenu', (e) => {
       e.preventDefault()
       const selection = terminal.getSelection()
-      if (selection) {
-        await navigator.clipboard.writeText(selection)
-      } else {
-        const text = await navigator.clipboard.readText()
-        if (text) {
-          window.electronAPI.pty.write(terminalId, text)
-        }
-      }
+      setContextMenu({
+        x: e.clientX,
+        y: e.clientY,
+        hasSelection: !!selection
+      })
     })
 
     // Handle terminal output
     const unsubscribeOutput = window.electronAPI.pty.onOutput((id, data) => {
       if (id === terminalId) {
         terminal.write(data)
+        // Update activity time when there's output
+        workspaceStore.updateTerminalActivity(terminalId)
       }
     })
 
@@ -110,9 +248,12 @@ export function TerminalPanel({ terminalId }: TerminalPanelProps) {
 
     // Handle resize
     const resizeObserver = new ResizeObserver(() => {
-      fitAddon.fit()
-      const { cols, rows } = terminal
-      window.electronAPI.pty.resize(terminalId, cols, rows)
+      // Only resize if terminal is currently active
+      if (isActive) {
+        fitAddon.fit()
+        const { cols, rows } = terminal
+        window.electronAPI.pty.resize(terminalId, cols, rows)
+      }
     })
     resizeObserver.observe(containerRef.current)
 
@@ -131,5 +272,28 @@ export function TerminalPanel({ terminalId }: TerminalPanelProps) {
     }
   }, [terminalId])
 
-  return <div ref={containerRef} className="terminal-panel" />
+  return (
+    <div ref={containerRef} className="terminal-panel">
+      {contextMenu && (
+        <div
+          className="context-menu"
+          style={{
+            position: 'fixed',
+            left: contextMenu.x,
+            top: contextMenu.y,
+            zIndex: 1000
+          }}
+        >
+          {contextMenu.hasSelection && (
+            <button onClick={handleCopy} className="context-menu-item">
+              複製
+            </button>
+          )}
+          <button onClick={handlePaste} className="context-menu-item">
+            貼上
+          </button>
+        </div>
+      )}
+    </div>
+  )
 }

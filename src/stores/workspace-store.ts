@@ -74,6 +74,17 @@ class WorkspaceStore {
     this.notify()
   }
 
+  renameWorkspace(id: string, alias: string): void {
+    this.state = {
+      ...this.state,
+      workspaces: this.state.workspaces.map(w =>
+        w.id === id ? { ...w, alias: alias.trim() || undefined } : w
+      )
+    }
+
+    this.notify()
+  }
+
   // Terminal actions
   addTerminal(workspaceId: string, type: 'terminal' | 'claude-code'): TerminalInstance {
     const workspace = this.state.workspaces.find(w => w.id === workspaceId)
@@ -87,9 +98,10 @@ class WorkspaceStore {
       id: uuidv4(),
       workspaceId,
       type,
-      title: type === 'claude-code' ? 'Claude Code' : `Terminal ${existingTerminals.length + 1}`,
+      title: type === 'claude-code' ? 'Code Agent' : `Terminal ${existingTerminals.length + 1}`,
       cwd: workspace.folderPath,
-      scrollbackBuffer: []
+      scrollbackBuffer: [],
+      lastActivityTime: Date.now()
     }
 
     // Only auto-focus Claude Code, keep current focus for regular terminals
@@ -177,6 +189,33 @@ class WorkspaceStore {
     return this.state.terminals.filter(
       t => t.workspaceId === workspaceId && t.type === 'terminal'
     )
+  }
+
+  // Activity tracking
+  private lastActivityNotify: number = 0
+
+  updateTerminalActivity(id: string): void {
+    const now = Date.now()
+    this.state = {
+      ...this.state,
+      terminals: this.state.terminals.map(t =>
+        t.id === id ? { ...t, lastActivityTime: now } : t
+      )
+    }
+    // Throttle notifications to avoid excessive re-renders (max once per 500ms)
+    if (now - this.lastActivityNotify > 500) {
+      this.lastActivityNotify = now
+      this.notify()
+    }
+  }
+
+  getWorkspaceLastActivity(workspaceId: string): number | null {
+    const terminals = this.getWorkspaceTerminals(workspaceId)
+    const lastActivities = terminals
+      .map(t => t.lastActivityTime)
+      .filter((time): time is number => time !== undefined)
+
+    return lastActivities.length > 0 ? Math.max(...lastActivities) : null
   }
 
   // Persistence

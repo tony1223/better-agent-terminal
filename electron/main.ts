@@ -70,8 +70,8 @@ ipcMain.handle('pty:kill', async (_event, id: string) => {
   return ptyManager?.kill(id)
 })
 
-ipcMain.handle('pty:restart', async (_event, id: string, cwd: string) => {
-  return ptyManager?.restart(id, cwd)
+ipcMain.handle('pty:restart', async (_event, id: string, cwd: string, shell?: string) => {
+  return ptyManager?.restart(id, cwd, shell)
 })
 
 ipcMain.handle('pty:get-cwd', async (_event, id: string) => {
@@ -101,4 +101,51 @@ ipcMain.handle('workspace:load', async () => {
   } catch {
     return null
   }
+})
+
+// Settings handlers
+ipcMain.handle('settings:save', async (_event, data: string) => {
+  const fs = await import('fs/promises')
+  const configPath = path.join(app.getPath('userData'), 'settings.json')
+  await fs.writeFile(configPath, data, 'utf-8')
+  return true
+})
+
+ipcMain.handle('settings:load', async () => {
+  const fs = await import('fs/promises')
+  const configPath = path.join(app.getPath('userData'), 'settings.json')
+  try {
+    const data = await fs.readFile(configPath, 'utf-8')
+    return data
+  } catch {
+    return null
+  }
+})
+
+ipcMain.handle('settings:get-shell-path', async (_event, shell: string) => {
+  const fs = await import('fs')
+
+  if (shell === 'auto' || shell === 'pwsh') {
+    const pwshPaths = [
+      'C:\\Program Files\\PowerShell\\7\\pwsh.exe',
+      'C:\\Program Files (x86)\\PowerShell\\7\\pwsh.exe',
+      process.env.LOCALAPPDATA + '\\Microsoft\\WindowsApps\\pwsh.exe'
+    ]
+    for (const p of pwshPaths) {
+      if (fs.existsSync(p)) {
+        return p
+      }
+    }
+    if (shell === 'pwsh') return 'pwsh.exe'
+  }
+
+  if (shell === 'auto' || shell === 'powershell') {
+    return 'powershell.exe'
+  }
+
+  if (shell === 'cmd') {
+    return 'cmd.exe'
+  }
+
+  return shell // custom path
 })

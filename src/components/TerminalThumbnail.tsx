@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { TerminalInstance } from '../types'
+import { ActivityIndicator } from './ActivityIndicator'
 
 // Global preview cache - persists across component unmounts
 const previewCache = new Map<string, string>()
@@ -52,6 +53,7 @@ export function TerminalThumbnail({ terminal, isActive, onClick }: TerminalThumb
           {isClaudeCode && <span>✦</span>}
           <span>{terminal.title}</span>
         </div>
+        <ActivityIndicator terminalId={terminal.id} size="small" />
       </div>
       <div className="thumbnail-preview">
         {preview || '$ _'}

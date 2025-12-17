@@ -32,6 +32,18 @@ export class PtyManager {
 
   private getDefaultShell(): string {
     if (process.platform === 'win32') {
+      // Prefer PowerShell 7 (pwsh) over Windows PowerShell
+      const fs = require('fs')
+      const pwshPaths = [
+        'C:\\Program Files\\PowerShell\\7\\pwsh.exe',
+        'C:\\Program Files (x86)\\PowerShell\\7\\pwsh.exe',
+        process.env.LOCALAPPDATA + '\\Microsoft\\WindowsApps\\pwsh.exe'
+      ]
+      for (const p of pwshPaths) {
+        if (fs.existsSync(p)) {
+          return p
+        }
+      }
       return 'powershell.exe'
     } else if (process.platform === 'darwin') {
       return process.env.SHELL || '/bin/zsh'
@@ -49,13 +61,13 @@ export class PtyManager {
   }
 
   create(options: CreatePtyOptions): boolean {
-    const { id, cwd, type } = options
+    const { id, cwd, type, shell: shellOverride } = options
 
-    const shell = this.getDefaultShell()
+    const shell = shellOverride || this.getDefaultShell()
     let args: string[] = []
 
-    // For PowerShell, bypass execution policy to allow unsigned scripts
-    if (shell.includes('powershell')) {
+    // For PowerShell (pwsh or powershell), bypass execution policy to allow unsigned scripts
+    if (shell.includes('powershell') || shell.includes('pwsh')) {
       args = ['-ExecutionPolicy', 'Bypass', '-NoLogo']
     }
 
@@ -104,7 +116,7 @@ export class PtyManager {
         // Fallback to child_process with proper stdio
         // For PowerShell, add -NoExit and UTF-8 command
         let shellArgs = [...args]
-        if (shell.includes('powershell')) {
+        if (shell.includes('powershell') || shell.includes('pwsh')) {
           shellArgs.push(
             '-NoExit',
             '-Command',
@@ -194,12 +206,12 @@ export class PtyManager {
     return false
   }
 
-  restart(id: string, cwd: string): boolean {
+  restart(id: string, cwd: string, shell?: string): boolean {
     const instance = this.instances.get(id)
     if (instance) {
       const type = instance.type
       this.kill(id)
-      return this.create({ id, cwd, type })
+      return this.create({ id, cwd, type, shell })
     }
     return false
   }
