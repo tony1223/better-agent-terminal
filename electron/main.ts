@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron'
 import path from 'path'
 import { PtyManager } from './pty-manager'
 
@@ -122,10 +122,10 @@ ipcMain.handle('settings:load', async () => {
   }
 })
 
-ipcMain.handle('settings:get-shell-path', async (_event, shell: string) => {
+ipcMain.handle('settings:get-shell-path', async (_event, shellType: string) => {
   const fs = await import('fs')
 
-  if (shell === 'auto' || shell === 'pwsh') {
+  if (shellType === 'auto' || shellType === 'pwsh') {
     const pwshPaths = [
       'C:\\Program Files\\PowerShell\\7\\pwsh.exe',
       'C:\\Program Files (x86)\\PowerShell\\7\\pwsh.exe',
@@ -136,16 +136,20 @@ ipcMain.handle('settings:get-shell-path', async (_event, shell: string) => {
         return p
       }
     }
-    if (shell === 'pwsh') return 'pwsh.exe'
+    if (shellType === 'pwsh') return 'pwsh.exe'
   }
 
-  if (shell === 'auto' || shell === 'powershell') {
+  if (shellType === 'auto' || shellType === 'powershell') {
     return 'powershell.exe'
   }
 
-  if (shell === 'cmd') {
+  if (shellType === 'cmd') {
     return 'cmd.exe'
   }
 
-  return shell // custom path
+  return shellType // custom path
+})
+
+ipcMain.handle('shell:open-external', async (_event, url: string) => {
+  await shell.openExternal(url)
 })

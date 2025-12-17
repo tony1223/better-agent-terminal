@@ -488,6 +488,17 @@ body {
   color: var(--text-primary);
 }
 
+.sidebar-footer-buttons {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.sidebar-footer-buttons .settings-btn {
+  flex: 1;
+  margin-top: 0;
+}
+
 /* Settings Panel */
 .settings-overlay {
   position: fixed;
@@ -608,6 +619,86 @@ body {
 .settings-note {
   font-size: 11px;
   color: var(--text-secondary);
+  margin: 0;
+}
+
+/* About Panel */
+.about-panel {
+  width: 380px;
+}
+
+.about-content {
+  text-align: center;
+}
+
+.about-logo {
+  margin-bottom: 20px;
+}
+
+.about-icon {
+  font-size: 48px;
+  display: block;
+  margin-bottom: 12px;
+}
+
+.about-logo h1 {
+  font-size: 18px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.about-description {
+  color: var(--text-secondary);
+  font-size: 13px;
+  margin-bottom: 24px;
+  line-height: 1.5;
+}
+
+.about-info {
+  background: var(--bg-tertiary);
+  border-radius: 6px;
+  padding: 12px 16px;
+  margin-bottom: 20px;
+  text-align: left;
+}
+
+.about-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 0;
+}
+
+.about-row:not(:last-child) {
+  border-bottom: 1px solid var(--border-color);
+}
+
+.about-label {
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.about-value {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.about-link {
+  color: var(--accent-color);
+  text-decoration: none;
+  font-size: 13px;
+}
+
+.about-link:hover {
+  text-decoration: underline;
+}
+
+.about-credits {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.about-credits p {
   margin: 0;
 }
 

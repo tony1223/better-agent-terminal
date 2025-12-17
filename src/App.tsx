@@ -4,11 +4,13 @@ import { settingsStore } from './stores/settings-store'
 import { Sidebar } from './components/Sidebar'
 import { WorkspaceView } from './components/WorkspaceView'
 import { SettingsPanel } from './components/SettingsPanel'
+import { AboutPanel } from './components/AboutPanel'
 import type { AppState } from './types'
 
 export default function App() {
   const [state, setState] = useState<AppState>(workspaceStore.getState())
   const [showSettings, setShowSettings] = useState(false)
+  const [showAbout, setShowAbout] = useState(false)
 
   useEffect(() => {
     const unsubscribe = workspaceStore.subscribe(() => {
@@ -58,6 +60,7 @@ export default function App() {
           workspaceStore.save()
         }}
         onOpenSettings={() => setShowSettings(true)}
+        onOpenAbout={() => setShowAbout(true)}
       />
       <main className="main-content">
         {activeWorkspace ? (
@@ -75,6 +78,9 @@ export default function App() {
       </main>
       {showSettings && (
         <SettingsPanel onClose={() => setShowSettings(false)} />
+      )}
+      {showAbout && (
+        <AboutPanel onClose={() => setShowAbout(false)} />
       )}
     </div>
   )

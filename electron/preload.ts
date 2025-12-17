@@ -31,6 +31,9 @@ const electronAPI = {
   },
   dialog: {
     selectFolder: () => ipcRenderer.invoke('dialog:select-folder')
+  },
+  shell: {
+    openExternal: (url: string) => ipcRenderer.invoke('shell:open-external', url)
   }
 }
 

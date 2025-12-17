@@ -10,6 +10,7 @@ interface SidebarProps {
   onRemoveWorkspace: (id: string) => void
   onRenameWorkspace: (id: string, alias: string) => void
   onOpenSettings: () => void
+  onOpenAbout: () => void
 }
 
 export function Sidebar({
@@ -19,7 +20,8 @@ export function Sidebar({
   onAddWorkspace,
   onRemoveWorkspace,
   onRenameWorkspace,
-  onOpenSettings
+  onOpenSettings,
+  onOpenAbout
 }: SidebarProps) {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
@@ -108,9 +110,14 @@ export function Sidebar({
         <button className="add-workspace-btn" onClick={onAddWorkspace}>
           + Add Workspace
         </button>
-        <button className="settings-btn" onClick={onOpenSettings}>
-          Settings
-        </button>
+        <div className="sidebar-footer-buttons">
+          <button className="settings-btn" onClick={onOpenSettings}>
+            Settings
+          </button>
+          <button className="settings-btn" onClick={onOpenAbout}>
+            About
+          </button>
+        </div>
       </div>
     </aside>
   )
