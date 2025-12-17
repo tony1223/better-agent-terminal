@@ -11,6 +11,8 @@ interface WorkspaceViewProps {
   workspace: Workspace
   terminals: TerminalInstance[]
   focusedTerminalId: string | null
+  thumbnailBarCollapsed: boolean
+  onToggleThumbnailBar: () => void
 }
 
 // Helper to get shell path from settings
@@ -22,7 +24,7 @@ async function getShellFromSettings(): Promise<string | undefined> {
   return window.electronAPI.settings.getShellPath(settings.shell)
 }
 
-export function WorkspaceView({ workspace, terminals, focusedTerminalId }: WorkspaceViewProps) {
+export function WorkspaceView({ workspace, terminals, focusedTerminalId, thumbnailBarCollapsed, onToggleThumbnailBar }: WorkspaceViewProps) {
   const [showCloseConfirm, setShowCloseConfirm] = useState<string | null>(null)
 
   const claudeCode = terminals.find(t => t.type === 'claude-code')
@@ -174,6 +176,8 @@ export function WorkspaceView({ workspace, terminals, focusedTerminalId }: Works
         onFocus={handleFocus}
         onAddTerminal={isClaudeCodeFocused ? handleAddTerminal : undefined}
         showAddButton={isClaudeCodeFocused}
+        collapsed={thumbnailBarCollapsed}
+        onToggleCollapse={onToggleThumbnailBar}
       />
 
       {showCloseConfirm && (

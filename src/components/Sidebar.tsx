@@ -13,6 +13,8 @@ interface SidebarProps {
   onSetWorkspaceRole: (id: string, role: string) => void
   onOpenSettings: () => void
   onOpenAbout: () => void
+  collapsed: boolean
+  onToggleCollapse: () => void
 }
 
 function getRoleColor(role?: string): string {
@@ -30,7 +32,9 @@ export function Sidebar({
   onRenameWorkspace,
   onSetWorkspaceRole,
   onOpenSettings,
-  onOpenAbout
+  onOpenAbout,
+  collapsed,
+  onToggleCollapse
 }: SidebarProps) {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
@@ -103,8 +107,17 @@ export function Sidebar({
   }
 
   return (
-    <aside className="sidebar">
-      <div className="sidebar-header">Workspaces</div>
+    <aside className={`sidebar ${collapsed ? 'collapsed' : ''}`}>
+      <div className="sidebar-header">
+        <span className="sidebar-header-text">Workspaces</span>
+        <button
+          className="sidebar-toggle-btn"
+          onClick={onToggleCollapse}
+          title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+        >
+          {collapsed ? '›' : '‹'}
+        </button>
+      </div>
       <div className="workspace-list">
         {workspaces.map(workspace => (
           <div

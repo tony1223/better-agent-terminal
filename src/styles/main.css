@@ -48,6 +48,30 @@ body {
   font-weight: 600;
   font-size: 14px;
   border-bottom: 1px solid var(--border-color);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.sidebar-header-text {
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.sidebar-toggle-btn {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.sidebar-toggle-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
 }
 
 .workspace-list {
@@ -909,4 +933,62 @@ body {
     transform: scale(1);
     box-shadow: 0 0 5px rgba(16, 185, 129, 0.4);
   }
+}
+
+/* Collapsed Sidebar */
+.sidebar {
+  transition: width 0.2s ease-in-out;
+}
+
+.sidebar.collapsed {
+  width: 48px;
+}
+
+.sidebar.collapsed .sidebar-header-text {
+  display: none;
+}
+
+.sidebar.collapsed .sidebar-toggle-btn {
+  margin: 0 auto;
+}
+
+.sidebar.collapsed .workspace-list {
+  display: none;
+}
+
+.sidebar.collapsed .sidebar-footer {
+  display: none;
+}
+
+/* Collapsed Thumbnail Bar */
+.thumbnail-bar {
+  transition: flex 0.2s ease-in-out;
+}
+
+.thumbnail-bar.collapsed {
+  flex: 0 0 32px;
+}
+
+.thumbnail-bar.collapsed .thumbnail-list {
+  display: none;
+}
+
+.thumbnail-bar-toggle-btn {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 10px;
+}
+
+.thumbnail-bar-toggle-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+/* Adjust terminals container when thumbnail bar is collapsed */
+.workspace-view:has(.thumbnail-bar.collapsed) .terminals-container {
+  flex: 1;
 }

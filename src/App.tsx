@@ -11,6 +11,8 @@ export default function App() {
   const [state, setState] = useState<AppState>(workspaceStore.getState())
   const [showSettings, setShowSettings] = useState(false)
   const [showAbout, setShowAbout] = useState(false)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [thumbnailBarCollapsed, setThumbnailBarCollapsed] = useState(false)
 
   useEffect(() => {
     const unsubscribe = workspaceStore.subscribe(() => {
@@ -45,7 +47,7 @@ export default function App() {
   const activeWorkspace = state.workspaces.find(w => w.id === state.activeWorkspaceId)
 
   return (
-    <div className="app">
+    <div className={`app ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
       <Sidebar
         workspaces={state.workspaces}
         activeWorkspaceId={state.activeWorkspaceId}
@@ -64,6 +66,8 @@ export default function App() {
         }}
         onOpenSettings={() => setShowSettings(true)}
         onOpenAbout={() => setShowAbout(true)}
+        collapsed={sidebarCollapsed}
+        onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
       />
       <main className="main-content">
         {activeWorkspace ? (
@@ -71,6 +75,8 @@ export default function App() {
             workspace={activeWorkspace}
             terminals={workspaceStore.getWorkspaceTerminals(activeWorkspace.id)}
             focusedTerminalId={state.focusedTerminalId}
+            thumbnailBarCollapsed={thumbnailBarCollapsed}
+            onToggleThumbnailBar={() => setThumbnailBarCollapsed(!thumbnailBarCollapsed)}
           />
         ) : (
           <div className="empty-state">
