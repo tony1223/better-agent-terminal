@@ -5,17 +5,18 @@
 }
 
 :root {
-  --bg-primary: #1e1e1e;
-  --bg-secondary: #252526;
-  --bg-tertiary: #2d2d2d;
-  --bg-hover: #3c3c3c;
-  --text-primary: #cccccc;
-  --text-secondary: #888888;
-  --border-color: #404040;
-  --accent-color: #0078d4;
-  --accent-hover: #1084d8;
-  --claude-accent: #d97706;
-  --danger-color: #f44336;
+  /* Novel theme - lighter variant for better contrast */
+  --bg-primary: #282520;
+  --bg-secondary: #332f2a;
+  --bg-tertiary: #3d3832;
+  --bg-hover: #4d463e;
+  --text-primary: #e8e4d4;
+  --text-secondary: #b8b0a0;
+  --border-color: #5a5248;
+  --accent-color: #8ab3b5;
+  --accent-hover: #9ac4c6;
+  --claude-accent: #f4bc87;
+  --danger-color: #cb6077;
 }
 
 html, body, #root {

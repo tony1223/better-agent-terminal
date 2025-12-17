@@ -21,6 +21,7 @@ export function TerminalPanel({ terminalId, isActive = true }: TerminalPanelProp
   const containerRef = useRef<HTMLDivElement>(null)
   const terminalRef = useRef<Terminal | null>(null)
   const fitAddonRef = useRef<FitAddon | null>(null)
+  const isComposingRef = useRef<boolean>(false)
   const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null)
 
   // Handle paste with text size checking
@@ -127,26 +128,26 @@ export function TerminalPanel({ terminalId, isActive = true }: TerminalPanelProp
     // Novel theme (macOS Terminal.app inspired)
     const terminal = new Terminal({
       theme: {
-        background: '#1f1d1a',
-        foreground: '#dfdbc3',
-        cursor: '#dfdbc3',
-        cursorAccent: '#1f1d1a',
+        background: '#282520',
+        foreground: '#e8e4d4',
+        cursor: '#e8e4d4',
+        cursorAccent: '#282520',
         selectionBackground: '#5c5142',
-        black: '#3b3228',
+        black: '#4a4238',
         red: '#cb6077',
         green: '#beb55b',
         yellow: '#f4bc87',
         blue: '#8ab3b5',
         magenta: '#a89bb9',
         cyan: '#7bbda4',
-        white: '#d0c8c6',
-        brightBlack: '#554d46',
-        brightRed: '#cb6077',
-        brightGreen: '#beb55b',
-        brightYellow: '#f4bc87',
-        brightBlue: '#8ab3b5',
-        brightMagenta: '#a89bb9',
-        brightCyan: '#7bbda4',
+        white: '#e0dcd0',
+        brightBlack: '#6a6258',
+        brightRed: '#db7087',
+        brightGreen: '#ced56b',
+        brightYellow: '#ffcc97',
+        brightBlue: '#9ac3c5',
+        brightMagenta: '#b8abc9',
+        brightCyan: '#8bcdb4',
         brightWhite: '#f5f1e6'
       },
       fontSize: 14,
@@ -202,8 +203,34 @@ export function TerminalPanel({ terminalId, isActive = true }: TerminalPanelProp
     terminalRef.current = terminal
     fitAddonRef.current = fitAddon
 
-    // Handle terminal input
+    // Handle IME composition events to prevent duplicate text
+    const imeTextarea = containerRef.current?.querySelector('.xterm-helper-textarea') as HTMLTextAreaElement
+    let skipNextOnData = false
+
+    if (imeTextarea) {
+      imeTextarea.addEventListener('compositionstart', () => {
+        isComposingRef.current = true
+      })
+      imeTextarea.addEventListener('compositionend', (e: CompositionEvent) => {
+        isComposingRef.current = false
+        // Send the composed text
+        if (e.data) {
+          window.electronAPI.pty.write(terminalId, e.data)
+          // Skip the next onData call as it will be a duplicate
+          skipNextOnData = true
+        }
+      })
+    }
+
+    // Handle terminal input - skip during IME composition and skip duplicate after composition
     terminal.onData((data) => {
+      if (isComposingRef.current) {
+        return // Skip all input during IME composition
+      }
+      if (skipNextOnData) {
+        skipNextOnData = false
+        return // Skip the duplicate after composition end
+      }
       window.electronAPI.pty.write(terminalId, data)
     })
 
