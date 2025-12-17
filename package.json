@@ -1,6 +1,6 @@
 {
   "name": "better-agent-terminal",
-  "version": "1.25.1217193326",
+  "version": "1.25.1217233736",
   "description": "Windows terminal aggregator with multi-workspace support and Claude Code integration",
   "main": "dist-electron/main.js",
   "scripts": {
@@ -62,7 +62,7 @@
       "icon": "assets/icon.png"
     },
     "forceCodeSigning": false,
-    "npmRebuild": true,
+    "npmRebuild": false,
     "files": [
       "dist/**/*",
       "dist-electron/**/*",
