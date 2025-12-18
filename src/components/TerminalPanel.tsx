@@ -83,6 +83,8 @@ export function TerminalPanel({ terminalId, isActive = true }: TerminalPanelProp
       // Small delay to ensure DOM is updated
       const timeoutId = setTimeout(() => {
         if (fitAddonRef.current && terminalRef.current) {
+          // Refresh the terminal display to ensure content is visible
+          terminalRef.current.refresh(0, terminalRef.current.rows - 1)
           fitAddonRef.current.fit()
           const { cols, rows } = terminalRef.current
           window.electronAPI.pty.resize(terminalId, cols, rows)
@@ -157,7 +159,8 @@ export function TerminalPanel({ terminalId, isActive = true }: TerminalPanelProp
       convertEol: true,
       allowProposedApi: true,
       allowTransparency: true,
-      scrollOnOutput: true
+      scrollOnOutput: true,
+      minimumContrastRatio: 4.5  // WCAG AA standard - auto-adjusts low contrast colors
     })
 
     const fitAddon = new FitAddon()
