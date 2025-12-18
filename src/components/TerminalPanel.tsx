@@ -173,7 +173,12 @@ export function TerminalPanel({ terminalId, isActive = true }: TerminalPanelProp
 
     const fitAddon = new FitAddon()
     const unicode11Addon = new Unicode11Addon()
+    const webLinksAddon = new WebLinksAddon((event, uri) => {
+      // Open URL in default browser
+      window.electronAPI.shell.openExternal(uri)
+    })
     terminal.loadAddon(fitAddon)
+    terminal.loadAddon(webLinksAddon)
     terminal.open(containerRef.current)
 
     // Load unicode11 addon after terminal is open
@@ -221,6 +226,13 @@ export function TerminalPanel({ terminalId, isActive = true }: TerminalPanelProp
 
     // Handle copy and paste shortcuts
     terminal.attachCustomKeyEventHandler((event) => {
+      // Shift+Enter for newline (multiline input)
+      if (event.shiftKey && event.key === 'Enter' && event.type === 'keydown') {
+        event.preventDefault()
+        // Send newline character to allow multiline input
+        window.electronAPI.pty.write(terminalId, '\n')
+        return false
+      }
       // Ctrl+Shift+C for copy
       if (event.ctrlKey && event.shiftKey && event.key === 'C') {
         const selection = terminal.getSelection()
