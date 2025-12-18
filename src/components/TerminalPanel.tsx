@@ -209,6 +209,9 @@ export function TerminalPanel({ terminalId, isActive = true }: TerminalPanelProp
 
     // Handle copy and paste shortcuts
     terminal.attachCustomKeyEventHandler((event) => {
+      // Only handle keydown events to prevent duplicate actions
+      if (event.type !== 'keydown') return true
+
       // Ctrl+Shift+C for copy
       if (event.ctrlKey && event.shiftKey && event.key === 'C') {
         const selection = terminal.getSelection()
@@ -227,8 +230,28 @@ export function TerminalPanel({ terminalId, isActive = true }: TerminalPanelProp
       // Ctrl+V for paste (standard shortcut)
       if (event.ctrlKey && !event.shiftKey && event.key === 'v') {
         event.preventDefault()
-        navigator.clipboard.readText().then((text) => {
-          handlePasteText(text)
+        // Check if clipboard contains an image
+        navigator.clipboard.read().then(async (items) => {
+          let hasImage = false
+          for (const item of items) {
+            if (item.types.some(type => type.startsWith('image/'))) {
+              hasImage = true
+              break
+            }
+          }
+          if (hasImage) {
+            // Send Alt+V (ESC + v) to terminal for image paste handling
+            window.electronAPI.pty.write(terminalId, '\x1bv')
+          } else {
+            // Normal text paste
+            const text = await navigator.clipboard.readText()
+            handlePasteText(text)
+          }
+        }).catch(() => {
+          // Fallback to text paste if clipboard.read() fails
+          navigator.clipboard.readText().then((text) => {
+            handlePasteText(text)
+          })
         })
         return false
       }
