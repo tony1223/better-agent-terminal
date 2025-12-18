@@ -4,3 +4,7 @@ dist-electron/
 release/
 *.log
 .DS_Store
+
+# Local environment (not committed)
+.envrc
+.env.local
