@@ -118,7 +118,8 @@ export function WorkspaceView({ workspace, terminals, focusedTerminalId, thumbna
   }, [])
 
   // Determine what to show in thumbnail bar
-  const mainTerminal = focusedTerminal || claudeCode
+  // Fallback chain: focusedTerminal → claudeCode → first terminal (prevents blank screen)
+  const mainTerminal = focusedTerminal || claudeCode || terminals[0]
   const thumbnailTerminals = isClaudeCodeFocused
     ? regularTerminals
     : (claudeCode ? [claudeCode] : [])

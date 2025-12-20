@@ -65,10 +65,15 @@ class WorkspaceStore {
   setActiveWorkspace(id: string): void {
     if (this.state.activeWorkspaceId === id) return
 
+    // Find the claude-code terminal for this workspace to set as default focus
+    const claudeCodeTerminal = this.state.terminals.find(
+      t => t.workspaceId === id && t.type === 'claude-code'
+    )
+
     this.state = {
       ...this.state,
       activeWorkspaceId: id,
-      focusedTerminalId: null
+      focusedTerminalId: claudeCodeTerminal?.id ?? null
     }
 
     this.notify()
