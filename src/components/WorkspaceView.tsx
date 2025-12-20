@@ -41,20 +41,17 @@ function mergeEnvVars(global: EnvVariable[] = [], workspace: EnvVariable[] = [])
   return result
 }
 
-export function WorkspaceView({ workspace, terminals, focusedTerminalId, isActive }: WorkspaceViewProps) {
+export function WorkspaceView({ workspace, terminals, focusedTerminalId, isActive }: Readonly<WorkspaceViewProps>) {
   const [showCloseConfirm, setShowCloseConfirm] = useState<string | null>(null)
 
-  // Find agent terminal (any terminal with an agentPreset that's not 'none')
+  // Categorize terminals
   const agentTerminal = terminals.find(t => t.agentPreset && t.agentPreset !== 'none')
-  const regularTerminals = terminals.filter(t => !t.agentPreset || t.agentPreset === 'none')
-
   const focusedTerminal = terminals.find(t => t.id === focusedTerminalId)
-  const isAgentFocused = focusedTerminal?.agentPreset && focusedTerminal.agentPreset !== 'none'
 
-  // Initialize agent terminal when workspace loads
+  // Initialize first terminal when workspace loads (if no terminals exist)
   useEffect(() => {
-    if (!agentTerminal) {
-      const createAgent = async () => {
+    if (terminals.length === 0) {
+      const createInitialTerminal = async () => {
         const defaultAgent = workspace.defaultAgent || settingsStore.getSettings().defaultAgent || 'none'
         const terminal = workspaceStore.addTerminal(workspace.id, defaultAgent as AgentPresetId)
         const shell = await getShellFromSettings()
@@ -69,36 +66,20 @@ export function WorkspaceView({ workspace, terminals, focusedTerminalId, isActiv
           customEnv
         })
       }
-      createAgent()
+      createInitialTerminal()
     }
-  }, [workspace.id, agentTerminal, workspace.defaultAgent, workspace.folderPath, workspace.envVars])
-
-  // Auto-create first regular terminal if none exists
-  useEffect(() => {
-    if (regularTerminals.length === 0 && agentTerminal) {
-      const createTerminal = async () => {
-        const terminal = workspaceStore.addTerminal(workspace.id)
-        const shell = await getShellFromSettings()
-        const settings = settingsStore.getSettings()
-        const customEnv = mergeEnvVars(settings.globalEnvVars, workspace.envVars)
-        window.electronAPI.pty.create({
-          id: terminal.id,
-          cwd: workspace.folderPath,
-          type: 'terminal',
-          shell,
-          customEnv
-        })
-      }
-      createTerminal()
-    }
-  }, [workspace.id, regularTerminals.length, agentTerminal, workspace.folderPath, workspace.envVars])
+  }, [workspace.id, terminals.length, workspace.defaultAgent, workspace.folderPath, workspace.envVars])
 
   // Set default focus - only for active workspace
   useEffect(() => {
-    if (isActive && !focusedTerminalId && agentTerminal) {
-      workspaceStore.setFocusedTerminal(agentTerminal.id)
+    if (isActive && !focusedTerminalId && terminals.length > 0) {
+      // Focus the first terminal (agent or regular)
+      const firstTerminal = agentTerminal || terminals[0]
+      if (firstTerminal) {
+        workspaceStore.setFocusedTerminal(firstTerminal.id)
+      }
     }
-  }, [isActive, focusedTerminalId, agentTerminal])
+  }, [isActive, focusedTerminalId, terminals, agentTerminal])
 
   const handleAddTerminal = useCallback(async () => {
     const terminal = workspaceStore.addTerminal(workspace.id)
@@ -112,6 +93,8 @@ export function WorkspaceView({ workspace, terminals, focusedTerminalId, isActiv
       shell,
       customEnv
     })
+    // Focus the new terminal
+    workspaceStore.setFocusedTerminal(terminal.id)
   }, [workspace.id, workspace.folderPath, workspace.envVars])
 
   const handleCloseTerminal = useCallback((id: string) => {
@@ -147,11 +130,9 @@ export function WorkspaceView({ workspace, terminals, focusedTerminalId, isActiv
     workspaceStore.setFocusedTerminal(id)
   }, [])
 
-  // Determine what to show in thumbnail bar
-  const mainTerminal = focusedTerminal || agentTerminal
-  const thumbnailTerminals = isAgentFocused
-    ? regularTerminals
-    : (agentTerminal ? [agentTerminal] : [])
+  // Determine what to show
+  // mainTerminal: the currently focused or first available terminal
+  const mainTerminal = focusedTerminal || agentTerminal || terminals[0]
 
   return (
     <div className="workspace-view">
@@ -172,11 +153,11 @@ export function WorkspaceView({ workspace, terminals, focusedTerminalId, isActiv
       </div>
 
       <ThumbnailBar
-        terminals={thumbnailTerminals}
-        focusedTerminalId={focusedTerminalId}
+        terminals={terminals}
+        focusedTerminalId={mainTerminal?.id || null}
         onFocus={handleFocus}
-        onAddTerminal={isAgentFocused ? handleAddTerminal : undefined}
-        showAddButton={!!isAgentFocused}
+        onAddTerminal={handleAddTerminal}
+        showAddButton={true}
       />
 
       {

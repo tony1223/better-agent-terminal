@@ -8,7 +8,7 @@ interface EnvVarEditorProps {
     onUpdate: (key: string, updates: Partial<EnvVariable>) => void
 }
 
-export function EnvVarEditor({ envVars, onAdd, onRemove, onUpdate }: EnvVarEditorProps) {
+export function EnvVarEditor({ envVars, onAdd, onRemove, onUpdate }: Readonly<EnvVarEditorProps>) {
     const [newKey, setNewKey] = useState('')
     const [newValue, setNewValue] = useState('')
     const [editingKey, setEditingKey] = useState<string | null>(null)
@@ -17,7 +17,7 @@ export function EnvVarEditor({ envVars, onAdd, onRemove, onUpdate }: EnvVarEdito
         if (newKey.trim() && newValue.trim()) {
             // Check for duplicate key
             if (envVars.some(e => e.key === newKey.trim())) {
-                alert('環境變數名稱已存在')
+                alert('Environment variable name already exists')
                 return
             }
             onAdd({ key: newKey.trim(), value: newValue.trim(), enabled: true })
@@ -37,7 +37,7 @@ export function EnvVarEditor({ envVars, onAdd, onRemove, onUpdate }: EnvVarEdito
             <div className="env-var-list">
                 {envVars.length === 0 ? (
                     <div className="env-var-empty">
-                        尚未設定任何環境變數
+                        No environment variables configured
                     </div>
                 ) : (
                     envVars.map(envVar => (
@@ -86,7 +86,7 @@ export function EnvVarEditor({ envVars, onAdd, onRemove, onUpdate }: EnvVarEdito
                             <button
                                 className="env-var-delete"
                                 onClick={() => onRemove(envVar.key)}
-                                title="刪除"
+                                title="Delete"
                             >
                                 ×
                             </button>
@@ -98,7 +98,7 @@ export function EnvVarEditor({ envVars, onAdd, onRemove, onUpdate }: EnvVarEdito
             <div className="env-var-add">
                 <input
                     type="text"
-                    placeholder="變數名稱"
+                    placeholder="Variable name"
                     value={newKey}
                     onChange={e => setNewKey(e.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, ''))}
                     onKeyPress={handleKeyPress}
@@ -106,7 +106,7 @@ export function EnvVarEditor({ envVars, onAdd, onRemove, onUpdate }: EnvVarEdito
                 />
                 <input
                     type="text"
-                    placeholder="值"
+                    placeholder="Value"
                     value={newValue}
                     onChange={e => setNewValue(e.target.value)}
                     onKeyPress={handleKeyPress}

@@ -1680,3 +1680,83 @@ body {
   padding: 16px 20px;
   border-top: 1px solid var(--border-color);
 }
+
+/* Environment Variables Button in Sidebar */
+.env-btn {
+  background: none;
+  border: none;
+  color: inherit;
+  font-size: 14px;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 2px;
+  opacity: 0;
+}
+
+.workspace-item:hover .env-btn {
+  opacity: 0.7;
+}
+
+.env-btn:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+/* Workspace Environment Dialog */
+.workspace-env-dialog {
+  background: var(--bg-secondary);
+  border-radius: var(--radius-lg);
+  width: 500px;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--glass-border);
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
+}
+
+.dialog-header {
+  display: flex;
+  align-items: center;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border-color);
+  gap: 12px;
+}
+
+.dialog-header h2 {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.dialog-subtitle {
+  font-size: 12px;
+  color: var(--text-secondary);
+  flex: 1;
+}
+
+.dialog-close-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 20px;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+
+.dialog-close-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text-primary);
+}
+
+.dialog-content {
+  padding: 20px;
+  overflow-y: auto;
+}
+
+.env-dialog-hint {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin: 0 0 16px 0;
+  line-height: 1.5;
+}

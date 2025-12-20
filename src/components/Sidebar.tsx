@@ -11,6 +11,7 @@ interface SidebarProps {
   onRemoveWorkspace: (id: string) => void
   onRenameWorkspace: (id: string, alias: string) => void
   onSetWorkspaceRole: (id: string, role: string) => void
+  onOpenEnvVars: (workspaceId: string) => void
   onOpenSettings: () => void
   onOpenAbout: () => void
 }
@@ -29,9 +30,10 @@ export function Sidebar({
   onRemoveWorkspace,
   onRenameWorkspace,
   onSetWorkspaceRole,
+  onOpenEnvVars,
   onOpenSettings,
   onOpenAbout
-}: SidebarProps) {
+}: Readonly<SidebarProps>) {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
   const [roleMenuId, setRoleMenuId] = useState<string | null>(null)
@@ -194,6 +196,16 @@ export function Sidebar({
                   workspaceId={workspace.id}
                   size="small"
                 />
+                <button
+                  className="env-btn"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onOpenEnvVars(workspace.id)
+                  }}
+                  title="Environment Variables"
+                >
+                  ⚙
+                </button>
                 <button
                   className="remove-btn"
                   onClick={(e) => {

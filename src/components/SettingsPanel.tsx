@@ -251,7 +251,7 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
           <div className="settings-section">
             <h3>Environment Variables</h3>
             <p className="settings-hint" style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '8px' }}>
-              這些環境變數會自動加入到所有新建的終端中
+              Global environment variables applied to ALL workspaces. Workspace-specific variables (⚙ button) will override these.
             </p>
             <EnvVarEditor
               envVars={settings.globalEnvVars || []}

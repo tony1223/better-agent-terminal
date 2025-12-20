@@ -6,12 +6,14 @@ import { WorkspaceView } from './components/WorkspaceView'
 import { SettingsPanel } from './components/SettingsPanel'
 import { AboutPanel } from './components/AboutPanel'
 import { SnippetSidebar } from './components/SnippetPanel'
-import type { AppState } from './types'
+import { WorkspaceEnvDialog } from './components/WorkspaceEnvDialog'
+import type { AppState, EnvVariable } from './types'
 
 export default function App() {
   const [state, setState] = useState<AppState>(workspaceStore.getState())
   const [showSettings, setShowSettings] = useState(false)
   const [showAbout, setShowAbout] = useState(false)
+  const [envDialogWorkspaceId, setEnvDialogWorkspaceId] = useState<string | null>(null)
   // Snippet sidebar is always visible by default
   const [showSnippetSidebar] = useState(true)
 
@@ -65,6 +67,11 @@ export default function App() {
     }
   }, [])
 
+  // Get the workspace for env dialog
+  const envDialogWorkspace = envDialogWorkspaceId
+    ? state.workspaces.find(w => w.id === envDialogWorkspaceId)
+    : null
+
   return (
     <div className="app">
       <Sidebar
@@ -83,6 +90,7 @@ export default function App() {
         onSetWorkspaceRole={(id, role) => {
           workspaceStore.setWorkspaceRole(id, role)
         }}
+        onOpenEnvVars={(workspaceId) => setEnvDialogWorkspaceId(workspaceId)}
         onOpenSettings={() => setShowSettings(true)}
         onOpenAbout={() => setShowAbout(true)}
       />
@@ -119,7 +127,15 @@ export default function App() {
       {showAbout && (
         <AboutPanel onClose={() => setShowAbout(false)} />
       )}
+      {envDialogWorkspace && (
+        <WorkspaceEnvDialog
+          workspace={envDialogWorkspace}
+          onAdd={(envVar: EnvVariable) => workspaceStore.addWorkspaceEnvVar(envDialogWorkspaceId!, envVar)}
+          onRemove={(key: string) => workspaceStore.removeWorkspaceEnvVar(envDialogWorkspaceId!, key)}
+          onUpdate={(key: string, updates: Partial<EnvVariable>) => workspaceStore.updateWorkspaceEnvVar(envDialogWorkspaceId!, key, updates)}
+          onClose={() => setEnvDialogWorkspaceId(null)}
+        />
+      )}
     </div>
   )
 }
-

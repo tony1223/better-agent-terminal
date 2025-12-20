@@ -98,6 +98,41 @@ class WorkspaceStore {
     this.save()
   }
 
+  // Workspace environment variables
+  setWorkspaceEnvVars(id: string, envVars: import('../types').EnvVariable[]): void {
+    this.state = {
+      ...this.state,
+      workspaces: this.state.workspaces.map(w =>
+        w.id === id ? { ...w, envVars } : w
+      )
+    }
+    this.notify()
+    this.save()
+  }
+
+  addWorkspaceEnvVar(id: string, envVar: import('../types').EnvVariable): void {
+    const workspace = this.state.workspaces.find(w => w.id === id)
+    if (!workspace) return
+    const envVars = [...(workspace.envVars || []), envVar]
+    this.setWorkspaceEnvVars(id, envVars)
+  }
+
+  removeWorkspaceEnvVar(id: string, key: string): void {
+    const workspace = this.state.workspaces.find(w => w.id === id)
+    if (!workspace) return
+    const envVars = (workspace.envVars || []).filter(e => e.key !== key)
+    this.setWorkspaceEnvVars(id, envVars)
+  }
+
+  updateWorkspaceEnvVar(id: string, key: string, updates: Partial<import('../types').EnvVariable>): void {
+    const workspace = this.state.workspaces.find(w => w.id === id)
+    if (!workspace) return
+    const envVars = (workspace.envVars || []).map(e =>
+      e.key === key ? { ...e, ...updates } : e
+    )
+    this.setWorkspaceEnvVars(id, envVars)
+  }
+
   // Terminal actions
   addTerminal(workspaceId: string, agentPreset?: AgentPresetId): TerminalInstance {
     const workspace = this.state.workspaces.find(w => w.id === workspaceId)
