@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid'
 import type { Workspace, TerminalInstance, AppState } from '../types'
+import { AgentPresetId, getAgentPreset } from '../types/agent-presets'
 
 type Listener = () => void
 
@@ -97,82 +98,69 @@ class WorkspaceStore {
     this.save()
   }
 
-  // Archive actions
-  archiveWorkspace(id: string): void {
+  // Workspace environment variables
+  setWorkspaceEnvVars(id: string, envVars: import('../types').EnvVariable[]): void {
     this.state = {
       ...this.state,
       workspaces: this.state.workspaces.map(w =>
-        w.id === id ? { ...w, archived: true } : w
-      ),
-      // If archiving the active workspace, switch to first non-archived one
-      activeWorkspaceId: this.state.activeWorkspaceId === id
-        ? (this.state.workspaces.find(w => w.id !== id && !w.archived)?.id ?? null)
-        : this.state.activeWorkspaceId
-    }
-
-    this.notify()
-    this.save()
-  }
-
-  unarchiveWorkspace(id: string): void {
-    this.state = {
-      ...this.state,
-      workspaces: this.state.workspaces.map(w =>
-        w.id === id ? { ...w, archived: false } : w
+        w.id === id ? { ...w, envVars } : w
       )
     }
-
     this.notify()
     this.save()
   }
 
-  getActiveWorkspaces(): Workspace[] {
-    return this.state.workspaces
-      .filter(w => !w.archived)
-      .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
+  addWorkspaceEnvVar(id: string, envVar: import('../types').EnvVariable): void {
+    const workspace = this.state.workspaces.find(w => w.id === id)
+    if (!workspace) return
+    const envVars = [...(workspace.envVars || []), envVar]
+    this.setWorkspaceEnvVars(id, envVars)
   }
 
-  getArchivedWorkspaces(): Workspace[] {
-    return this.state.workspaces
-      .filter(w => w.archived)
-      .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
+  removeWorkspaceEnvVar(id: string, key: string): void {
+    const workspace = this.state.workspaces.find(w => w.id === id)
+    if (!workspace) return
+    const envVars = (workspace.envVars || []).filter(e => e.key !== key)
+    this.setWorkspaceEnvVars(id, envVars)
   }
 
-  // Reorder workspaces by providing ordered array of IDs
-  reorderWorkspaces(workspaceIds: string[]): void {
-    this.state = {
-      ...this.state,
-      workspaces: this.state.workspaces.map(w => {
-        const index = workspaceIds.indexOf(w.id)
-        return index >= 0 ? { ...w, order: index } : w
-      })
-    }
-
-    this.notify()
-    this.save()
+  updateWorkspaceEnvVar(id: string, key: string, updates: Partial<import('../types').EnvVariable>): void {
+    const workspace = this.state.workspaces.find(w => w.id === id)
+    if (!workspace) return
+    const envVars = (workspace.envVars || []).map(e =>
+      e.key === key ? { ...e, ...updates } : e
+    )
+    this.setWorkspaceEnvVars(id, envVars)
   }
 
   // Terminal actions
-  addTerminal(workspaceId: string, type: 'terminal' | 'code-agent'): TerminalInstance {
+  addTerminal(workspaceId: string, agentPreset?: AgentPresetId): TerminalInstance {
     const workspace = this.state.workspaces.find(w => w.id === workspaceId)
     if (!workspace) throw new Error('Workspace not found')
 
     const existingTerminals = this.state.terminals.filter(
-      t => t.workspaceId === workspaceId && t.type === 'terminal'
+      t => t.workspaceId === workspaceId && !t.agentPreset
     )
+
+    // Get agent preset info for title
+    const preset = agentPreset ? getAgentPreset(agentPreset) : null
+    const title = preset && preset.id !== 'none'
+      ? preset.name
+      : 'New Terminal'
 
     const terminal: TerminalInstance = {
       id: uuidv4(),
       workspaceId,
-      type,
-      title: type === 'code-agent' ? 'Code Agent' : `Terminal ${existingTerminals.length + 1}`,
+      type: 'terminal',
+      agentPreset,
+      title,
       cwd: workspace.folderPath,
       scrollbackBuffer: [],
       lastActivityTime: Date.now()
     }
 
-    // Only auto-focus Code Agent, keep current focus for regular terminals
-    const shouldFocus = type === 'code-agent' || !this.state.focusedTerminalId
+    // Auto-focus if it's an agent terminal or no current focus
+    const shouldFocus = (agentPreset && agentPreset !== 'none') || !this.state.focusedTerminalId
 
     this.state = {
       ...this.state,
@@ -193,6 +181,17 @@ class WorkspaceStore {
       focusedTerminalId: this.state.focusedTerminalId === id
         ? (terminals[0]?.id ?? null)
         : this.state.focusedTerminalId
+    }
+
+    this.notify()
+  }
+
+  renameTerminal(id: string, title: string): void {
+    this.state = {
+      ...this.state,
+      terminals: this.state.terminals.map(t =>
+        t.id === id ? { ...t, title } : t
+      )
     }
 
     this.notify()
@@ -241,40 +240,26 @@ class WorkspaceStore {
     this.notify()
   }
 
-  // Mark agent command as sent for a terminal
-  markAgentCommandSent(id: string): void {
-    this.state = {
-      ...this.state,
-      terminals: this.state.terminals.map(t =>
-        t.id === id ? { ...t, agentCommandSent: true } : t
-      )
-    }
-  }
-
-  // Mark terminal as having user input
-  markHasUserInput(id: string): void {
-    this.state = {
-      ...this.state,
-      terminals: this.state.terminals.map(t =>
-        t.id === id ? { ...t, hasUserInput: true } : t
-      )
-    }
-  }
-
   // Get terminals for current workspace
   getWorkspaceTerminals(workspaceId: string): TerminalInstance[] {
     return this.state.terminals.filter(t => t.workspaceId === workspaceId)
   }
 
-  getCodeAgentTerminal(workspaceId: string): TerminalInstance | undefined {
+  // Get agent terminal for workspace (first agent terminal, regardless of type)
+  getAgentTerminal(workspaceId: string): TerminalInstance | undefined {
     return this.state.terminals.find(
-      t => t.workspaceId === workspaceId && t.type === 'code-agent'
+      t => t.workspaceId === workspaceId && t.agentPreset && t.agentPreset !== 'none'
     )
+  }
+
+  // Legacy compatibility - alias for getAgentTerminal
+  getClaudeCodeTerminal(workspaceId: string): TerminalInstance | undefined {
+    return this.getAgentTerminal(workspaceId)
   }
 
   getRegularTerminals(workspaceId: string): TerminalInstance[] {
     return this.state.terminals.filter(
-      t => t.workspaceId === workspaceId && t.type === 'terminal'
+      t => t.workspaceId === workspaceId && (!t.agentPreset || t.agentPreset === 'none')
     )
   }
 

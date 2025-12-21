@@ -17,10 +17,12 @@
     "diagnose:ctrl-o:verbose": "npx electron tests/diagnose-ctrl-o.js --verbose"
   },
   "dependencies": {
+    "@lydell/node-pty": "^1.1.0",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/addon-unicode11": "^0.8.0",
     "@xterm/addon-web-links": "^0.11.0",
     "@xterm/xterm": "^5.5.0",
+    "better-sqlite3": "^12.5.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "uuid": "^9.0.0"
@@ -30,6 +32,7 @@
   },
   "devDependencies": {
     "@electron/rebuild": "^4.0.2",
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^20.0.0",
     "@types/react": "^18.2.0",
     "@types/react-dom": "^18.2.0",

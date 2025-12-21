@@ -1,5 +1,6 @@
 import type { TerminalInstance } from '../types'
 import { TerminalThumbnail } from './TerminalThumbnail'
+import { getAgentPreset } from '../types/agent-presets'
 
 interface ThumbnailBarProps {
   terminals: TerminalInstance[]
@@ -16,9 +17,10 @@ export function ThumbnailBar({
   onAddTerminal,
   showAddButton
 }: ThumbnailBarProps) {
-  const label = terminals.length > 0 && terminals[0].type === 'code-agent'
-    ? 'Code Agent'
-    : 'Terminals'
+  // Check if first terminal is an agent
+  const firstTerminal = terminals[0]
+  const isAgent = firstTerminal?.agentPreset && firstTerminal.agentPreset !== 'none'
+  const label = isAgent ? (getAgentPreset(firstTerminal.agentPreset!)?.name || 'Agent') : 'Terminals'
 
   return (
     <div className="thumbnail-bar">

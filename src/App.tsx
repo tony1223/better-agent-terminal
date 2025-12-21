@@ -1,26 +1,21 @@
-import { useEffect, useState, useCallback, useRef } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { workspaceStore } from './stores/workspace-store'
 import { settingsStore } from './stores/settings-store'
 import { Sidebar } from './components/Sidebar'
 import { WorkspaceView } from './components/WorkspaceView'
 import { SettingsPanel } from './components/SettingsPanel'
 import { AboutPanel } from './components/AboutPanel'
-import type { AppState } from './types'
-
-const MIN_SIDEBAR_WIDTH = 160
-const MAX_SIDEBAR_WIDTH = 400
-const DEFAULT_SIDEBAR_WIDTH = 220
+import { SnippetSidebar } from './components/SnippetPanel'
+import { WorkspaceEnvDialog } from './components/WorkspaceEnvDialog'
+import type { AppState, EnvVariable } from './types'
 
 export default function App() {
   const [state, setState] = useState<AppState>(workspaceStore.getState())
   const [showSettings, setShowSettings] = useState(false)
   const [showAbout, setShowAbout] = useState(false)
-  const [sidebarWidth, setSidebarWidth] = useState(() => {
-    const saved = localStorage.getItem('sidebarWidth')
-    return saved ? parseInt(saved, 10) : DEFAULT_SIDEBAR_WIDTH
-  })
-  const [isResizing, setIsResizing] = useState(false)
-  const resizeRef = useRef<{ startX: number; startWidth: number } | null>(null)
+  const [envDialogWorkspaceId, setEnvDialogWorkspaceId] = useState<string | null>(null)
+  // Snippet sidebar is always visible by default
+  const [showSnippetSidebar] = useState(true)
 
   useEffect(() => {
     const unsubscribe = workspaceStore.subscribe(() => {
@@ -43,40 +38,6 @@ export default function App() {
     }
   }, [])
 
-  // Sidebar resize handlers
-  const handleResizeStart = useCallback((e: React.MouseEvent) => {
-    e.preventDefault()
-    setIsResizing(true)
-    resizeRef.current = { startX: e.clientX, startWidth: sidebarWidth }
-  }, [sidebarWidth])
-
-  useEffect(() => {
-    if (!isResizing) return
-
-    let currentWidth = sidebarWidth
-
-    const handleMouseMove = (e: MouseEvent) => {
-      if (!resizeRef.current) return
-      const delta = e.clientX - resizeRef.current.startX
-      currentWidth = Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, resizeRef.current.startWidth + delta))
-      setSidebarWidth(currentWidth)
-    }
-
-    const handleMouseUp = () => {
-      setIsResizing(false)
-      resizeRef.current = null
-      localStorage.setItem('sidebarWidth', currentWidth.toString())
-    }
-
-    document.addEventListener('mousemove', handleMouseMove)
-    document.addEventListener('mouseup', handleMouseUp)
-
-    return () => {
-      document.removeEventListener('mousemove', handleMouseMove)
-      document.removeEventListener('mouseup', handleMouseUp)
-    }
-  }, [isResizing, sidebarWidth])
-
   const handleAddWorkspace = useCallback(async () => {
     const folderPath = await window.electronAPI.dialog.selectFolder()
     if (folderPath) {
@@ -86,14 +47,35 @@ export default function App() {
     }
   }, [])
 
-  const activeWorkspace = state.workspaces.find(w => w.id === state.activeWorkspaceId)
+  // Paste content to focused terminal
+  const handlePasteToTerminal = useCallback((content: string) => {
+    const currentState = workspaceStore.getState()
+    // Try focused terminal first, then fall back to active terminal or first terminal in active workspace
+    let terminalId = currentState.focusedTerminalId
+
+    if (!terminalId && currentState.activeWorkspaceId) {
+      const workspaceTerminals = workspaceStore.getWorkspaceTerminals(currentState.activeWorkspaceId)
+      if (workspaceTerminals.length > 0) {
+        terminalId = workspaceTerminals[0].id
+      }
+    }
+
+    if (terminalId) {
+      window.electronAPI.pty.write(terminalId, content)
+    } else {
+      console.warn('No terminal available to paste to')
+    }
+  }, [])
+
+  // Get the workspace for env dialog
+  const envDialogWorkspace = envDialogWorkspaceId
+    ? state.workspaces.find(w => w.id === envDialogWorkspaceId)
+    : null
 
   return (
-    <div className={`app ${isResizing ? 'resizing' : ''}`}>
+    <div className="app">
       <Sidebar
-        width={sidebarWidth}
-        workspaces={workspaceStore.getActiveWorkspaces()}
-        archivedWorkspaces={workspaceStore.getArchivedWorkspaces()}
+        workspaces={state.workspaces}
         activeWorkspaceId={state.activeWorkspaceId}
         onSelectWorkspace={(id) => workspaceStore.setActiveWorkspace(id)}
         onAddWorkspace={handleAddWorkspace}
@@ -108,21 +90,9 @@ export default function App() {
         onSetWorkspaceRole={(id, role) => {
           workspaceStore.setWorkspaceRole(id, role)
         }}
-        onArchiveWorkspace={(id) => {
-          workspaceStore.archiveWorkspace(id)
-        }}
-        onUnarchiveWorkspace={(id) => {
-          workspaceStore.unarchiveWorkspace(id)
-        }}
-        onReorderWorkspaces={(ids) => {
-          workspaceStore.reorderWorkspaces(ids)
-        }}
+        onOpenEnvVars={(workspaceId) => setEnvDialogWorkspaceId(workspaceId)}
         onOpenSettings={() => setShowSettings(true)}
         onOpenAbout={() => setShowAbout(true)}
-      />
-      <div
-        className="sidebar-resizer"
-        onMouseDown={handleResizeStart}
       />
       <main className="main-content">
         {state.workspaces.length > 0 ? (
@@ -147,11 +117,24 @@ export default function App() {
           </div>
         )}
       </main>
+      <SnippetSidebar
+        isVisible={showSnippetSidebar}
+        onPasteToTerminal={handlePasteToTerminal}
+      />
       {showSettings && (
         <SettingsPanel onClose={() => setShowSettings(false)} />
       )}
       {showAbout && (
         <AboutPanel onClose={() => setShowAbout(false)} />
+      )}
+      {envDialogWorkspace && (
+        <WorkspaceEnvDialog
+          workspace={envDialogWorkspace}
+          onAdd={(envVar: EnvVariable) => workspaceStore.addWorkspaceEnvVar(envDialogWorkspaceId!, envVar)}
+          onRemove={(key: string) => workspaceStore.removeWorkspaceEnvVar(envDialogWorkspaceId!, key)}
+          onUpdate={(key: string, updates: Partial<EnvVariable>) => workspaceStore.updateWorkspaceEnvVar(envDialogWorkspaceId!, key, updates)}
+          onClose={() => setEnvDialogWorkspaceId(null)}
+        />
       )}
     </div>
   )

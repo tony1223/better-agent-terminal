@@ -1,8 +1,8 @@
 import { useState, useEffect } from 'react'
-import type { AppSettings, ShellType, FontType, ColorPresetId, AgentCommandType } from '../types'
-import { FONT_OPTIONS, COLOR_PRESETS, AGENT_COMMAND_OPTIONS } from '../types'
+import type { AppSettings, ShellType, FontType, ColorPresetId, EnvVariable } from '../types'
+import { FONT_OPTIONS, COLOR_PRESETS } from '../types'
 import { settingsStore } from '../stores/settings-store'
-import { workspaceStore } from '../stores/workspace-store'
+import { EnvVarEditor } from './EnvVarEditor'
 
 interface SettingsPanelProps {
   onClose: () => void
@@ -82,35 +82,6 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
 
   const handleCustomCursorColorChange = (color: string) => {
     settingsStore.setCustomCursorColor(color)
-  }
-
-  const handleAgentAutoCommandChange = (enabled: boolean) => {
-    settingsStore.setAgentAutoCommand(enabled)
-
-    // If enabling, send command to all agent terminals that have no user input yet
-    if (enabled) {
-      setTimeout(() => {
-        const agentCommand = settingsStore.getAgentCommand()
-        if (agentCommand) {
-          const state = workspaceStore.getState()
-          const agentTerminals = state.terminals.filter(
-            t => t.type === 'code-agent' && !t.hasUserInput && !t.agentCommandSent
-          )
-          agentTerminals.forEach(terminal => {
-            window.electronAPI.pty.write(terminal.id, agentCommand + '\r')
-            workspaceStore.markAgentCommandSent(terminal.id)
-          })
-        }
-      }, 100)
-    }
-  }
-
-  const handleAgentCommandTypeChange = (type: AgentCommandType) => {
-    settingsStore.setAgentCommandType(type)
-  }
-
-  const handleAgentCustomCommandChange = (command: string) => {
-    settingsStore.setAgentCustomCommand(command)
   }
 
   const terminalColors = settingsStore.getTerminalColors()
@@ -278,53 +249,16 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
           </div>
 
           <div className="settings-section">
-            <h3>Agent</h3>
-            <div className="settings-group checkbox-group">
-              <label className="checkbox-label">
-                <input
-                  type="checkbox"
-                  checked={settings.agentAutoCommand}
-                  onChange={e => handleAgentAutoCommandChange(e.target.checked)}
-                />
-                <span>Auto-execute command when agent starts</span>
-              </label>
-            </div>
-
-            {settings.agentAutoCommand && (
-              <>
-                <div className="settings-group">
-                  <label>Agent Command</label>
-                  <select
-                    value={settings.agentCommandType}
-                    onChange={e => handleAgentCommandTypeChange(e.target.value as AgentCommandType)}
-                  >
-                    {AGENT_COMMAND_OPTIONS.map(option => (
-                      <option key={option.id} value={option.id}>
-                        {option.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                {settings.agentCommandType === 'custom' && (
-                  <div className="settings-group">
-                    <label>Custom Command</label>
-                    <input
-                      type="text"
-                      value={settings.agentCustomCommand}
-                      onChange={e => handleAgentCustomCommandChange(e.target.value)}
-                      placeholder="e.g., claude --model opus"
-                    />
-                  </div>
-                )}
-
-                <div className="settings-group">
-                  <label className="hint">
-                    Command to run: {settingsStore.getAgentCommand() || '(none)'}
-                  </label>
-                </div>
-              </>
-            )}
+            <h3>Environment Variables</h3>
+            <p className="settings-hint" style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '8px' }}>
+              Global environment variables applied to ALL workspaces. Workspace-specific variables (⚙ button) will override these.
+            </p>
+            <EnvVarEditor
+              envVars={settings.globalEnvVars || []}
+              onAdd={(envVar) => settingsStore.addGlobalEnvVar(envVar)}
+              onRemove={(key) => settingsStore.removeGlobalEnvVar(key)}
+              onUpdate={(key, updates) => settingsStore.updateGlobalEnvVar(key, updates)}
+            />
           </div>
         </div>
 

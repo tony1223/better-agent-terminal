@@ -2,6 +2,7 @@ import { app, BrowserWindow, ipcMain, dialog, shell, Menu } from 'electron'
 import path from 'path'
 import { PtyManager } from './pty-manager'
 import { checkForUpdates, UpdateCheckResult } from './update-checker'
+import { snippetDb, CreateSnippetInput } from './snippet-db'
 
 let mainWindow: BrowserWindow | null = null
 let ptyManager: PtyManager | null = null
@@ -293,4 +294,41 @@ ipcMain.handle('update:check', async () => {
 
 ipcMain.handle('update:get-version', () => {
   return app.getVersion()
+})
+
+// Snippet handlers
+ipcMain.handle('snippet:getAll', () => {
+  return snippetDb.getAll()
+})
+
+ipcMain.handle('snippet:getById', (_event, id: number) => {
+  return snippetDb.getById(id)
+})
+
+ipcMain.handle('snippet:create', (_event, input: CreateSnippetInput) => {
+  return snippetDb.create(input)
+})
+
+ipcMain.handle('snippet:update', (_event, id: number, updates: Partial<CreateSnippetInput>) => {
+  return snippetDb.update(id, updates)
+})
+
+ipcMain.handle('snippet:delete', (_event, id: number) => {
+  return snippetDb.delete(id)
+})
+
+ipcMain.handle('snippet:toggleFavorite', (_event, id: number) => {
+  return snippetDb.toggleFavorite(id)
+})
+
+ipcMain.handle('snippet:search', (_event, query: string) => {
+  return snippetDb.search(query)
+})
+
+ipcMain.handle('snippet:getCategories', () => {
+  return snippetDb.getCategories()
+})
+
+ipcMain.handle('snippet:getFavorites', () => {
+  return snippetDb.getFavorites()
 })

@@ -10,6 +10,9 @@ try {
   // Test if native module works by checking if spawn function exists and module is properly built
   if (pty && typeof pty.spawn === 'function') {
     ptyAvailable = true
+    console.log('node-pty loaded successfully (using @lydell/node-pty)')
+  } else {
+    console.warn('node-pty loaded but spawn function not available')
   }
 } catch (e) {
   console.warn('@lydell/node-pty not available, falling back to child_process:', e)
@@ -17,7 +20,7 @@ try {
 
 interface PtyInstance {
   process: any // IPty or ChildProcess
-  type: 'terminal' | 'code-agent'
+  type: 'terminal'  // Unified to 'terminal' - agent types handled by agentPreset
   cwd: string
   usePty: boolean
 }
@@ -61,7 +64,7 @@ export class PtyManager {
   }
 
   create(options: CreatePtyOptions): boolean {
-    const { id, cwd, type, shell: shellOverride } = options
+    const { id, cwd, type, shell: shellOverride, customEnv = {} } = options
 
     const shell = shellOverride || this.getDefaultShell()
     let args: string[] = []
@@ -76,9 +79,10 @@ export class PtyManager {
 
     if (ptyAvailable && pty) {
       try {
-        // Set UTF-8 and terminal environment variables
+        // Set UTF-8 and terminal environment variables, merge custom env
         const envWithUtf8 = {
           ...process.env,
+          ...customEnv,  // Merge custom environment variables
           // UTF-8 encoding
           LANG: 'en_US.UTF-8',
           LC_ALL: 'en_US.UTF-8',
@@ -138,9 +142,10 @@ export class PtyManager {
           )
         }
 
-        // Set UTF-8 and terminal environment variables (child_process fallback)
+        // Set UTF-8 and terminal environment variables, merge custom env (child_process fallback)
         const envWithUtf8 = {
           ...process.env,
+          ...customEnv,  // Merge custom environment variables
           // UTF-8 encoding
           LANG: 'en_US.UTF-8',
           LC_ALL: 'en_US.UTF-8',

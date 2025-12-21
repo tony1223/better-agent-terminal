@@ -38,6 +38,19 @@ const electronAPI = {
   update: {
     check: () => ipcRenderer.invoke('update:check'),
     getVersion: () => ipcRenderer.invoke('update:get-version')
+  },
+  snippet: {
+    getAll: () => ipcRenderer.invoke('snippet:getAll'),
+    getById: (id: number) => ipcRenderer.invoke('snippet:getById', id),
+    create: (input: { title: string; content: string; format?: string; category?: string; tags?: string; isFavorite?: boolean }) =>
+      ipcRenderer.invoke('snippet:create', input),
+    update: (id: number, updates: { title?: string; content?: string; format?: string; category?: string; tags?: string; isFavorite?: boolean }) =>
+      ipcRenderer.invoke('snippet:update', id, updates),
+    delete: (id: number) => ipcRenderer.invoke('snippet:delete', id),
+    toggleFavorite: (id: number) => ipcRenderer.invoke('snippet:toggleFavorite', id),
+    search: (query: string) => ipcRenderer.invoke('snippet:search', query),
+    getCategories: () => ipcRenderer.invoke('snippet:getCategories'),
+    getFavorites: () => ipcRenderer.invoke('snippet:getFavorites')
   }
 }
 
