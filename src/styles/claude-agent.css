@@ -4,6 +4,7 @@
 
 .claude-agent-panel {
   --claude-font-size: 13px;
+  --claude-font-family: 'Cascadia Code', 'SF Mono', Consolas, monospace;
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -89,7 +90,7 @@
 }
 .claude-active-task-time {
   font-size: calc(var(--claude-font-size) - 2px);
-  font-family: 'Cascadia Code', 'SF Mono', Consolas, monospace;
+  font-family: var(--claude-font-family);
   color: var(--claude-accent);
   opacity: 0.8;
   margin-left: auto;
@@ -424,7 +425,7 @@
 }
 
 .claude-tool-name {
-  font-family: 'Cascadia Code', 'SF Mono', Consolas, monospace;
+  font-family: var(--claude-font-family);
   color: var(--claude-accent);
   font-weight: 600;
   font-size: calc(var(--claude-font-size) - 1px);
@@ -432,7 +433,7 @@
 
 .claude-tool-summary {
   color: #bbb;
-  font-family: 'Cascadia Code', 'SF Mono', Consolas, monospace;
+  font-family: var(--claude-font-family);
   font-size: calc(var(--claude-font-size) - 2px);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -478,7 +479,7 @@
   border-radius: 3px;
   background: var(--bg-hover);
   color: var(--text-secondary);
-  font-family: 'Cascadia Code', 'SF Mono', Consolas, monospace;
+  font-family: var(--claude-font-family);
 }
 
 /* Task tool card */
@@ -494,7 +495,7 @@
   border-radius: 3px;
   background: var(--bg-hover);
   color: var(--text-secondary);
-  font-family: 'Cascadia Code', 'SF Mono', Consolas, monospace;
+  font-family: var(--claude-font-family);
 }
 .claude-task-prompt,
 .claude-task-result {
@@ -516,7 +517,7 @@
 .claude-task-section-label {
   font-size: calc(var(--claude-font-size) - 3px);
   font-weight: 600;
-  font-family: 'Cascadia Code', 'SF Mono', Consolas, monospace;
+  font-family: var(--claude-font-family);
   color: var(--text-secondary);
   letter-spacing: 0.5px;
 }
@@ -524,7 +525,7 @@
   padding: 0 10px 8px;
   margin: 0;
   font-size: calc(var(--claude-font-size) - 1px);
-  font-family: 'Cascadia Code', 'SF Mono', Consolas, monospace;
+  font-family: var(--claude-font-family);
   color: var(--text-primary);
   white-space: pre-wrap;
   word-break: break-word;
@@ -533,7 +534,7 @@
 .claude-task-result-text {
   padding: 0 10px 8px;
   font-size: calc(var(--claude-font-size) - 1px);
-  font-family: 'Cascadia Code', 'SF Mono', Consolas, monospace;
+  font-family: var(--claude-font-family);
   color: var(--text-primary);
   white-space: pre-wrap;
   word-break: break-word;
@@ -699,7 +700,7 @@
   border-radius: 6px;
   overflow: hidden;
   margin-top: 4px;
-  font-family: 'Cascadia Code', 'SF Mono', Consolas, monospace;
+  font-family: var(--claude-font-family);
   font-size: calc(var(--claude-font-size) - 1px);
   line-height: 1.5;
 }
@@ -818,7 +819,7 @@
 }
 
 .claude-tool-row-label {
-  font-family: 'Cascadia Code', 'SF Mono', Consolas, monospace;
+  font-family: var(--claude-font-family);
   font-size: calc(var(--claude-font-size) - 2px);
   font-weight: 600;
   color: #aaa;
@@ -828,7 +829,7 @@
 }
 
 .claude-tool-row-content {
-  font-family: 'Cascadia Code', 'SF Mono', Consolas, monospace;
+  font-family: var(--claude-font-family);
   font-size: calc(var(--claude-font-size) - 1px);
   color: #e0e0e0;
   flex: 1;
@@ -887,7 +888,7 @@
 
 .claude-tool-input pre,
 .claude-tool-result pre {
-  font-family: 'Cascadia Code', 'SF Mono', Consolas, monospace;
+  font-family: var(--claude-font-family);
   font-size: calc(var(--claude-font-size) - 2px);
   color: var(--text-primary);
   background: var(--bg-secondary);
@@ -956,7 +957,7 @@
   display: flex;
   align-items: center;
   gap: 2px;
-  font-family: 'Cascadia Code', 'SF Mono', Consolas, monospace;
+  font-family: var(--claude-font-family);
   font-size: calc(var(--claude-font-size) - 2px);
   color: var(--text-secondary);
 }
@@ -968,7 +969,7 @@
 }
 
 .claude-input-meta {
-  font-family: 'Cascadia Code', 'SF Mono', Consolas, monospace;
+  font-family: var(--claude-font-family);
   font-size: calc(var(--claude-font-size) - 3px);
   color: var(--text-secondary);
   cursor: default;
@@ -1112,7 +1113,7 @@
 }
 
 .claude-permission-title strong {
-  font-family: 'Cascadia Code', 'SF Mono', Consolas, monospace;
+  font-family: var(--claude-font-family);
   color: var(--claude-accent);
 }
 
@@ -1129,7 +1130,7 @@
 }
 
 .claude-permission-command {
-  font-family: 'Cascadia Code', 'SF Mono', Consolas, monospace;
+  font-family: var(--claude-font-family);
   font-size: calc(var(--claude-font-size) - 1px);
   color: var(--text-secondary);
   margin-bottom: 4px;
@@ -1432,7 +1433,7 @@
 }
 
 .claude-resume-item-id {
-  font-family: 'Cascadia Code', 'SF Mono', Consolas, monospace;
+  font-family: var(--claude-font-family);
   font-size: calc(var(--claude-font-size) - 1px);
   color: var(--claude-accent);
   font-weight: 600;
