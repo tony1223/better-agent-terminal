@@ -168,7 +168,10 @@ export const AGENT_COMMAND_OPTIONS: { id: AgentCommandType; name: string; comman
   { id: 'custom', name: 'Custom', command: '' },
 ];
 
+export type LanguageCode = 'en' | 'zh-TW';
+
 export interface AppSettings {
+  language: LanguageCode;
   shell: ShellType;
   customShellPath: string;
   fontSize: number;

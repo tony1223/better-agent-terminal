@@ -1,8 +1,11 @@
+import { useTranslation } from 'react-i18next'
+
 interface AboutPanelProps {
   onClose: () => void
 }
 
 export function AboutPanel({ onClose }: AboutPanelProps) {
+  const { t } = useTranslation()
   const handleLinkClick = (url: string) => {
     window.electronAPI.shell.openExternal(url)
   }
@@ -11,27 +14,27 @@ export function AboutPanel({ onClose }: AboutPanelProps) {
     <div className="settings-overlay" onClick={onClose}>
       <div className="settings-panel about-panel" onClick={e => e.stopPropagation()}>
         <div className="settings-header">
-          <h2>About</h2>
+          <h2>{t('about.title')}</h2>
           <button className="close-btn" onClick={onClose}>×</button>
         </div>
 
         <div className="settings-content about-content">
           <div className="about-logo">
             <span className="about-icon">⬛</span>
-            <h1>Better Agent Terminal</h1>
+            <h1>{t('about.appName')}</h1>
           </div>
 
           <p className="about-description">
-            A cross-platform terminal aggregator with multi-workspace support and AI code agent integration.
+            {t('about.description')}
           </p>
 
           <div className="about-info">
             <div className="about-row">
-              <span className="about-label">Author</span>
-              <span className="about-value">TonyQ</span>
+              <span className="about-label">{t('about.author')}</span>
+              <span className="about-value">{t('about.authorName')}</span>
             </div>
             <div className="about-row">
-              <span className="about-label">GitHub</span>
+              <span className="about-label">{t('about.github')}</span>
               <a
                 href="#"
                 className="about-link"
@@ -46,7 +49,7 @@ export function AboutPanel({ onClose }: AboutPanelProps) {
           </div>
 
           <div className="about-credits">
-            <p>Built with Electron, React, and xterm.js</p>
+            <p>{t('about.builtWith')}</p>
           </div>
         </div>
       </div>

@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { useTranslation } from 'react-i18next'
 
 interface ReleaseInfo {
   version: string
@@ -16,6 +17,7 @@ interface UpdateCheckResult {
 }
 
 export function UpdateNotification() {
+  const { t } = useTranslation()
   const [updateInfo, setUpdateInfo] = useState<UpdateCheckResult | null>(null)
   const [dismissed, setDismissed] = useState(false)
   const [checking, setChecking] = useState(true)
@@ -58,20 +60,20 @@ export function UpdateNotification() {
     <div className="update-notification-overlay">
       <div className="update-notification">
         <div className="update-header">
-          <h3>New Version Available!</h3>
+          <h3>{t('update.newVersionAvailable')}</h3>
           <button className="close-btn" onClick={() => setDismissed(true)}>×</button>
         </div>
 
         <div className="update-content">
           <div className="version-info">
-            <span className="current-version">Current: v{currentVersion}</span>
+            <span className="current-version">{t('update.currentVersion', { version: currentVersion })}</span>
             <span className="arrow">→</span>
-            <span className="new-version">New: {latestRelease.tagName}</span>
+            <span className="new-version">{t('update.newVersion', { version: latestRelease.tagName })}</span>
           </div>
 
           {changelogLines && (
             <div className="changelog">
-              <h4>What's New:</h4>
+              <h4>{t('update.whatsNew')}</h4>
               <pre>{changelogLines}</pre>
             </div>
           )}
@@ -79,7 +81,7 @@ export function UpdateNotification() {
 
         <div className="update-actions">
           <button className="btn-primary" onClick={handleViewRelease}>
-            View on GitHub
+            {t('update.viewOnGithub')}
           </button>
         </div>
       </div>

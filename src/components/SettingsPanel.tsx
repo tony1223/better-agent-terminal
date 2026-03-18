@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback } from 'react'
+import { useTranslation } from 'react-i18next'
+import i18next from 'i18next'
 import QRCode from 'qrcode'
-import type { AppSettings, ShellType, FontType, ColorPresetId, StatuslineItemConfig } from '../types'
+import type { AppSettings, ShellType, FontType, ColorPresetId, StatuslineItemConfig, LanguageCode } from '../types'
 import { FONT_OPTIONS, COLOR_PRESETS, SHELL_OPTIONS, STATUSLINE_ITEMS } from '../types'
 import { settingsStore, parseStatuslineTemplate, exportStatuslineTemplate } from '../stores/settings-store'
 import { EnvVarEditor } from './EnvVarEditor'
@@ -35,6 +37,7 @@ interface RemoteClientStatus {
 }
 
 export function SettingsPanel({ onClose }: SettingsPanelProps) {
+  const { t } = useTranslation()
   const [settings, setSettings] = useState<AppSettings>(settingsStore.getSettings())
   const [availableFonts, setAvailableFonts] = useState<Set<FontType>>(new Set())
 
@@ -140,7 +143,7 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
   const handleStartServer = async () => {
     const result = await window.electronAPI.remote.startServer(parseInt(serverPort) || 9876)
     if ('error' in result) {
-      alert(`Failed to start server: ${result.error}`)
+      alert(t('settings.failedToStartServer', { error: result.error }))
     } else {
       setServerToken(result.token)
       setServerPort(String(result.port))
@@ -195,15 +198,33 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
     <div className="settings-overlay" onClick={onClose}>
       <div className="settings-panel" onClick={e => e.stopPropagation()}>
         <div className="settings-header">
-          <h2>Settings</h2>
+          <h2>{t('settings.title')}</h2>
           <button className="close-btn" onClick={onClose}>×</button>
         </div>
 
         <div className="settings-content">
           <div className="settings-section">
-            <h3>Shell</h3>
+            <h3>{t('settings.language')}</h3>
             <div className="settings-group">
-              <label>Default Shell</label>
+              <label>{t('settings.language')}</label>
+              <select
+                value={settings.language || 'en'}
+                onChange={e => {
+                  const value = e.target.value as LanguageCode
+                  settingsStore.setLanguage(value)
+                  i18next.changeLanguage(value)
+                }}
+              >
+                <option value="en">English</option>
+                <option value="zh-TW">繁體中文（台灣）</option>
+              </select>
+            </div>
+          </div>
+
+          <div className="settings-section">
+            <h3>{t('settings.shell')}</h3>
+            <div className="settings-group">
+              <label>{t('settings.defaultShell')}</label>
               <select
                 value={settings.shell}
                 onChange={e => handleShellChange(e.target.value as ShellType)}
@@ -216,7 +237,7 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
 
             {settings.shell === 'custom' && (
               <div className="settings-group">
-                <label>Custom Shell Path</label>
+                <label>{t('settings.customShellPath')}</label>
                 <input
                   type="text"
                   value={settings.customShellPath}
@@ -227,7 +248,7 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
             )}
 
             <div className="settings-group">
-              <label>Default Terminals per Workspace: {settings.defaultTerminalCount || 1}</label>
+              <label>{t('settings.defaultTerminalCount', { count: settings.defaultTerminalCount || 1 })}</label>
               <input
                 type="range"
                 min="1"
@@ -244,15 +265,15 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
                   checked={settings.createDefaultAgentTerminal === true}
                   onChange={e => settingsStore.setCreateDefaultAgentTerminal(e.target.checked)}
                 />
-                Create Agent Terminal by default
+                {t('settings.createAgentTerminalByDefault')}
               </label>
-              <p className="settings-hint">When enabled, new workspaces will include an Agent Terminal.</p>
+              <p className="settings-hint">{t('settings.createAgentTerminalHint')}</p>
             </div>
 
             {settings.createDefaultAgentTerminal && (
               <>
                 <div className="settings-group">
-                  <label>Default Agent</label>
+                  <label>{t('settings.defaultAgent')}</label>
                   <select
                     value={settings.defaultAgent || 'claude-code'}
                     onChange={e => settingsStore.setDefaultAgent(e.target.value as AgentPresetId)}
@@ -272,9 +293,9 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
                       checked={settings.agentAutoCommand === true}
                       onChange={e => settingsStore.setAgentAutoCommand(e.target.checked)}
                     />
-                    Auto-run agent command
+                    {t('settings.autoRunAgentCommand')}
                   </label>
-                  <p className="settings-hint">Automatically execute the agent command (e.g., `claude`) when creating an Agent Terminal.</p>
+                  <p className="settings-hint">{t('settings.autoRunAgentCommandHint')}</p>
                 </div>
               </>
             )}
@@ -286,16 +307,16 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
                   checked={settings.allowBypassPermissions === true}
                   onChange={e => settingsStore.setAllowBypassPermissions(e.target.checked)}
                 />
-                Allow bypass permissions without confirmation
+                {t('settings.allowBypassPermissions')}
               </label>
-              <p className="settings-hint">When enabled, switching to bypassPermissions mode in Claude Agent Panel will not show a confirmation dialog. Use with caution.</p>
+              <p className="settings-hint">{t('settings.allowBypassPermissionsHint')}</p>
             </div>
           </div>
 
           <div className="settings-section">
-            <h3>Appearance</h3>
+            <h3>{t('settings.appearance')}</h3>
             <div className="settings-group">
-              <label>Font Size: {settings.fontSize}px</label>
+              <label>{t('settings.fontSize', { size: settings.fontSize })}</label>
               <input
                 type="range"
                 min="10"
@@ -306,14 +327,14 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
             </div>
 
             <div className="settings-group">
-              <label>Font Family</label>
+              <label>{t('settings.fontFamily')}</label>
               <select
                 value={settings.fontFamily}
                 onChange={e => handleFontFamilyChange(e.target.value as FontType)}
               >
                 {FONT_OPTIONS.map(font => (
                   <option key={font.id} value={font.id} disabled={!availableFonts.has(font.id) && font.id !== 'custom'}>
-                    {font.name} {availableFonts.has(font.id) ? '✓' : '(not installed)'}
+                    {font.name} {availableFonts.has(font.id) ? '✓' : t('settings.fontNotInstalled')}
                   </option>
                 ))}
               </select>
@@ -321,18 +342,18 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
 
             {settings.fontFamily === 'custom' && (
               <div className="settings-group">
-                <label>Custom Font Name</label>
+                <label>{t('settings.customFontName')}</label>
                 <input
                   type="text"
                   value={settings.customFontFamily}
                   onChange={e => handleCustomFontFamilyChange(e.target.value)}
-                  placeholder="e.g., Fira Code, JetBrains Mono"
+                  placeholder={t('settings.customFontPlaceholder')}
                 />
               </div>
             )}
 
             <div className="settings-group">
-              <label>Color Theme</label>
+              <label>{t('settings.colorTheme')}</label>
               <select
                 value={settings.colorPreset}
                 onChange={e => handleColorPresetChange(e.target.value as ColorPresetId)}
@@ -348,7 +369,7 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
             {settings.colorPreset === 'custom' && (
               <>
                 <div className="settings-group color-picker-group">
-                  <label>Background Color</label>
+                  <label>{t('settings.backgroundColor')}</label>
                   <div className="color-input-wrapper">
                     <input
                       type="color"
@@ -365,7 +386,7 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
                 </div>
 
                 <div className="settings-group color-picker-group">
-                  <label>Text Color</label>
+                  <label>{t('settings.textColor')}</label>
                   <div className="color-input-wrapper">
                     <input
                       type="color"
@@ -382,7 +403,7 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
                 </div>
 
                 <div className="settings-group color-picker-group">
-                  <label>Cursor Color</label>
+                  <label>{t('settings.cursorColor')}</label>
                   <div className="color-input-wrapper">
                     <input
                       type="color"
@@ -401,7 +422,7 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
             )}
 
             <div className="settings-group font-preview">
-              <label>Preview</label>
+              <label>{t('common.preview')}</label>
               <div
                 className="font-preview-box"
                 style={{
@@ -418,9 +439,9 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
 
           {/* Statusline Configuration */}
           <div className="settings-section">
-            <h3>Statusline</h3>
+            <h3>{t('settings.statusline')}</h3>
             <p className="settings-hint" style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '8px' }}>
-              Drag to reorder, toggle visibility. Hover for description. Use L/C/R for alignment. Use &gt; for separator.
+              {t('settings.statuslineHint')}
             </p>
             <div className="statusline-config-list">
               {slItems.map(item => {
@@ -475,7 +496,7 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
                         const updated = slItems.map(i => i.id === item.id ? { ...i, separatorAfter: !i.separatorAfter } : i)
                         setSlItems(updated); settingsStore.setStatuslineItems(updated)
                       }}
-                      title="Toggle separator after this item"
+                      title={t('settings.statuslineToggleSeparator')}
                     >&gt;</button>
                     <span className="statusline-color-swatches">
                       {['', '#e06c75', '#e5c07b', '#98c379', '#56b6c2', '#61afef', '#c678dd', '#d19a66', '#abb2bf'].map(c => (
@@ -498,7 +519,7 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
                           const updated = slItems.map(i => i.id === item.id ? { ...i, color: e.target.value } : i)
                           setSlItems(updated); settingsStore.setStatuslineItems(updated)
                         }}
-                        title="Custom color"
+                        title={t('settings.statuslineCustomColor')}
                       />
                     </span>
                     <label className="statusline-config-toggle">
@@ -533,8 +554,8 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
                     const parsed = parseStatuslineTemplate(slImportText.trim())
                     setSlItems(parsed); settingsStore.setStatuslineItems(parsed)
                     setSlImporting(false); setSlImportText('')
-                  }}>Apply</button>
-                  <button className="statusline-template-btn" onClick={() => { setSlImporting(false); setSlImportText('') }}>Cancel</button>
+                  }}>{t('common.apply')}</button>
+                  <button className="statusline-template-btn" onClick={() => { setSlImporting(false); setSlImportText('') }}>{t('common.cancel')}</button>
                 </>
               ) : (
                 <>
@@ -542,23 +563,23 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
                     readOnly
                     value={exportStatuslineTemplate(slItems)}
                     style={{ flex: 1, fontSize: '11px', padding: '3px 6px', background: 'var(--bg-tertiary)', border: '1px solid var(--border-color)', borderRadius: '3px', color: 'var(--text-secondary)' }}
-                    title="Current template string"
+                    title={t('settings.statuslineCurrentTemplate')}
                   />
-                  <button className="statusline-template-btn" onClick={() => navigator.clipboard.writeText(exportStatuslineTemplate(slItems))}>Copy</button>
-                  <button className="statusline-template-btn" onClick={() => setSlImporting(true)}>Import</button>
+                  <button className="statusline-template-btn" onClick={() => navigator.clipboard.writeText(exportStatuslineTemplate(slItems))}>{t('common.copy')}</button>
+                  <button className="statusline-template-btn" onClick={() => setSlImporting(true)}>{t('common.import')}</button>
                   <button className="statusline-template-btn" onClick={() => {
                     settingsStore.setStatuslineItems(undefined as unknown as StatuslineItemConfig[])
                     setSlItems(settingsStore.getStatuslineItems())
-                  }}>Reset</button>
+                  }}>{t('common.reset')}</button>
                 </>
               )}
             </div>
           </div>
 
           <div className="settings-section">
-            <h3>Environment Variables</h3>
+            <h3>{t('settings.environmentVariables')}</h3>
             <p className="settings-hint" style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '8px' }}>
-              Global environment variables applied to ALL workspaces. Workspace-specific variables (⚙ button) will override these.
+              {t('settings.globalEnvVarsHint')}
             </p>
             <EnvVarEditor
               envVars={settings.globalEnvVars || []}
@@ -568,27 +589,27 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
             />
           </div>
           <div className="settings-section">
-            <h3>Remote Access</h3>
+            <h3>{t('settings.remoteAccess')}</h3>
             <p className="settings-hint" style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '8px' }}>
-              允許其他 BAT 實例或行動裝置遠端連線控制此主機。詳見{' '}
+              {t('settings.remoteAccessHint')}{' '}
               <a href="https://github.com/tony1223/better-agent-terminal#remote-access--mobile-connect"
                 style={{ color: '#58a6ff' }}
                 onClick={e => { e.preventDefault(); window.electronAPI?.shell?.openExternal?.(e.currentTarget.href) || window.open(e.currentTarget.href) }}>
-                README
+                {t('settings.remoteAccessReadme')}
               </a>。
             </p>
 
             {serverStatus.running ? (
               <>
                 <div className="settings-group" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <span style={{ color: '#3fb950', fontSize: 12 }}>Server running on port {serverStatus.port}</span>
+                  <span style={{ color: '#3fb950', fontSize: 12 }}>{t('settings.serverRunningOnPort', { port: serverStatus.port })}</span>
                   <button className="profile-action-btn danger" onClick={handleStopServer} style={{ marginLeft: 'auto' }}>
-                    Stop Server
+                    {t('settings.stopServer')}
                   </button>
                 </div>
                 {serverToken && (
                   <div className="settings-group">
-                    <label>Connection Token</label>
+                    <label>{t('settings.connectionToken')}</label>
                     <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                       <input
                         type="text"
@@ -602,17 +623,17 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
                         onClick={() => navigator.clipboard.writeText(serverToken)}
                         title="Copy token"
                       >
-                        Copy
+                        {t('common.copy')}
                       </button>
                     </div>
                   </div>
                 )}
                 {serverStatus.clients.length > 0 && (
                   <div className="settings-group">
-                    <label>Connected Clients ({serverStatus.clients.length})</label>
+                    <label>{t('settings.connectedClients', { count: serverStatus.clients.length })}</label>
                     {serverStatus.clients.map((c, i) => (
                       <div key={i} style={{ fontSize: 12, color: '#aaa', padding: '2px 0' }}>
-                        {c.label} — connected {new Date(c.connectedAt).toLocaleTimeString()}
+                        {c.label} — {t('settings.connectedAt', { time: new Date(c.connectedAt).toLocaleTimeString() })}
                       </div>
                     ))}
                   </div>
@@ -625,15 +646,15 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
                     type="number"
                     value={serverPort}
                     onChange={e => setServerPort(e.target.value)}
-                    placeholder="Port"
+                    placeholder={t('settings.port')}
                     style={{ width: 80 }}
                   />
                   <button className="profile-action-btn primary" onClick={handleStartServer}>
-                    Start Server
+                    {t('settings.startServer')}
                   </button>
                 </div>
                 <p style={{ fontSize: 11, color: '#d29922', marginTop: 6, lineHeight: 1.4 }}>
-                  ⚠ 啟動後任何持有 Token 的裝置皆可完整控制此主機上的 BAT。請確認網路環境安全。
+                  {t('settings.serverWarning')}
                 </p>
               </div>
             )}
@@ -641,25 +662,24 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
             {clientStatus.connected && clientStatus.info && (
               <div className="settings-group" style={{ marginTop: 8 }}>
                 <span style={{ color: '#58a6ff', fontSize: 12 }}>
-                  Connected to remote: {clientStatus.info.host}:{clientStatus.info.port}
+                  {t('settings.connectedToRemote', { host: clientStatus.info.host, port: clientStatus.info.port })}
                 </span>
               </div>
             )}
 
             <div className="settings-group" style={{ marginTop: 12, borderTop: '1px solid var(--border)', paddingTop: 12 }}>
-              <label>Mobile Connect <span style={{ fontSize: 10, color: '#d29922', fontWeight: 'normal' }}>(Experimental)</span></label>
+              <label>{t('settings.mobileConnect')} <span style={{ fontSize: 10, color: '#d29922', fontWeight: 'normal' }}>{t('settings.mobileConnectExperimental')}</span></label>
               <p style={{ fontSize: 11, color: '#8b949e', marginTop: 2, marginBottom: 6, lineHeight: 1.4 }}>
-                產生 QR Code 供遠端裝置掃描連線，可遠端控制此主機上的 BAT。
-                目前也可透過其他 Better Agent Terminal 以 Remote Profile 方式連入。建議搭配{' '}
+                {t('settings.mobileConnectHint')}{' '}
                 <a href="https://tailscale.com/" style={{ color: '#58a6ff' }}
                   onClick={e => { e.preventDefault(); window.electronAPI?.shell?.openExternal?.(e.currentTarget.href) || window.open(e.currentTarget.href) }}>
                   Tailscale
-                </a>{' '}使用。
-                詳見{' '}
+                </a>{' '}
+                {t('settings.mobileConnectSeeReadme')}{' '}
                 <a href="https://github.com/tony1223/better-agent-terminal#remote-access--mobile-connect"
                   style={{ color: '#58a6ff' }}
                   onClick={e => { e.preventDefault(); window.electronAPI?.shell?.openExternal?.(e.currentTarget.href) || window.open(e.currentTarget.href) }}>
-                  README
+                  {t('settings.remoteAccessReadme')}
                 </a>。
               </p>
               {!qrDataUrl ? (
@@ -670,10 +690,10 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
                     disabled={qrLoading}
                     style={{ marginTop: 4 }}
                   >
-                    {qrLoading ? 'Generating...' : 'Generate QR Code'}
+                    {qrLoading ? t('settings.generating') : t('settings.generateQrCode')}
                   </button>
                   <p style={{ fontSize: 11, color: '#d29922', marginTop: 6, lineHeight: 1.4 }}>
-                    ⚠ 這會啟動 WebSocket Server 允許外部連入，請確認你的網路環境安全後再使用。
+                    {t('settings.qrWarning')}
                   </p>
                   {qrError && (
                     <p style={{ fontSize: 11, color: '#f85149', marginTop: 4 }}>{qrError}</p>
@@ -706,14 +726,14 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
                     {qrInfo?.url}
                   </p>
                   <p style={{ fontSize: 11, color: qrInfo?.mode === 'tailscale' ? '#3fb950' : '#d29922', marginTop: 2 }}>
-                    {qrInfo?.mode === 'tailscale' ? 'via Tailscale' : 'LAN only — 手機需在同一網段'}
+                    {qrInfo?.mode === 'tailscale' ? t('settings.viaTailscale') : t('settings.lanOnly')}
                   </p>
                   <button
                     className="profile-action-btn"
                     onClick={() => { setQrDataUrl(null); setQrInfo(null); setQrAddresses([]) }}
                     style={{ marginTop: 8 }}
                   >
-                    Close
+                    {t('common.close')}
                   </button>
                 </div>
               )}
@@ -722,7 +742,7 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
         </div>
 
         <div className="settings-footer">
-          <p className="settings-note">Changes are saved automatically. Font changes apply immediately to all terminals.</p>
+          <p className="settings-note">{t('settings.footerNote')}</p>
         </div>
       </div>
     </div>

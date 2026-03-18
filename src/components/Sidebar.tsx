@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback } from 'react'
+import { useTranslation } from 'react-i18next'
 import type { Workspace } from '../types'
 import { workspaceStore } from '../stores/workspace-store'
 import { ActivityIndicator } from './ActivityIndicator'
@@ -44,6 +45,7 @@ export function Sidebar({
   onOpenProfiles,
   onOpenSettings,
 }: Readonly<SidebarProps>) {
+  const { t } = useTranslation()
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
   const [draggedId, setDraggedId] = useState<string | null>(null)
@@ -245,11 +247,11 @@ export function Sidebar({
   return (
     <aside className="sidebar" style={{ width }}>
       <div className="sidebar-header">
-        <span>Workspaces</span>
+        <span>{t('sidebar.workspaces')}</span>
         <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
           {isRemoteConnected && (
             <span
-              title="Connected to remote host"
+              title={t('sidebar.connectedToRemote')}
               style={{ color: '#58a6ff', fontSize: 12, lineHeight: 1 }}
             >
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -261,7 +263,7 @@ export function Sidebar({
             <span
               className="sidebar-profile-badge"
               onClick={onOpenProfiles}
-              title="Click to manage profiles"
+              title={t('sidebar.clickToManageProfiles')}
             >
               {activeProfileName}
             </span>
@@ -275,7 +277,7 @@ export function Sidebar({
             value={activeGroup || ''}
             onChange={(e) => onSetActiveGroup(e.target.value || null)}
           >
-            <option value="">All</option>
+            <option value="">{t('sidebar.all')}</option>
             {groups.map(g => (
               <option key={g} value={g}>{g}</option>
             ))}
@@ -297,7 +299,7 @@ export function Sidebar({
             onDrop={(e) => handleDrop(e, workspace.id)}
           >
             <div className="workspace-item-content">
-              <div className="drag-handle" title="Drag to reorder">
+              <div className="drag-handle" title={t('sidebar.dragToReorder')}>
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
                   <circle cx="9" cy="6" r="2"/>
                   <circle cx="15" cy="6" r="2"/>
@@ -335,7 +337,7 @@ export function Sidebar({
                         onBlur={handleGroupEditSubmit}
                         onKeyDown={handleGroupEditKeyDown}
                         onClick={(e) => e.stopPropagation()}
-                        placeholder="Group name (empty to remove)"
+                        placeholder={t('sidebar.groupNamePlaceholder')}
                         style={{ fontSize: '11px' }}
                       />
                     ) : (
@@ -359,14 +361,14 @@ export function Sidebar({
       </div>
       <div className="sidebar-footer">
         <button className="add-workspace-btn" onClick={onAddWorkspace}>
-          + Add Workspace
+          {t('sidebar.addWorkspace')}
         </button>
         <div className="sidebar-footer-buttons">
           <button className="settings-btn" onClick={onOpenProfiles}>
-            Profiles
+            {t('sidebar.profiles')}
           </button>
           <button className="settings-btn" onClick={onOpenSettings}>
-            Settings
+            {t('sidebar.settings')}
           </button>
         </div>
       </div>
@@ -393,7 +395,7 @@ export function Sidebar({
               <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
               <polyline points="10 13 14 9 10 5" />
             </svg>
-            Open in Explorer
+            {t('sidebar.openInExplorer')}
           </div>
           {githubUrl && (
             <div
@@ -406,7 +408,7 @@ export function Sidebar({
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22" />
               </svg>
-              Open on GitHub
+              {t('sidebar.openOnGithub')}
             </div>
           )}
           <div
@@ -416,7 +418,7 @@ export function Sidebar({
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
             </svg>
-            Set Group...
+            {t('sidebar.setGroup')}
           </div>
           <div
             className="context-menu-item"
@@ -429,7 +431,7 @@ export function Sidebar({
               <circle cx="12" cy="12" r="3" />
               <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
             </svg>
-            Environment Variables
+            {t('sidebar.environmentVariables')}
           </div>
           <div
             className="context-menu-item"
@@ -443,7 +445,7 @@ export function Sidebar({
               <line x1="8" y1="21" x2="16" y2="21" />
               <line x1="12" y1="17" x2="12" y2="21" />
             </svg>
-            Detach to Window
+            {t('sidebar.detachToWindow')}
           </div>
           {(() => {
             const agent = workspaceStore.getAgentTerminal(contextMenu.workspaceId)
@@ -472,7 +474,7 @@ export function Sidebar({
                     </>
                   )}
                 </svg>
-                {agentResting ? 'Wake Agent' : 'Rest Agent'}
+                {agentResting ? t('sidebar.wakeAgent') : t('sidebar.restAgent')}
               </div>
             )
           })()}
@@ -489,7 +491,7 @@ export function Sidebar({
               <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
               <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
             </svg>
-            Close Workspace
+            {t('sidebar.closeWorkspace')}
           </div>
         </div>
       )}

@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import type { EnvVariable } from '../types'
 
 interface EnvVarEditorProps {
@@ -9,6 +10,7 @@ interface EnvVarEditorProps {
 }
 
 export function EnvVarEditor({ envVars, onAdd, onRemove, onUpdate }: Readonly<EnvVarEditorProps>) {
+    const { t } = useTranslation()
     const [newKey, setNewKey] = useState('')
     const [newValue, setNewValue] = useState('')
     const [editingKey, setEditingKey] = useState<string | null>(null)
@@ -17,7 +19,7 @@ export function EnvVarEditor({ envVars, onAdd, onRemove, onUpdate }: Readonly<En
         if (newKey.trim() && newValue.trim()) {
             // Check for duplicate key
             if (envVars.some(e => e.key === newKey.trim())) {
-                alert('Environment variable name already exists')
+                alert(t('envVars.duplicateKey'))
                 return
             }
             onAdd({ key: newKey.trim(), value: newValue.trim(), enabled: true })
@@ -37,7 +39,7 @@ export function EnvVarEditor({ envVars, onAdd, onRemove, onUpdate }: Readonly<En
             <div className="env-var-list">
                 {envVars.length === 0 ? (
                     <div className="env-var-empty">
-                        No environment variables configured
+                        {t('envVars.noEnvVars')}
                     </div>
                 ) : (
                     envVars.map(envVar => (
@@ -86,7 +88,7 @@ export function EnvVarEditor({ envVars, onAdd, onRemove, onUpdate }: Readonly<En
                             <button
                                 className="env-var-delete"
                                 onClick={() => onRemove(envVar.key)}
-                                title="Delete"
+                                title={t('common.delete')}
                             >
                                 ×
                             </button>
@@ -98,7 +100,7 @@ export function EnvVarEditor({ envVars, onAdd, onRemove, onUpdate }: Readonly<En
             <div className="env-var-add">
                 <input
                     type="text"
-                    placeholder="Variable name"
+                    placeholder={t('envVars.variableName')}
                     value={newKey}
                     onChange={e => setNewKey(e.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, ''))}
                     onKeyPress={handleKeyPress}
@@ -106,7 +108,7 @@ export function EnvVarEditor({ envVars, onAdd, onRemove, onUpdate }: Readonly<En
                 />
                 <input
                     type="text"
-                    placeholder="Value"
+                    placeholder={t('envVars.value')}
                     value={newValue}
                     onChange={e => setNewValue(e.target.value)}
                     onKeyPress={handleKeyPress}

@@ -26,9 +26,11 @@
     "@xterm/xterm": "^5.5.0",
     "better-sqlite3": "^12.5.0",
     "highlight.js": "^11.11.1",
+    "i18next": "^25.8.18",
     "qrcode": "^1.5.4",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
+    "react-i18next": "^16.5.8",
     "uuid": "^9.0.0",
     "ws": "^8.19.0"
   },
@@ -90,7 +92,14 @@
         "arch": "universal"
       },
       "icon": "assets/icon.png",
-      "category": "public.app-category.developer-tools"
+      "category": "public.app-category.developer-tools",
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "extendInfo": {
+        "NSDocumentsFolderUsageDescription": "BetterAgentTerminal needs access to your Documents folder to open terminals and manage files in your projects.",
+        "NSDesktopFolderUsageDescription": "BetterAgentTerminal needs access to your Desktop folder to open terminals and manage files in your projects.",
+        "NSDownloadsFolderUsageDescription": "BetterAgentTerminal needs access to your Downloads folder to open terminals and manage files in your projects."
+      }
     },
     "linux": {
       "target": "AppImage",

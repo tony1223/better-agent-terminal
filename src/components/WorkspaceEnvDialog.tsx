@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next'
 import type { Workspace, EnvVariable } from '../types'
 import { EnvVarEditor } from './EnvVarEditor'
 
@@ -16,17 +17,18 @@ export function WorkspaceEnvDialog({
     onUpdate,
     onClose
 }: Readonly<WorkspaceEnvDialogProps>) {
+    const { t } = useTranslation()
     return (
         <div className="dialog-overlay" onClick={onClose}>
             <div className="workspace-env-dialog" onClick={e => e.stopPropagation()}>
                 <div className="dialog-header">
-                    <h2>Environment Variables</h2>
+                    <h2>{t('envVars.title')}</h2>
                     <span className="dialog-subtitle">{workspace.alias || workspace.name}</span>
                     <button className="dialog-close-btn" onClick={onClose}>×</button>
                 </div>
                 <div className="dialog-content">
                     <p className="env-dialog-hint">
-                        Configure environment variables for this workspace. These will be applied to all terminals in this workspace.
+                        {t('envVars.workspaceHint')}
                     </p>
                     <EnvVarEditor
                         envVars={workspace.envVars || []}

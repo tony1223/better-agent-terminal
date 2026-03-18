@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
+import { useTranslation } from 'react-i18next'
 import type { TerminalInstance } from '../types'
 import { TerminalThumbnail } from './TerminalThumbnail'
 import { getAgentPreset } from '../types/agent-presets'
@@ -28,12 +29,13 @@ export function ThumbnailBar({
   collapsed = false,
   onCollapse
 }: ThumbnailBarProps) {
+  const { t } = useTranslation()
   // Check if these are agent terminals or regular terminals
   const firstTerminal = terminals[0]
   const isAgentList = firstTerminal?.agentPreset && firstTerminal.agentPreset !== 'none'
   const label = isAgentList
     ? (getAgentPreset(firstTerminal.agentPreset!)?.name || 'Agent')
-    : 'Terminals'
+    : t('terminal.terminals')
 
   // All hooks must be declared before any conditional return (React rules of hooks)
   const [draggedId, setDraggedId] = useState<string | null>(null)
@@ -126,7 +128,7 @@ export function ThumbnailBar({
       <div
         className="collapsed-bar collapsed-bar-bottom"
         onClick={onCollapse}
-        title="Expand Thumbnails"
+        title={t('terminal.expandThumbnails')}
       >
         <div className="collapsed-bar-icon">🖼️</div>
         <span className="collapsed-bar-label">{label}</span>
@@ -146,7 +148,7 @@ export function ThumbnailBar({
               <button
                 className="thumbnail-add-btn"
                 onClick={() => setShowAddMenu(prev => !prev)}
-                title="Add Terminal or Agent"
+                title={t('terminal.addTerminalOrAgent')}
               >
                 +
               </button>
@@ -157,7 +159,7 @@ export function ThumbnailBar({
                     onClick={() => { onAddTerminal(); setShowAddMenu(false) }}
                   >
                     <span className="thumbnail-add-menu-icon">⌘</span>
-                    Terminal
+                    {t('terminal.terminalLabel')}
                   </div>
                   {onAddClaudeAgent && (
                     <div
@@ -173,7 +175,7 @@ export function ThumbnailBar({
             </div>
           )}
           {onCollapse && (
-            <button className="thumbnail-collapse-btn" onClick={onCollapse} title="Collapse Panel">
+            <button className="thumbnail-collapse-btn" onClick={onCollapse} title={t('terminal.collapsePanel')}>
               ▼
             </button>
           )}

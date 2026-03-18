@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
+import { useTranslation } from 'react-i18next'
 import { settingsStore } from '../stores/settings-store'
 
 interface PromptBoxProps {
@@ -9,6 +10,7 @@ interface PromptBoxProps {
 const historyMap = new Map<string, string[]>()
 
 export function PromptBox({ terminalId }: Readonly<PromptBoxProps>) {
+  const { t } = useTranslation()
   const [text, setText] = useState('')
   const [fontFamily, setFontFamily] = useState(settingsStore.getFontFamilyString())
   const [imagePath, setImagePath] = useState<string | null>(null)
@@ -149,7 +151,7 @@ export function PromptBox({ terminalId }: Readonly<PromptBoxProps>) {
           onChange={handleChange}
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
-          placeholder={imagePath ? 'Add text (optional), Ctrl+Enter to send' : 'Type your prompt here...'}
+          placeholder={imagePath ? t('promptBox.placeholderWithImage') : t('promptBox.placeholder')}
           style={{ fontFamily }}
           rows={3}
         />
@@ -157,7 +159,7 @@ export function PromptBox({ terminalId }: Readonly<PromptBoxProps>) {
           className="prompt-box-send"
           onClick={handleSend}
           disabled={!hasContent}
-          title="Send to terminal (Ctrl+Enter)"
+          title={t('promptBox.sendToTerminal')}
         >
           ▶
         </button>
@@ -166,13 +168,13 @@ export function PromptBox({ terminalId }: Readonly<PromptBoxProps>) {
         {imagePath ? (
           <>
             <span className="prompt-box-image-badge">
-              Image attached
-              <button className="prompt-box-image-remove" onClick={() => setImagePath(null)} title="Remove image">×</button>
+              {t('promptBox.imageAttached')}
+              <button className="prompt-box-image-remove" onClick={() => setImagePath(null)} title={t('promptBox.removeImage')}>×</button>
             </span>
             {' · '}
           </>
         ) : null}
-        Ctrl+Enter to send · Paste images with Ctrl+V · ↑↓ history
+        {t('promptBox.hint')}
       </div>
     </div>
   )

@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { useTranslation } from 'react-i18next'
 
 interface ProfileEntry {
   id: string
@@ -18,6 +19,7 @@ interface ProfilePanelProps {
 }
 
 export function ProfilePanel({ onClose, onSwitch, onSwitchNewWindow }: ProfilePanelProps) {
+  const { t } = useTranslation()
   const [profiles, setProfiles] = useState<ProfileEntry[]>([])
   const [activeProfileId, setActiveProfileId] = useState<string>('default')
   const [creating, setCreating] = useState<'local' | 'remote' | false>(false)
@@ -190,19 +192,19 @@ export function ProfilePanel({ onClose, onSwitch, onSwitchNewWindow }: ProfilePa
     <div className="settings-overlay" onClick={onClose}>
       <div className="settings-panel" onClick={e => e.stopPropagation()} style={{ maxWidth: 520 }}>
         <div className="settings-header">
-          <h2>Profiles</h2>
+          <h2>{t('profiles.title')}</h2>
           <button className="settings-close" onClick={onClose}>&times;</button>
         </div>
         <div className="settings-body" style={{ padding: '16px' }}>
           <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
-            <button className="profile-action-btn" onClick={handleSaveCurrent} title="Save current workspaces to active profile">
-              Save Current
+            <button className="profile-action-btn" onClick={handleSaveCurrent} title={t('profiles.saveCurrent')}>
+              {t('profiles.saveCurrent')}
             </button>
             <button className="profile-action-btn" onClick={() => { setCreating('local'); setNewName('') }}>
-              + Local
+              {t('profiles.addLocal')}
             </button>
             <button className="profile-action-btn" onClick={() => { setCreating('remote'); setNewName('') }}>
-              + Remote
+              {t('profiles.addRemote')}
             </button>
           </div>
 
@@ -212,7 +214,7 @@ export function ProfilePanel({ onClose, onSwitch, onSwitchNewWindow }: ProfilePa
                 ref={createInputRef}
                 type="text"
                 className="profile-name-input"
-                placeholder="Profile name..."
+                placeholder={t('profiles.profileNamePlaceholder')}
                 value={newName}
                 onChange={e => setNewName(e.target.value)}
                 onKeyDown={e => {
@@ -225,7 +227,7 @@ export function ProfilePanel({ onClose, onSwitch, onSwitchNewWindow }: ProfilePa
                   <input
                     type="text"
                     className="profile-name-input"
-                    placeholder="Host (e.g. 192.168.1.100)"
+                    placeholder={t('profiles.hostPlaceholder')}
                     value={remoteHost}
                     onChange={e => setRemoteHost(e.target.value)}
                     style={{ flex: '1 1 120px' }}
@@ -233,7 +235,7 @@ export function ProfilePanel({ onClose, onSwitch, onSwitchNewWindow }: ProfilePa
                   <input
                     type="number"
                     className="profile-name-input"
-                    placeholder="Port"
+                    placeholder={t('profiles.portPlaceholder')}
                     value={remotePort}
                     onChange={e => setRemotePort(e.target.value)}
                     style={{ width: 70 }}
@@ -241,7 +243,7 @@ export function ProfilePanel({ onClose, onSwitch, onSwitchNewWindow }: ProfilePa
                   <input
                     type="text"
                     className="profile-name-input"
-                    placeholder="Token"
+                    placeholder={t('profiles.tokenPlaceholder')}
                     value={remoteToken}
                     onChange={e => setRemoteToken(e.target.value)}
                     onKeyDown={e => { if (e.key === 'Enter') handleCreate() }}
@@ -250,8 +252,8 @@ export function ProfilePanel({ onClose, onSwitch, onSwitchNewWindow }: ProfilePa
                 </div>
               )}
               <div style={{ display: 'flex', gap: 8 }}>
-                <button className="profile-action-btn" onClick={handleCreate}>Create</button>
-                <button className="profile-action-btn" onClick={() => { setCreating(false); setNewName('') }}>Cancel</button>
+                <button className="profile-action-btn" onClick={handleCreate}>{t('common.create')}</button>
+                <button className="profile-action-btn" onClick={() => { setCreating(false); setNewName('') }}>{t('common.cancel')}</button>
               </div>
             </div>
           )}
@@ -284,13 +286,13 @@ export function ProfilePanel({ onClose, onSwitch, onSwitchNewWindow }: ProfilePa
                         {profile.id === activeProfileId && <span className="profile-active-dot" />}
                         {profile.name}
                         {(profile.type === 'remote') && (
-                          <span style={{ fontSize: 10, color: '#58a6ff', marginLeft: 6, opacity: 0.8 }}>REMOTE</span>
+                          <span style={{ fontSize: 10, color: '#58a6ff', marginLeft: 6, opacity: 0.8 }}>{t('profiles.remote')}</span>
                         )}
                       </span>
                       <span className="profile-item-meta">
                         {profile.type === 'remote'
                           ? `${profile.remoteHost}:${profile.remotePort}`
-                          : `Updated ${formatDate(profile.updatedAt)}`}
+                          : t('profiles.updated', { date: formatDate(profile.updatedAt) })}
                       </span>
                     </>
                   )}
@@ -301,7 +303,7 @@ export function ProfilePanel({ onClose, onSwitch, onSwitchNewWindow }: ProfilePa
                     <input
                       type="text"
                       className="profile-name-input"
-                      placeholder="Host"
+                      placeholder={t('profiles.host')}
                       value={editRemoteHost}
                       onChange={e => setEditRemoteHost(e.target.value)}
                       style={{ flex: '1 1 120px' }}
@@ -309,7 +311,7 @@ export function ProfilePanel({ onClose, onSwitch, onSwitchNewWindow }: ProfilePa
                     <input
                       type="number"
                       className="profile-name-input"
-                      placeholder="Port"
+                      placeholder={t('profiles.portPlaceholder')}
                       value={editRemotePort}
                       onChange={e => setEditRemotePort(e.target.value)}
                       style={{ width: 70 }}
@@ -317,15 +319,15 @@ export function ProfilePanel({ onClose, onSwitch, onSwitchNewWindow }: ProfilePa
                     <input
                       type="text"
                       className="profile-name-input"
-                      placeholder="Token"
+                      placeholder={t('profiles.tokenPlaceholder')}
                       value={editRemoteToken}
                       onChange={e => setEditRemoteToken(e.target.value)}
                       onKeyDown={e => { if (e.key === 'Enter') handleSaveRemote(profile.id) }}
                       style={{ flex: '1 1 160px' }}
                     />
                     <div style={{ display: 'flex', gap: 6 }}>
-                      <button className="profile-action-btn" onClick={() => handleSaveRemote(profile.id)}>Save</button>
-                      <button className="profile-action-btn" onClick={() => setEditingRemoteId(null)}>Cancel</button>
+                      <button className="profile-action-btn" onClick={() => handleSaveRemote(profile.id)}>{t('common.save')}</button>
+                      <button className="profile-action-btn" onClick={() => setEditingRemoteId(null)}>{t('common.cancel')}</button>
                     </div>
                   </div>
                 )}
@@ -333,7 +335,7 @@ export function ProfilePanel({ onClose, onSwitch, onSwitchNewWindow }: ProfilePa
                   {profile.type === 'remote' && (
                     <button
                       className={`profile-icon-btn ${testResult[profile.id] === 'ok' ? 'success' : testResult[profile.id] === 'fail' ? 'danger' : ''}`}
-                      title={testResult[profile.id] === 'ok' ? 'Connected' : testResult[profile.id] === 'fail' ? 'Connection failed' : 'Test connection'}
+                      title={testResult[profile.id] === 'ok' ? t('profiles.connected') : testResult[profile.id] === 'fail' ? t('profiles.connectionFailed') : t('profiles.testConnection')}
                       onClick={() => handleTestConnection(profile)}
                       disabled={testingId === profile.id}
                     >
@@ -353,7 +355,7 @@ export function ProfilePanel({ onClose, onSwitch, onSwitchNewWindow }: ProfilePa
                   {profile.type === 'remote' && (
                     <button
                       className="profile-icon-btn"
-                      title="Edit connection"
+                      title={t('profiles.editConnection')}
                       onClick={() => handleStartEditRemote(profile)}
                     >
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -364,7 +366,7 @@ export function ProfilePanel({ onClose, onSwitch, onSwitchNewWindow }: ProfilePa
                   )}
                   <button
                     className="profile-icon-btn"
-                    title="Rename"
+                    title={t('profiles.rename')}
                     onClick={() => { setEditingId(profile.id); setEditValue(profile.name) }}
                   >
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -374,7 +376,7 @@ export function ProfilePanel({ onClose, onSwitch, onSwitchNewWindow }: ProfilePa
                   </button>
                   <button
                     className="profile-icon-btn"
-                    title="Duplicate"
+                    title={t('profiles.duplicate')}
                     onClick={() => handleDuplicate(profile.id)}
                   >
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -385,7 +387,7 @@ export function ProfilePanel({ onClose, onSwitch, onSwitchNewWindow }: ProfilePa
                   {profile.id !== 'default' && (
                     <button
                       className="profile-icon-btn danger"
-                      title="Delete"
+                      title={t('common.delete')}
                       onClick={() => setConfirmDelete(profile.id)}
                     >
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -406,13 +408,13 @@ export function ProfilePanel({ onClose, onSwitch, onSwitchNewWindow }: ProfilePa
       {confirmDelete && (
         <div className="settings-overlay" style={{ zIndex: 1001 }} onClick={() => setConfirmDelete(null)}>
           <div className="settings-panel" onClick={e => e.stopPropagation()} style={{ maxWidth: 360, padding: 20 }}>
-            <h3 style={{ margin: '0 0 12px', color: '#e5534b' }}>Delete Profile</h3>
+            <h3 style={{ margin: '0 0 12px', color: '#e5534b' }}>{t('profiles.deleteProfile')}</h3>
             <p style={{ margin: '0 0 16px', color: '#aaa' }}>
-              Are you sure you want to delete "{profiles.find(p => p.id === confirmDelete)?.name}"? This cannot be undone.
+              {t('profiles.deleteConfirm', { name: profiles.find(p => p.id === confirmDelete)?.name })}
             </p>
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-              <button className="profile-action-btn" onClick={() => setConfirmDelete(null)}>Cancel</button>
-              <button className="profile-action-btn danger" onClick={() => handleDelete(confirmDelete)}>Delete</button>
+              <button className="profile-action-btn" onClick={() => setConfirmDelete(null)}>{t('common.cancel')}</button>
+              <button className="profile-action-btn danger" onClick={() => handleDelete(confirmDelete)}>{t('common.delete')}</button>
             </div>
           </div>
         </div>
@@ -422,15 +424,15 @@ export function ProfilePanel({ onClose, onSwitch, onSwitchNewWindow }: ProfilePa
       {confirmSwitch && (
         <div className="settings-overlay" style={{ zIndex: 1001 }} onClick={() => setConfirmSwitch(null)}>
           <div className="settings-panel" onClick={e => e.stopPropagation()} style={{ maxWidth: 480, padding: 20 }}>
-            <h3 style={{ margin: '0 0 12px' }}>Switch Profile</h3>
+            <h3 style={{ margin: '0 0 12px' }}>{t('profiles.switchProfile')}</h3>
             <p style={{ margin: '0 0 16px', color: '#aaa' }}>
-              Switch in this window (closes all terminals) or open in a new window?
+              {t('profiles.switchConfirm')}
             </p>
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
-              <button className="profile-action-btn" onClick={() => setConfirmSwitch(null)}>Cancel</button>
-              <button className="profile-action-btn" onClick={() => handleSwitchConfirm(false)}>Switch Here</button>
-              <button className="profile-action-btn" onClick={() => handleSwitchConfirm(true)}>Save &amp; Switch Here</button>
-              <button className="profile-action-btn primary" onClick={() => handleSwitchConfirm(false, true)}>New Window</button>
+              <button className="profile-action-btn" onClick={() => setConfirmSwitch(null)}>{t('common.cancel')}</button>
+              <button className="profile-action-btn" onClick={() => handleSwitchConfirm(false)}>{t('profiles.switchHere')}</button>
+              <button className="profile-action-btn" onClick={() => handleSwitchConfirm(true)}>{t('profiles.saveAndSwitchHere')}</button>
+              <button className="profile-action-btn primary" onClick={() => handleSwitchConfirm(false, true)}>{t('profiles.newWindow')}</button>
             </div>
           </div>
         </div>

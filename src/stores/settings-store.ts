@@ -1,4 +1,4 @@
-import type { AppSettings, ShellType, FontType, ColorPresetId, EnvVariable, AgentCommandType, StatuslineItemConfig, StatuslineItemId } from '../types'
+import type { AppSettings, ShellType, FontType, ColorPresetId, EnvVariable, AgentCommandType, StatuslineItemConfig, StatuslineItemId, LanguageCode } from '../types'
 import type { AgentPresetId } from '../types/agent-presets'
 import { FONT_OPTIONS, COLOR_PRESETS, AGENT_COMMAND_OPTIONS, STATUSLINE_ITEMS } from '../types'
 
@@ -7,6 +7,7 @@ type Listener = () => void
 const isWindows = typeof navigator !== 'undefined' && navigator.userAgent.includes('Windows');
 
 const defaultSettings: AppSettings = {
+  language: 'en',
   shell: 'auto',
   customShellPath: '',
   fontSize: 14,
@@ -43,6 +44,12 @@ class SettingsStore {
 
   private notify(): void {
     this.listeners.forEach(listener => listener())
+  }
+
+  setLanguage(language: LanguageCode): void {
+    this.settings = { ...this.settings, language }
+    this.notify()
+    this.save()
   }
 
   setShell(shell: ShellType): void {

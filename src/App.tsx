@@ -1,4 +1,6 @@
 import { useEffect, useState, useCallback } from 'react'
+import { useTranslation } from 'react-i18next'
+import i18next from 'i18next'
 import { workspaceStore } from './stores/workspace-store'
 import { settingsStore } from './stores/settings-store'
 import { Sidebar } from './components/Sidebar'
@@ -58,6 +60,7 @@ function savePanelSettings(settings: PanelSettings): void {
 }
 
 export default function App() {
+  const { t } = useTranslation()
   const [state, setState] = useState<AppState>(workspaceStore.getState())
   const [showSettings, setShowSettings] = useState(false)
   const [showProfiles, setShowProfiles] = useState(false)
@@ -179,7 +182,7 @@ export default function App() {
           if ('error' in connectResult) {
             if (launchProfileId) {
               // New window launch failed — show error and close instead of corrupting shared state
-              setAppNotification(`Remote connection failed: ${connectResult.error}`)
+              setAppNotification(t('app.remoteConnectionFailed', { error: connectResult.error }))
               setTimeout(() => window.close(), 3000)
               return
             }
@@ -196,7 +199,7 @@ export default function App() {
         } else if (active?.type === 'remote') {
           // Remote profile missing connection info — fall back
           if (launchProfileId) {
-            setAppNotification('Remote profile is missing connection info.')
+            setAppNotification(t('app.remoteMissingInfo'))
             setTimeout(() => window.close(), 3000)
             return
           }
@@ -218,6 +221,10 @@ export default function App() {
         await settingsStore.load()
         dlog(`[init] settingsStore.load: ${(performance.now() - tLoad).toFixed(0)}ms`)
 
+        // Sync i18n language with saved setting
+        const savedLang = settingsStore.getSettings().language || 'en'
+        if (i18next.language !== savedLang) i18next.changeLanguage(savedLang)
+
         const tWs = performance.now()
         await workspaceStore.load()
         dlog(`[init] workspaceStore.load: ${(performance.now() - tWs).toFixed(0)}ms`)
@@ -225,6 +232,8 @@ export default function App() {
         console.error('Failed to initialize profile:', e)
         // Ensure workspaces still load even if profile init fails
         await settingsStore.load()
+        const savedLang = settingsStore.getSettings().language || 'en'
+        if (i18next.language !== savedLang) i18next.changeLanguage(savedLang)
         await workspaceStore.load()
       }
       dlog(`[init] total initProfile: ${(performance.now() - t0).toFixed(0)}ms`)
@@ -324,7 +333,7 @@ export default function App() {
         profile.remoteToken
       )
       if ('error' in connectResult) {
-        setAppNotification(`Remote connection failed: ${connectResult.error}\nSwitching back to local profile.`)
+        setAppNotification(t('app.remoteConnectionFailedFallback', { error: connectResult.error }))
         // Fall back to first local profile
         const listResult = await window.electronAPI.profile.list()
         const localProfile = listResult.profiles.find(p => p.type !== 'remote')
@@ -379,8 +388,8 @@ export default function App() {
         <div className="app">
           <main className="main-content">
             <div className="empty-state">
-              <h2>Workspace not found</h2>
-              <p>This detached workspace may have been removed.</p>
+              <h2>{t('app.workspaceNotFound')}</h2>
+              <p>{t('app.workspaceNotFoundDesc')}</p>
             </div>
           </main>
         </div>
@@ -458,8 +467,8 @@ export default function App() {
           ))
         ) : (
           <div className="empty-state">
-            <h2>Welcome to Better Agent Terminal</h2>
-            <p>Click "+ Add Workspace" to get started</p>
+            <h2>{t('app.welcome')}</h2>
+            <p>{t('app.welcomeHint')}</p>
           </div>
         )}
       </main>
@@ -497,7 +506,7 @@ export default function App() {
         <div className="app-notification-overlay" onClick={() => setAppNotification(null)}>
           <div className="app-notification" onClick={e => e.stopPropagation()}>
             <div className="app-notification-message">{appNotification}</div>
-            <button className="app-notification-close" onClick={() => setAppNotification(null)}>OK</button>
+            <button className="app-notification-close" onClick={() => setAppNotification(null)}>{t('common.ok')}</button>
           </div>
         </div>
       )}

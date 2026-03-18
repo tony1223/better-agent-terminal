@@ -1,4 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
+import { useTranslation } from 'react-i18next'
+import i18next from 'i18next'
 
 interface GitCommit {
   hash: string
@@ -35,12 +37,12 @@ function formatDate(dateStr: string): string {
     const now = new Date()
     const diffMs = now.getTime() - d.getTime()
     const diffMins = Math.floor(diffMs / 60000)
-    if (diffMins < 1) return 'just now'
-    if (diffMins < 60) return `${diffMins}m ago`
+    if (diffMins < 1) return i18next.t('git.justNow')
+    if (diffMins < 60) return i18next.t('git.minutesAgo', { count: diffMins })
     const diffHours = Math.floor(diffMins / 60)
-    if (diffHours < 24) return `${diffHours}h ago`
+    if (diffHours < 24) return i18next.t('git.hoursAgo', { count: diffHours })
     const diffDays = Math.floor(diffHours / 24)
-    if (diffDays < 30) return `${diffDays}d ago`
+    if (diffDays < 30) return i18next.t('git.daysAgo', { count: diffDays })
     return d.toLocaleDateString()
   } catch {
     return dateStr
@@ -58,8 +60,9 @@ function statusColor(s: string): string {
 }
 
 function DiffView({ diff }: { diff: string }) {
+  const { t } = useTranslation()
   if (!diff) {
-    return <div className="git-diff-empty">Select a file to view diff</div>
+    return <div className="git-diff-empty">{t('git.selectFileToViewDiff')}</div>
   }
 
   const lines = diff.split('\n')
@@ -84,6 +87,7 @@ function DiffView({ diff }: { diff: string }) {
 }
 
 export function GitPanel({ workspaceFolderPath }: Readonly<GitPanelProps>) {
+  const { t } = useTranslation()
   const [commits, setCommits] = useState<GitCommit[]>([])
   const [status, setStatus] = useState<GitStatusEntry[]>([])
   const [selectedCommit, setSelectedCommit] = useState<string | null>(null)
@@ -183,11 +187,11 @@ export function GitPanel({ workspaceFolderPath }: Readonly<GitPanelProps>) {
   }, [selectedFile, fileContent, workspaceFolderPath])
 
   if (loading) {
-    return <div className="git-panel-empty">Loading...</div>
+    return <div className="git-panel-empty">{t('common.loading')}</div>
   }
 
   if (!isGitRepo) {
-    return <div className="git-panel-empty">Not a git repository</div>
+    return <div className="git-panel-empty">{t('git.notAGitRepo')}</div>
   }
 
   return (
@@ -195,8 +199,8 @@ export function GitPanel({ workspaceFolderPath }: Readonly<GitPanelProps>) {
       {/* Column 1: Commit log */}
       <div className="git-commit-list">
         <div className="git-col-header">
-          <span>Commits</span>
-          <button className="git-refresh-btn" onClick={loadData} title="Refresh">↻</button>
+          <span>{t('git.commits')}</span>
+          <button className="git-refresh-btn" onClick={loadData} title={t('git.refresh')}>↻</button>
         </div>
         <div className="git-commit-list-items">
           {status.length > 0 && (
@@ -206,10 +210,10 @@ export function GitPanel({ workspaceFolderPath }: Readonly<GitPanelProps>) {
             >
               <div className="git-commit-message">
                 <span className="git-uncommitted-badge">●</span>
-                Uncommitted Changes
+                {t('git.uncommittedChanges')}
               </div>
               <div className="git-commit-meta">
-                {status.length} file{status.length !== 1 ? 's' : ''} changed
+                {t('git.filesChanged', { count: status.length })}
               </div>
             </div>
           )}
@@ -228,7 +232,7 @@ export function GitPanel({ workspaceFolderPath }: Readonly<GitPanelProps>) {
             </div>
           ))}
           {commits.length === 0 && status.length === 0 && (
-            <div className="git-panel-empty">No commits yet</div>
+            <div className="git-panel-empty">{t('git.noCommitsYet')}</div>
           )}
         </div>
       </div>
@@ -236,20 +240,20 @@ export function GitPanel({ workspaceFolderPath }: Readonly<GitPanelProps>) {
       {/* Column 2: Changed files */}
       <div className="git-file-list">
         <div className="git-col-header">
-          <span>Files</span>
+          <span>{t('git.files')}</span>
           {changedFiles.length > 0 && (
             <span className="git-file-count">{changedFiles.length}</span>
           )}
         </div>
         <div className="git-file-list-items">
           {!selectedCommit && (
-            <div className="git-col-placeholder">Select a commit</div>
+            <div className="git-col-placeholder">{t('git.selectACommit')}</div>
           )}
           {selectedCommit && filesLoading && (
-            <div className="git-col-placeholder">Loading...</div>
+            <div className="git-col-placeholder">{t('common.loading')}</div>
           )}
           {selectedCommit && !filesLoading && changedFiles.length === 0 && (
-            <div className="git-col-placeholder">No changed files</div>
+            <div className="git-col-placeholder">{t('git.noChangedFiles')}</div>
           )}
           {changedFiles.map(f => (
             <div
@@ -279,18 +283,18 @@ export function GitPanel({ workspaceFolderPath }: Readonly<GitPanelProps>) {
               className={`git-diff-mode-btn ${viewMode === 'diff' ? 'active' : ''}`}
               onClick={() => setViewMode('diff')}
             >
-              Diff
+              {t('git.diff')}
             </button>
             <button
               className={`git-diff-mode-btn ${viewMode === 'file' ? 'active' : ''}`}
               onClick={handleViewFile}
             >
-              File
+              {t('git.file')}
             </button>
           </div>
         )}
         {diffLoading ? (
-          <div className="git-diff-empty">Loading...</div>
+          <div className="git-diff-empty">{t('common.loading')}</div>
         ) : viewMode === 'file' && fileContent !== null ? (
           <pre className="git-file-content">{fileContent}</pre>
         ) : (

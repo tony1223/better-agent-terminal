@@ -1,4 +1,5 @@
 import { useState, memo, lazy, Suspense } from 'react'
+import { useTranslation } from 'react-i18next'
 import type { TerminalInstance } from '../types'
 import { TerminalPanel } from './TerminalPanel'
 import { ActivityIndicator } from './ActivityIndicator'
@@ -21,6 +22,7 @@ export const MainPanel = memo(function MainPanel({ terminal, isActive, onClose, 
   const isAgent = terminal.agentPreset && terminal.agentPreset !== 'none'
   const isClaudeCode = terminal.agentPreset === 'claude-code'
   const agentConfig = isAgent ? getAgentPreset(terminal.agentPreset!) : null
+  const { t } = useTranslation()
   const [isEditing, setIsEditing] = useState(false)
   const [editValue, setEditValue] = useState(terminal.title)
   const [showPromptBox, setShowPromptBox] = useState(false)
@@ -52,7 +54,7 @@ export const MainPanel = memo(function MainPanel({ terminal, isActive, onClose, 
           className={`main-panel-title ${isAgent ? 'agent-terminal' : ''}`}
           style={agentConfig ? { '--agent-color': agentConfig.color } as React.CSSProperties : undefined}
           onDoubleClick={handleDoubleClick}
-          title="Double-click to rename"
+          title={t('terminal.doubleClickToRename')}
         >
           {isAgent && <span>{agentConfig?.icon}</span>}
           {isEditing ? (
@@ -78,7 +80,7 @@ export const MainPanel = memo(function MainPanel({ terminal, isActive, onClose, 
             <button
               className={`action-btn ${showPromptBox ? 'active' : ''}`}
               onClick={() => setShowPromptBox(!showPromptBox)}
-              title={showPromptBox ? 'Hide prompt box' : 'Show prompt box'}
+              title={showPromptBox ? t('terminal.hidePromptBox') : t('terminal.showPromptBox')}
             >
               💬
             </button>
@@ -86,14 +88,14 @@ export const MainPanel = memo(function MainPanel({ terminal, isActive, onClose, 
           <button
             className="action-btn"
             onClick={() => onRestart(terminal.id)}
-            title="Restart terminal"
+            title={t('terminal.restartTerminal')}
           >
             ⟳
           </button>
           <button
             className="action-btn danger"
             onClick={() => onClose(terminal.id)}
-            title="Close terminal"
+            title={t('terminal.closeTerminal')}
           >
             ×
           </button>

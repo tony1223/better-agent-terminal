@@ -1,4 +1,5 @@
 import { useEffect, useCallback, useState, lazy, Suspense } from 'react'
+import { useTranslation } from 'react-i18next'
 import type { Workspace, TerminalInstance, EnvVariable } from '../types'
 import { workspaceStore } from '../stores/workspace-store'
 import { settingsStore } from '../stores/settings-store'
@@ -97,6 +98,7 @@ export function clearInitializedWorkspaces(): void {
 }
 
 export function WorkspaceView({ workspace, terminals, focusedTerminalId, isActive }: Readonly<WorkspaceViewProps>) {
+  const { t } = useTranslation()
   const [showCloseConfirm, setShowCloseConfirm] = useState<string | null>(null)
   const [thumbnailSettings, setThumbnailSettings] = useState<ThumbnailSettings>(loadThumbnailSettings)
   const [activeTab, setActiveTab] = useState<WorkspaceTab>(loadWorkspaceTab)
@@ -335,19 +337,19 @@ export function WorkspaceView({ workspace, terminals, focusedTerminalId, isActiv
           className={`workspace-tab-btn ${activeTab === 'terminal' ? 'active' : ''}`}
           onClick={() => handleTabChange('terminal')}
         >
-          Terminal
+          {t('workspace.terminal')}
         </button>
         <button
           className={`workspace-tab-btn ${activeTab === 'files' ? 'active' : ''}`}
           onClick={() => handleTabChange('files')}
         >
-          Files
+          {t('workspace.files')}
         </button>
         <button
           className={`workspace-tab-btn ${activeTab === 'git' ? 'active' : ''}`}
           onClick={() => handleTabChange('git')}
         >
-          Git
+          {t('workspace.git')}
         </button>
       </div>
 

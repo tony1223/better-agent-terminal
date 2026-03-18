@@ -463,13 +463,19 @@ function registerProxiedHandlers() {
     return true
   })
 
-  // Claude usage (5h / 7d rate limits)
-  registerHandler('claude:get-usage', async () => {
+  // Claude usage (5h / 7d rate limits) — with token caching & rate-limit detection
+  let _cachedOAuthToken: string | null = null
+  let _tokenCacheTime = 0
+  const TOKEN_CACHE_TTL = 10 * 60 * 1000 // 10 minutes
+
+  async function getOAuthToken(): Promise<string | null> {
+    const now = Date.now()
+    if (_cachedOAuthToken && now - _tokenCacheTime < TOKEN_CACHE_TTL) {
+      return _cachedOAuthToken
+    }
     try {
       let token: string | null = null
-
       if (process.platform === 'darwin') {
-        // macOS: read from Keychain
         const { execSync } = await import('child_process')
         const username = execSync('whoami', { encoding: 'utf-8' }).trim()
         const raw = execSync(
@@ -479,14 +485,24 @@ function registerProxiedHandlers() {
         const creds = JSON.parse(raw)
         token = creds?.claudeAiOauth?.accessToken ?? null
       } else {
-        // Windows / Linux: read from ~/.claude/.credentials.json
         const credPath = path.join(app.getPath('home'), '.claude', '.credentials.json')
         const raw = await fs.readFile(credPath, 'utf-8')
         const creds = JSON.parse(raw)
         token = creds?.claudeAiOauth?.accessToken ?? null
       }
+      if (token && token.startsWith('sk-ant-oat')) {
+        _cachedOAuthToken = token
+        _tokenCacheTime = now
+        return token
+      }
+      return null
+    } catch { return null }
+  }
 
-      if (!token || !token.startsWith('sk-ant-oat')) return null
+  registerHandler('claude:get-usage', async () => {
+    try {
+      const token = await getOAuthToken()
+      if (!token) return null
 
       const res = await fetch('https://api.anthropic.com/api/oauth/usage', {
         headers: {
@@ -496,7 +512,13 @@ function registerProxiedHandlers() {
           'Accept': 'application/json',
         },
       })
+
+      if (res.status === 429) {
+        const retryAfter = parseInt(res.headers.get('retry-after') || '60', 10)
+        return { rateLimited: true, retryAfterSec: retryAfter }
+      }
       if (!res.ok) return null
+
       const data = await res.json()
       return {
         fiveHour: data.five_hour?.utilization ?? null,
@@ -651,12 +673,16 @@ ipcMain.on('debug:log', (_event, ...args: unknown[]) => {
 
 function registerLocalHandlers() {
   ipcMain.handle('dialog:select-folder', async () => {
-    const result = await dialog.showOpenDialog(mainWindow!, { properties: ['openDirectory'] })
+    const result = await dialog.showOpenDialog(mainWindow!, {
+      defaultPath: app.getPath('home'),
+      properties: ['openDirectory'],
+    })
     return result.canceled ? null : result.filePaths[0]
   })
 
   ipcMain.handle('dialog:select-images', async () => {
     const result = await dialog.showOpenDialog(mainWindow!, {
+      defaultPath: app.getPath('home'),
       filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp'] }],
       properties: ['openFile', 'multiSelections'],
     })

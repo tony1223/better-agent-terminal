@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import { useTranslation } from 'react-i18next'
 
 // Snippet interface (matches backend)
 type SnippetFormat = 'plaintext' | 'markdown'
@@ -33,6 +34,7 @@ interface EditDialogProps {
 
 // Edit/Create Dialog Component
 function EditDialog({ snippet, isNew, onSave, onClose }: Readonly<EditDialogProps>) {
+    const { t } = useTranslation()
     const [title, setTitle] = useState(snippet?.title || '')
     const [content, setContent] = useState(snippet?.content || '')
     const [format, setFormat] = useState<SnippetFormat>(snippet?.format || 'plaintext')
@@ -47,45 +49,45 @@ function EditDialog({ snippet, isNew, onSave, onClose }: Readonly<EditDialogProp
         <div className="snippet-edit-overlay" onClick={onClose}>
             <div className="snippet-edit-dialog" onClick={e => e.stopPropagation()}>
                 <div className="snippet-edit-header">
-                    <h3>{isNew ? 'New Snippet' : 'Edit Snippet'}</h3>
+                    <h3>{isNew ? t('snippets.newSnippet') : t('snippets.editSnippet')}</h3>
                     <button className="close-btn" onClick={onClose}>×</button>
                 </div>
                 <div className="snippet-edit-body">
                     <div className="form-group">
-                        <label>Title</label>
+                        <label>{t('snippets.titleLabel')}</label>
                         <input
                             type="text"
                             value={title}
                             onChange={e => setTitle(e.target.value)}
-                            placeholder="Enter snippet name..."
+                            placeholder={t('snippets.enterSnippetName')}
                             autoFocus
                         />
                     </div>
                     <div className="form-group">
-                        <label>Format</label>
+                        <label>{t('snippets.format')}</label>
                         <select value={format} onChange={e => setFormat(e.target.value as SnippetFormat)}>
-                            <option value="plaintext">Plaintext</option>
-                            <option value="markdown">Markdown</option>
+                            <option value="plaintext">{t('snippets.plaintext')}</option>
+                            <option value="markdown">{t('snippets.markdown')}</option>
                         </select>
                     </div>
                     <div className="form-group">
-                        <label>Content</label>
+                        <label>{t('snippets.content')}</label>
                         <textarea
                             value={content}
                             onChange={e => setContent(e.target.value)}
-                            placeholder="Enter snippet content..."
+                            placeholder={t('snippets.enterSnippetContent')}
                             rows={12}
                         />
                     </div>
                 </div>
                 <div className="snippet-edit-footer">
-                    <button className="btn-secondary" onClick={onClose}>Cancel</button>
+                    <button className="btn-secondary" onClick={onClose}>{t('common.cancel')}</button>
                     <button
                         className="btn-primary"
                         onClick={handleSave}
                         disabled={!title.trim() || !content.trim()}
                     >
-                        Save
+                        {t('common.save')}
                     </button>
                 </div>
             </div>
@@ -101,6 +103,7 @@ export function SnippetSidebar({
     onPasteToClipboard,
     onPasteToTerminal
 }: Readonly<SnippetSidebarProps>) {
+    const { t } = useTranslation()
     const [snippets, setSnippets] = useState<Snippet[]>([])
     const [searchQuery, setSearchQuery] = useState('')
     const [editingSnippet, setEditingSnippet] = useState<Snippet | null>(null)
@@ -149,7 +152,7 @@ export function SnippetSidebar({
     }
 
     const handleDelete = async (id: number) => {
-        if (!confirm('Are you sure you want to delete this snippet?')) return
+        if (!confirm(t('snippets.deleteConfirm'))) return
         try {
             await window.electronAPI.snippet.delete(id)
             loadSnippets()
@@ -192,7 +195,7 @@ export function SnippetSidebar({
             <div
                 className="collapsed-bar collapsed-bar-right"
                 onClick={onCollapse}
-                title="Expand Snippets"
+                title={t('snippets.expandSnippets')}
             >
                 <div className="collapsed-bar-icon">📝</div>
             </div>
@@ -203,13 +206,13 @@ export function SnippetSidebar({
         <>
             <aside className="snippet-sidebar" style={{ width: `${width}px`, minWidth: `${width}px` }}>
                 <div className="snippet-sidebar-header">
-                    <h3>📝 Snippets</h3>
+                    <h3>📝 {t('snippets.title')}</h3>
                     <div className="snippet-header-actions">
-                        <button className="snippet-add-btn" onClick={() => setIsCreating(true)} title="New Snippet">
+                        <button className="snippet-add-btn" onClick={() => setIsCreating(true)} title={t('snippets.newSnippet')}>
                             +
                         </button>
                         {onCollapse && (
-                            <button className="snippet-collapse-btn" onClick={onCollapse} title="Collapse Panel">
+                            <button className="snippet-collapse-btn" onClick={onCollapse} title={t('terminal.collapsePanel')}>
                                 »
                             </button>
                         )}
@@ -219,41 +222,41 @@ export function SnippetSidebar({
                 <div className="snippet-sidebar-search">
                     <input
                         type="text"
-                        placeholder="Search snippets..."
+                        placeholder={t('snippets.searchSnippets')}
                         value={searchQuery}
                         onChange={e => setSearchQuery(e.target.value)}
                     />
                 </div>
 
                 <div className="snippet-sidebar-options">
-                    <label>Double-click:</label>
+                    <label>{t('snippets.doubleClick')}</label>
                     <select
                         value={doubleClickAction}
                         onChange={e => setDoubleClickAction(e.target.value as 'clipboard' | 'terminal' | 'edit')}
                     >
-                        <option value="terminal">Paste to Terminal</option>
-                        <option value="clipboard">Copy to Clipboard</option>
-                        <option value="edit">Open Editor</option>
+                        <option value="terminal">{t('snippets.pasteToTerminal')}</option>
+                        <option value="clipboard">{t('snippets.copyToClipboard')}</option>
+                        <option value="edit">{t('snippets.openEditor')}</option>
                     </select>
                 </div>
 
                 <div className="snippet-sidebar-options">
-                    <label>Auto-execute:</label>
+                    <label>{t('snippets.autoExecute')}</label>
                     <input
                         type="checkbox"
                         checked={autoExecute}
                         onChange={e => setAutoExecute(e.target.checked)}
-                        title="Automatically press Enter after pasting to terminal"
+                        title={t('snippets.autoExecuteHint')}
                     />
                     <span style={{ fontSize: '10px', color: 'var(--text-secondary)' }}>
-                        (press Enter)
+                        {t('snippets.pressEnter')}
                     </span>
                 </div>
 
                 <div className="snippet-sidebar-list">
                     {snippets.length === 0 ? (
                         <div className="snippet-empty">
-                            {searchQuery ? 'No matching snippets' : 'No snippets yet. Click + to add one.'}
+                            {searchQuery ? t('snippets.noMatchingSnippets') : t('snippets.noSnippetsYet')}
                         </div>
                     ) : (
                         snippets.map(snippet => (
@@ -265,7 +268,7 @@ export function SnippetSidebar({
                                 <div className="snippet-item-main">
                                     <span className="snippet-item-title">{snippet.title}</span>
                                     <span className={`snippet-item-format ${snippet.format}`}>
-                                        {snippet.format === 'markdown' ? 'MD' : 'Text'}
+                                        {snippet.format === 'markdown' ? t('snippets.md') : t('snippets.text')}
                                     </span>
                                 </div>
                                 <div className="snippet-item-preview">
@@ -276,28 +279,28 @@ export function SnippetSidebar({
                                     <button
                                         className="snippet-action-btn"
                                         onClick={() => handlePasteToTerminal(snippet.content)}
-                                        title="Paste to Terminal"
+                                        title={t('snippets.pasteToTerminal')}
                                     >
                                         ▶️
                                     </button>
                                     <button
                                         className="snippet-action-btn"
                                         onClick={() => handleCopyToClipboard(snippet.content)}
-                                        title="Copy to Clipboard"
+                                        title={t('snippets.copyToClipboard')}
                                     >
                                         📋
                                     </button>
                                     <button
                                         className="snippet-action-btn"
                                         onClick={() => setEditingSnippet(snippet)}
-                                        title="Edit"
+                                        title={t('snippets.edit')}
                                     >
                                         ✏️
                                     </button>
                                     <button
                                         className="snippet-action-btn danger"
                                         onClick={() => handleDelete(snippet.id)}
-                                        title="Delete"
+                                        title={t('common.delete')}
                                     >
                                         🗑️
                                     </button>
