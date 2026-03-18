@@ -459,7 +459,19 @@ export class ClaudeAgentManager {
         // Debug: log all message types
         const msgSubtype = (message as { subtype?: string }).subtype
         if (message.type !== 'stream_event' && message.type !== 'assistant') {
-          logger.log(`[claude:msg] type=${message.type} subtype=${msgSubtype || ''}`)
+          logger.log(`[claude:msg] type=${message.type} subtype=${msgSubtype || ''} parent_tool_use_id=${(message as { parent_tool_use_id?: string }).parent_tool_use_id || 'none'}`)
+        }
+        if (message.type === 'assistant') {
+          const blocks = (message as { message?: { content?: unknown[] } }).message?.content
+          if (Array.isArray(blocks)) {
+            const toolBlocks = blocks.filter((b: unknown) => (b as { type?: string }).type === 'tool_use')
+            if (toolBlocks.length > 0) {
+              for (const tb of toolBlocks) {
+                const t = tb as { name?: string; id?: string }
+                logger.log(`[claude:tool_use] name=${t.name} id=${t.id?.slice(0, 12)} parent_tool_use_id=${(message as { parent_tool_use_id?: string }).parent_tool_use_id || 'none'}`)
+              }
+            }
+          }
         }
 
         if (message.type === 'system' && message.subtype === 'init') {
@@ -515,6 +527,17 @@ export class ClaudeAgentManager {
                   parentToolUseId: message.parent_tool_use_id,
                   timestamp: Date.now(),
                 })
+                // Track Agent/Task tool calls in activeTasks for stop support
+                // (task_started events may not always be emitted by the SDK)
+                if ((toolBlock.name === 'Agent' || toolBlock.name === 'Task') && !message.parent_tool_use_id) {
+                  const desc = (toolBlock.input as { description?: string }).description || toolBlock.name
+                  session.activeTasks.set(toolBlock.id, {
+                    toolUseId: toolBlock.id,
+                    description: desc,
+                    lastProgressTime: Date.now(),
+                  })
+                  logger.log(`[activeTasks] Registered ${toolBlock.name} tool_use_id=${toolBlock.id.slice(0, 12)} desc=${desc.slice(0, 60)}`)
+                }
                 // Detect plan mode transitions and notify UI
                 if (toolBlock.name === 'EnterPlanMode') {
                   // Preserve planBypass if already in it; otherwise set to plan
@@ -535,8 +558,14 @@ export class ClaudeAgentManager {
                 const resultContent = typeof resultBlock.content === 'string'
                   ? resultBlock.content
                   : JSON.stringify(resultBlock.content)
-                // If this tool has an active subagent task, keep it as 'running' — task_notification will complete it
-                const hasActiveTask = Array.from(session.activeTasks.values()).some(t => t.toolUseId === resultBlock.tool_use_id)
+                // Check if this is a tracked Agent/Task tool
+                const activeTask = Array.from(session.activeTasks.entries()).find(([, t]) => t.toolUseId === resultBlock.tool_use_id)
+                if (activeTask && resultContent) {
+                  // Agent/Task returned a result — mark as completed and clean up
+                  logger.log(`[activeTasks] Completed ${resultBlock.tool_use_id.slice(0, 12)} is_error=${resultBlock.is_error}`)
+                  session.activeTasks.delete(activeTask[0])
+                }
+                const hasActiveTask = session.activeTasks.has(resultBlock.tool_use_id)
                 this.updateToolCall(sessionId, resultBlock.tool_use_id, {
                   status: hasActiveTask ? 'running' : (resultBlock.is_error ? 'error' : 'completed'),
                   result: resultContent,
@@ -556,8 +585,13 @@ export class ClaudeAgentManager {
                 const resultStr = typeof resultBlock.content === 'string'
                   ? resultBlock.content
                   : JSON.stringify(resultBlock.content)
-                // If this tool has an active subagent task, keep it as 'running' — task_notification will complete it
-                const hasActiveTask = Array.from(session.activeTasks.values()).some(t => t.toolUseId === resultBlock.tool_use_id)
+                // Check if this is a tracked Agent/Task tool completing
+                const activeTask = Array.from(session.activeTasks.entries()).find(([, t]) => t.toolUseId === resultBlock.tool_use_id)
+                if (activeTask && resultStr) {
+                  logger.log(`[activeTasks] Completed (user msg) ${resultBlock.tool_use_id.slice(0, 12)} is_error=${resultBlock.is_error}`)
+                  session.activeTasks.delete(activeTask[0])
+                }
+                const hasActiveTask = session.activeTasks.has(resultBlock.tool_use_id)
                 this.updateToolCall(sessionId, resultBlock.tool_use_id, {
                   status: hasActiveTask ? 'running' : (resultBlock.is_error ? 'error' : 'completed'),
                   result: resultStr?.slice(0, 2000), // Truncate long results
@@ -647,6 +681,8 @@ export class ClaudeAgentManager {
         // Agent progress events (subagent lifecycle) — type is 'system' with task subtypes
         if (message.type === 'system') {
           const subtype = (message as { subtype?: string }).subtype
+          // Log all system subtypes for debugging agent dispatch
+          logger.log(`[claude:system] subtype=${subtype} keys=${Object.keys(message).join(',')}`)
           if (subtype === 'task_started' || subtype === 'task_progress' || subtype === 'task_notification') {
             const agentMsg = message as {
               subtype: string
@@ -837,8 +873,11 @@ export class ClaudeAgentManager {
 
   async stopTask(sessionId: string, toolUseId: string): Promise<boolean> {
     const session = this.sessions.get(sessionId)
-    if (!session?.queryInstance) return false
-    // Find the task_id by tool_use_id
+    if (!session?.queryInstance) {
+      logger.warn(`[stopTask] No queryInstance for session ${sessionId}`)
+      return false
+    }
+    // Find the task_id by tool_use_id from activeTasks map
     let targetTaskId: string | null = null
     let targetTask: ActiveTask | null = null
     for (const [taskId, task] of session.activeTasks) {
@@ -848,16 +887,31 @@ export class ClaudeAgentManager {
         break
       }
     }
-    if (!targetTaskId) return false
+
+    // If no mapping in activeTasks, try using tool_use_id directly as the task_id
+    // (the SDK may accept it, and task_started events may not always be emitted)
+    if (!targetTaskId) {
+      logger.log(`[stopTask] No activeTasks mapping for toolUseId=${toolUseId}, trying toolUseId as task_id`)
+      targetTaskId = toolUseId
+    }
+
     try {
       await session.queryInstance.stopTask(targetTaskId)
+      logger.log(`[stopTask] Successfully stopped task_id=${targetTaskId}`)
       this.updateToolCall(sessionId, toolUseId, {
+        status: 'completed',
         description: `[stopped by user] ${targetTask?.summary || targetTask?.description || ''}`,
       } as Partial<ClaudeToolCall>)
       session.activeTasks.delete(targetTaskId)
       return true
     } catch (e) {
-      logger.warn('stopTask failed:', e)
+      logger.warn(`[stopTask] stopTask(${targetTaskId}) failed:`, e)
+      // Fallback: try interrupt to stop the whole session if stopTask fails
+      logger.log(`[stopTask] Falling back to marking tool as stopped in UI`)
+      this.updateToolCall(sessionId, toolUseId, {
+        status: 'error',
+        description: `[stop failed] ${targetTask?.description || 'Could not stop task'}`,
+      } as Partial<ClaudeToolCall>)
       return false
     }
   }

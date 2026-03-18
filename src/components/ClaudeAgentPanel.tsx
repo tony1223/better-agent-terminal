@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo, Fragment, cloneElement, isValidElement } from 'react'
+import { flushSync } from 'react-dom'
 import { useTranslation } from 'react-i18next'
 import type { ClaudeMessage, ClaudeToolCall } from '../types/claude-agent'
 import { isToolCall } from '../types/claude-agent'
@@ -93,7 +94,18 @@ export function ClaudeAgentPanel({ sessionId, cwd, isActive, workspaceId }: Read
   const [showThinking, setShowThinking] = useState(false)
   const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set())
   const [autoExpandThinking, setAutoExpandThinking] = useState(false)
-  const [sessionMeta, setSessionMeta] = useState<SessionMeta | null>(null)
+  const [sessionMeta, setSessionMeta] = useState<SessionMeta | null>(() => {
+    // Restore persisted session metadata for status line on resume
+    const t = workspaceStore.getState().terminals.find(t => t.id === sessionId)
+    if (t?.sessionMeta) {
+      return {
+        ...t.sessionMeta,
+        model: t.model,
+        sdkSessionId: t.sdkSessionId,
+      }
+    }
+    return null
+  })
   const [hasSdkSession, setHasSdkSession] = useState(() => {
     const t = workspaceStore.getState().terminals.find(t => t.id === sessionId)
     return !!t?.sdkSessionId
@@ -209,9 +221,14 @@ export function ClaudeAgentPanel({ sessionId, cwd, isActive, workspaceId }: Read
   const allMessages = useMemo(() => [...loadedArchive, ...messages], [loadedArchive, messages])
 
   // Active tasks (running Task/Agent tool calls) for the indicator bar
-  const activeTasks = useMemo(() =>
-    allMessages.filter(m => isToolCall(m) && (m.toolName === 'Task' || m.toolName === 'Agent') && m.status === 'running') as ClaudeToolCall[]
-  , [allMessages])
+  const activeTasks = useMemo(() => {
+    const tasks = allMessages.filter(m => isToolCall(m) && (m.toolName === 'Task' || m.toolName === 'Agent') && m.status === 'running') as ClaudeToolCall[]
+    const allTaskTools = allMessages.filter(m => isToolCall(m) && (m.toolName === 'Task' || m.toolName === 'Agent')) as ClaudeToolCall[]
+    if (allTaskTools.length > 0) {
+      window.electronAPI.debug.log(`[renderer] activeTasks: ${tasks.length} running / ${allTaskTools.length} total Task/Agent tools (statuses: ${allTaskTools.map(t => `${t.id?.slice(0,8)}=${t.status}`).join(', ')})`)
+    }
+    return tasks
+  }, [allMessages])
 
   // Tick counter to force re-render for elapsed time display
   const [, setElapsedTick] = useState(0)
@@ -369,7 +386,17 @@ export function ClaudeAgentPanel({ sessionId, cwd, isActive, workspaceId }: Read
           setStreamingText('')
           setStreamingThinking('')
           setIsStreaming(false)
-          setSessionMeta(null)
+          // Restore persisted metadata instead of resetting to null (preserves status line on resume)
+          const savedTerminal = workspaceStore.getState().terminals.find(t => t.id === sessionId)
+          if (savedTerminal?.sessionMeta) {
+            setSessionMeta({
+              ...savedTerminal.sessionMeta,
+              model: savedTerminal.model,
+              sdkSessionId: savedTerminal.sdkSessionId,
+            })
+          } else {
+            setSessionMeta(null)
+          }
           return
         }
         // Route subagent messages to separate bucket
@@ -402,6 +429,7 @@ export function ClaudeAgentPanel({ sessionId, cwd, isActive, workspaceId }: Read
         if (sid !== sessionId) return
         workspaceStore.updateTerminalActivity(sessionId)
         const toolCall = tool as ClaudeToolCall
+        window.electronAPI.debug.log(`[renderer] onToolUse name=${toolCall.toolName} id=${toolCall.id?.slice(0, 12)} status=${toolCall.status} parentToolUseId=${toolCall.parentToolUseId || 'none'}`)
         // Route subagent tool calls to separate bucket
         if (toolCall.parentToolUseId) {
           const bucket = subagentMessagesRef.current.get(toolCall.parentToolUseId) || []
@@ -412,10 +440,13 @@ export function ClaudeAgentPanel({ sessionId, cwd, isActive, workspaceId }: Read
           }
           return
         }
-        setMessages(prev => {
+        // Use flushSync for Agent/Task tools to ensure the active tasks bar renders immediately
+        const isAgentTool = toolCall.toolName === 'Agent' || toolCall.toolName === 'Task'
+        const doUpdate = () => setMessages(prev => {
           if (prev.some(m => 'toolName' in m && m.id === toolCall.id)) return prev
           return [...prev, toolCall]
         })
+        if (isAgentTool) { flushSync(doUpdate) } else { doUpdate() }
       }),
 
       api.onToolResult((sid: string, result: unknown) => {
@@ -437,8 +468,9 @@ export function ClaudeAgentPanel({ sessionId, cwd, isActive, workspaceId }: Read
           }
         }
         if (foundInSubagent) return
-        // Update in main messages
-        setMessages(prev => prev.map(m => {
+        // Check if this is an Agent/Task status change (needs immediate render for active tasks bar)
+        const isAgentStatusChange = updates.status && updates.status !== 'running'
+        const doResultUpdate = () => setMessages(prev => prev.map(m => {
           if ('toolName' in m && m.id === id) {
             // When a Task tool completes, clear its subagent streaming state
             if (m.toolName === 'Task') {
@@ -449,6 +481,7 @@ export function ClaudeAgentPanel({ sessionId, cwd, isActive, workspaceId }: Read
           }
           return m
         }))
+        if (isAgentStatusChange) { flushSync(doResultUpdate) } else { doResultUpdate() }
       }),
 
       api.onResult((sid: string, resultData: unknown) => {
@@ -530,6 +563,17 @@ export function ClaudeAgentPanel({ sessionId, cwd, isActive, workspaceId }: Read
         const m = meta as SessionMeta
         setSessionMeta(m)
         if (m.model) setCurrentModel(prev => prev || m.model!)
+        // Persist session metadata for status line restoration on next app launch
+        if (m.contextWindow > 0 || m.totalCost > 0 || m.inputTokens > 0) {
+          workspaceStore.setTerminalSessionMeta(sessionId, {
+            totalCost: m.totalCost,
+            inputTokens: m.inputTokens,
+            outputTokens: m.outputTokens,
+            durationMs: m.durationMs,
+            numTurns: m.numTurns,
+            contextWindow: m.contextWindow,
+          })
+        }
         // Sync UI with backend's current permission mode
         if (m.permissionMode) {
           setPermissionMode(m.permissionMode)

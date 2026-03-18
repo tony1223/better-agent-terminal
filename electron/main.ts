@@ -463,10 +463,17 @@ function registerProxiedHandlers() {
     return true
   })
 
-  // Claude usage (5h / 7d rate limits) — with token caching & rate-limit detection
+  // Claude usage (5h / 7d rate limits)
+  // Primary: session key from Chrome cookies (lenient rate limits on claude.ai)
+  // Fallback: OAuth token from Claude Code credentials (strict rate limits on api.anthropic.com)
   let _cachedOAuthToken: string | null = null
+  let _cachedSessionKey: string | null = null
+  let _cachedOrgId: string | null = null
+  let _cachedCfClearance: string | null = null
   let _tokenCacheTime = 0
-  const TOKEN_CACHE_TTL = 10 * 60 * 1000 // 10 minutes
+  let _sessionKeyCacheTime = 0
+  const TOKEN_CACHE_TTL = 10 * 60 * 1000     // 10 minutes
+  const SESSION_KEY_CACHE_TTL = 30 * 60 * 1000 // 30 minutes
 
   async function getOAuthToken(): Promise<string | null> {
     const now = Date.now()
@@ -499,34 +506,212 @@ function registerProxiedHandlers() {
     } catch { return null }
   }
 
-  registerHandler('claude:get-usage', async () => {
+  /** Decrypt a Chrome v10 encrypted cookie value on macOS */
+  function decryptChromeCookie(encHex: string, derivedKey: Buffer): string | null {
     try {
-      const token = await getOAuthToken()
-      if (!token) return null
+      const crypto = require('crypto')
+      const encBuf = Buffer.from(encHex, 'hex')
+      if (encBuf.length < 4 || encBuf.toString('utf-8', 0, 3) !== 'v10') return null
+      const ciphertext = encBuf.subarray(3)
+      const iv = Buffer.alloc(16, 0x20) // 16 space characters
+      const decipher = crypto.createDecipheriv('aes-128-cbc', derivedKey, iv)
+      let dec = decipher.update(ciphertext)
+      dec = Buffer.concat([dec, decipher.final()])
+      return dec.toString('utf-8').replace(/[\x00-\x1f]/g, '').trim()
+    } catch { return null }
+  }
 
-      const res = await fetch('https://api.anthropic.com/api/oauth/usage', {
+  /** Extract session key and cf_clearance from Chrome cookies on macOS */
+  async function getSessionKeyFromChrome(): Promise<{ sessionKey: string; cfClearance: string | null } | null> {
+    if (process.platform !== 'darwin') return null
+    const now = Date.now()
+    if (_cachedSessionKey && now - _sessionKeyCacheTime < SESSION_KEY_CACHE_TTL) {
+      return { sessionKey: _cachedSessionKey, cfClearance: _cachedCfClearance }
+    }
+    try {
+      const crypto = await import('crypto')
+      const { execSync } = await import('child_process')
+      const os = await import('os')
+
+      // Copy Chrome cookies DB to temp to avoid WAL lock
+      const chromeCookiePath = path.join(app.getPath('home'), 'Library/Application Support/Google/Chrome/Default/Cookies')
+      try { await fs.access(chromeCookiePath) } catch { return null }
+
+      const tmpDir = os.tmpdir()
+      const tmpDb = path.join(tmpDir, 'bat-chrome-cookies.db')
+      await fs.copyFile(chromeCookiePath, tmpDb)
+      // Also copy WAL and SHM files for consistency
+      try { await fs.copyFile(chromeCookiePath + '-wal', tmpDb + '-wal') } catch { /* ok */ }
+      try { await fs.copyFile(chromeCookiePath + '-shm', tmpDb + '-shm') } catch { /* ok */ }
+
+      // Get Chrome safe storage password from Keychain
+      const chromePassword = execSync(
+        'security find-generic-password -s "Chrome Safe Storage" -w 2>/dev/null',
+        { encoding: 'utf-8', timeout: 3000 }
+      ).trim()
+      if (!chromePassword) return null
+
+      const derivedKey = crypto.pbkdf2Sync(chromePassword, 'saltysalt', 1003, 16, 'sha1')
+
+      // Query sessionKey and cf_clearance
+      const rawOutput = execSync(
+        `sqlite3 "${tmpDb}" "SELECT name, hex(encrypted_value) FROM cookies WHERE host_key LIKE '%claude.ai%' AND name IN ('sessionKey','cf_clearance');"`,
+        { encoding: 'utf-8', timeout: 5000 }
+      ).trim()
+
+      // Clean up temp files
+      try { await fs.unlink(tmpDb) } catch { /* ok */ }
+      try { await fs.unlink(tmpDb + '-wal') } catch { /* ok */ }
+      try { await fs.unlink(tmpDb + '-shm') } catch { /* ok */ }
+
+      if (!rawOutput) return null
+
+      let sessionKey: string | null = null
+      let cfClearance: string | null = null
+
+      for (const line of rawOutput.split('\n')) {
+        const [name, hex] = line.split('|')
+        if (!hex) continue
+        const decrypted = decryptChromeCookie(hex, derivedKey as unknown as Buffer)
+        if (!decrypted) continue
+
+        // Strip non-ASCII chars from decrypted values
+        const cleaned = decrypted.replace(/[^\x20-\x7E]/g, '').trim()
+        if (name === 'sessionKey') {
+          // Decrypted value may have garbage prefix; extract from sk-ant-sid
+          const idx = cleaned.indexOf('sk-ant-sid')
+          sessionKey = idx >= 0 ? cleaned.substring(idx) : cleaned
+        } else if (name === 'cf_clearance') {
+          cfClearance = cleaned
+        }
+      }
+
+      if (!sessionKey || sessionKey.length < 10) return null
+
+      _cachedSessionKey = sessionKey
+      _cachedCfClearance = cfClearance
+      _sessionKeyCacheTime = now
+      logger.log('[usage] Extracted session key from Chrome (length:', sessionKey.length, ')')
+      return { sessionKey, cfClearance }
+    } catch (e) {
+      logger.error('[usage] Failed to extract Chrome session key:', e)
+      return null
+    }
+  }
+
+  /** Auto-detect organization ID using session key */
+  async function getOrgId(sessionKey: string, cfClearance: string | null): Promise<string | null> {
+    if (_cachedOrgId) return _cachedOrgId
+    try {
+      const cookieParts = [`sessionKey=${sessionKey}`]
+      if (cfClearance) cookieParts.push(`cf_clearance=${cfClearance}`)
+
+      const res = await fetch('https://claude.ai/api/organizations', {
         headers: {
-          'Authorization': `Bearer ${token}`,
-          'anthropic-beta': 'oauth-2025-04-20',
-          'User-Agent': 'claude-code/2.0.32',
           'Accept': 'application/json',
+          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+          'Cookie': cookieParts.join('; '),
         },
       })
-
-      if (res.status === 429) {
-        const retryAfter = parseInt(res.headers.get('retry-after') || '60', 10)
-        return { rateLimited: true, retryAfterSec: retryAfter }
+      if (!res.ok) {
+        logger.error('[usage] Organizations API returned', res.status)
+        return null
       }
-      if (!res.ok) return null
-
-      const data = await res.json()
-      return {
-        fiveHour: data.five_hour?.utilization ?? null,
-        sevenDay: data.seven_day?.utilization ?? null,
-        fiveHourReset: data.five_hour?.resets_at ?? null,
-        sevenDayReset: data.seven_day?.resets_at ?? null,
+      const orgs = await res.json()
+      if (!Array.isArray(orgs) || orgs.length === 0) {
+        logger.error('[usage] No organizations found')
+        return null
       }
-    } catch { return null }
+      _cachedOrgId = orgs[0].uuid
+      logger.log('[usage] Auto-detected org ID:', _cachedOrgId)
+      return _cachedOrgId
+    } catch (e) {
+      logger.error('[usage] getOrgId failed:', e)
+      return null
+    }
+  }
+
+  /** Fetch usage via session key (primary — lenient rate limits) */
+  async function fetchUsageViaSessionKey(): Promise<{ fiveHour: number | null; sevenDay: number | null; fiveHourReset: string | null; sevenDayReset: string | null } | null> {
+    const creds = await getSessionKeyFromChrome()
+    if (!creds) return null
+    const orgId = await getOrgId(creds.sessionKey, creds.cfClearance)
+    if (!orgId) return null
+
+    const cookieParts = [`sessionKey=${creds.sessionKey}`]
+    if (creds.cfClearance) cookieParts.push(`cf_clearance=${creds.cfClearance}`)
+
+    const res = await fetch(`https://claude.ai/api/organizations/${orgId}/usage`, {
+      headers: {
+        'Accept': 'application/json',
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        'Cookie': cookieParts.join('; '),
+      },
+    })
+
+    if (res.status === 401 || res.status === 403) {
+      _cachedSessionKey = null
+      _cachedOrgId = null
+      _cachedCfClearance = null
+      _sessionKeyCacheTime = 0
+      logger.log('[usage] Session key expired or blocked, will re-extract')
+      return null
+    }
+    if (!res.ok) return null
+
+    const data = await res.json()
+    logger.log('[usage] [session-key] 5h=', data.five_hour?.utilization, 'reset=', data.five_hour?.resets_at, '7d=', data.seven_day?.utilization, 'reset=', data.seven_day?.resets_at)
+    return {
+      fiveHour: data.five_hour?.utilization ?? null,
+      sevenDay: data.seven_day?.utilization ?? null,
+      fiveHourReset: data.five_hour?.resets_at ?? null,
+      sevenDayReset: data.seven_day?.resets_at ?? null,
+    }
+  }
+
+  /** Fetch usage via OAuth (fallback — strict rate limits) */
+  async function fetchUsageViaOAuth(): Promise<{ fiveHour: number | null; sevenDay: number | null; fiveHourReset: string | null; sevenDayReset: string | null } | 'rateLimited' | null> {
+    const token = await getOAuthToken()
+    if (!token) return null
+
+    const res = await fetch('https://api.anthropic.com/api/oauth/usage', {
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'anthropic-beta': 'oauth-2025-04-20',
+        'User-Agent': 'claude-code/2.0.32',
+        'Accept': 'application/json',
+      },
+    })
+
+    if (res.status === 429) return 'rateLimited'
+    if (!res.ok) return null
+
+    const data = await res.json()
+    logger.log('[usage] [oauth] 5h=', data.five_hour?.utilization, '7d=', data.seven_day?.utilization)
+    return {
+      fiveHour: data.five_hour?.utilization ?? null,
+      sevenDay: data.seven_day?.utilization ?? null,
+      fiveHourReset: data.five_hour?.resets_at ?? null,
+      sevenDayReset: data.seven_day?.resets_at ?? null,
+    }
+  }
+
+  registerHandler('claude:get-usage', async () => {
+    try {
+      // Try session key first (lenient rate limits on claude.ai)
+      const sessionResult = await fetchUsageViaSessionKey()
+      if (sessionResult) return sessionResult
+
+      // Fall back to OAuth (strict rate limits on api.anthropic.com)
+      const oauthResult = await fetchUsageViaOAuth()
+      if (oauthResult === 'rateLimited') {
+        return { rateLimited: true, retryAfterSec: 120 }
+      }
+      return oauthResult
+    } catch (e) {
+      logger.error('[usage] get-usage failed:', e)
+      return null
+    }
   })
 
   // Git

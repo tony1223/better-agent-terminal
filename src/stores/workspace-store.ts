@@ -23,10 +23,11 @@ class WorkspaceStore {
   private _usageTimer: ReturnType<typeof setTimeout> | null = null
   private _usagePollingStarted = false
   private _usageInflight = false
-  private _usageBaseInterval = 15 * 1000            // 15 sec normal
-  private _usageCurrentInterval = 15 * 1000
+  private _usageBaseInterval = 120 * 1000            // 2 min normal (API has strict rate limits)
+  private _usageCurrentInterval = 120 * 1000
   private _usageMaxInterval = 30 * 60 * 1000       // 30 min max backoff
   private _usageMinInterval = 60 * 1000             // 1 min min (after activity)
+  private _usageRateLimitMin = 120 * 1000           // 2 min min when rate limited
   private _visibilityHandler: (() => void) | null = null
 
   get claudeUsage() { return this._claudeUsage }
@@ -229,6 +230,17 @@ class WorkspaceStore {
       )
     }
     this.notify()
+    this.save()
+  }
+
+  setTerminalSessionMeta(terminalId: string, meta: { totalCost: number; inputTokens: number; outputTokens: number; durationMs: number; numTurns: number; contextWindow: number }): void {
+    this.state = {
+      ...this.state,
+      terminals: this.state.terminals.map(t =>
+        t.id === terminalId ? { ...t, sessionMeta: meta } : t
+      )
+    }
+    // Don't notify — this is a background persistence update, no UI re-render needed
     this.save()
   }
 
@@ -518,6 +530,7 @@ class WorkspaceStore {
       cwd: t.cwd,
       sdkSessionId: t.sdkSessionId,
       model: t.model,
+      sessionMeta: t.sessionMeta,
     }))
     const data = JSON.stringify({
       workspaces: this.state.workspaces,
@@ -545,6 +558,7 @@ class WorkspaceStore {
           cwd: t.cwd || '',
           sdkSessionId: t.sdkSessionId,
           model: t.model,
+          sessionMeta: t.sessionMeta,
           scrollbackBuffer: [],
           pid: undefined,
         }))
