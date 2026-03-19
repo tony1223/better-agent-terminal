@@ -484,10 +484,15 @@ export class ClaudeAgentManager {
           session.metadata.model = initMsg.model
           session.metadata.sdkSessionId = initMsg.session_id
           session.metadata.cwd = initMsg.cwd || session.cwd
-          logger.log(`[claude:status] EMIT sessionId=${sessionId.slice(0, 8)} sdkSessionId=${session.metadata.sdkSessionId?.slice(0, 8)}`)
+          // SDK reports 'plan' for planBypass (since we map planBypass→plan before sending to SDK).
+          // Only override SDK's value when we detect this specific mismatch to avoid masking other bugs.
+          const reportedMode = (initMsg.permissionMode === 'plan' && session.permissionMode === 'planBypass')
+            ? session.permissionMode
+            : (initMsg.permissionMode || 'default')
+          logger.log(`[claude:status] EMIT sessionId=${sessionId.slice(0, 8)} sdkSessionId=${session.metadata.sdkSessionId?.slice(0, 8)} sdkMode=${initMsg.permissionMode} appMode=${session.permissionMode} reported=${reportedMode}`)
           this.send('claude:status', sessionId, {
             ...session.metadata,
-            permissionMode: initMsg.permissionMode || 'default',
+            permissionMode: reportedMode,
           })
 
         }
