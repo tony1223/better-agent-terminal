@@ -232,6 +232,7 @@
     "allowThisCall": "Allow this <strong>{{toolName}}</strong> call?",
     "yes": "Yes",
     "yesDontAskAgain": "Yes, don't ask again for this session",
+    "yesDontAskAgainForCommands": "Yes, and don't ask again for {{commands}} commands",
     "no": "No",
     "tellClaudeInstead": "Tell Claude what to do instead",
     "escToCancel": "Esc to cancel",

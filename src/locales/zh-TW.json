@@ -232,6 +232,7 @@
     "allowThisCall": "允許此 <strong>{{toolName}}</strong> 呼叫？",
     "yes": "是",
     "yesDontAskAgain": "是，此工作階段不再詢問",
+    "yesDontAskAgainForCommands": "是，且不再詢問 {{commands}} 指令",
     "no": "否",
     "tellClaudeInstead": "告訴 Claude 該做什麼",
     "escToCancel": "按 Esc 取消",
