@@ -1055,6 +1055,16 @@ export class ClaudeAgentManager {
     if (!session) return false
     const pending = session.pendingPermissions.get(toolUseId)
     if (!pending) return false
+    // Apply setMode directives from updatedPermissions (e.g. "don't ask again" → acceptEdits)
+    if (result.behavior === 'allow' && result.updatedPermissions) {
+      for (const perm of result.updatedPermissions) {
+        const p = perm as { type?: string; mode?: string }
+        if (p.type === 'setMode' && p.mode) {
+          session.permissionMode = p.mode as AppPermissionMode
+          this.send('claude:modeChange', sessionId, session.permissionMode)
+        }
+      }
+    }
     pending.resolve(result)
     session.pendingPermissions.delete(toolUseId)
     return true
