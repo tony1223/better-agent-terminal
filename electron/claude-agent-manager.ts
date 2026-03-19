@@ -342,14 +342,20 @@ export class ClaudeAgentManager {
             return new Promise((resolve) => {
               session.pendingPermissions.set(opts.toolUseID, {
                 resolve: (result: unknown) => {
-                  // On approval, switch to bypassPermissions for execution
                   if ((result as { behavior: string }).behavior === 'allow') {
-                    session.permissionMode = 'bypassPermissions'
-                    this.send('claude:modeChange', sessionId, 'bypassPermissions')
+                    if ((result as { dontAskAgain?: boolean }).dontAskAgain) {
+                      session.permissionMode = 'bypassPermissions'
+                      this.send('claude:modeChange', sessionId, 'bypassPermissions')
+                    } else {
+                      session.permissionMode = 'default'
+                      this.send('claude:modeChange', sessionId, 'default')
+                    }
                   }
+                  // deny: don't change mode, stay in planBypass
                   resolve(result)
                 }
               })
+              logger.log(`[Permission] toolName=${toolName} suggestions=${JSON.stringify(opts.suggestions)}`)
               this.send('claude:permission-request', sessionId, {
                 toolUseId: opts.toolUseID,
                 toolName,
@@ -370,7 +376,22 @@ export class ClaudeAgentManager {
 
         // For all other tools, send permission request to frontend
         return new Promise((resolve) => {
-          session.pendingPermissions.set(opts.toolUseID, { resolve })
+          const wrappedResolve = toolName === 'ExitPlanMode'
+            ? (result: unknown) => {
+                if ((result as { behavior: string }).behavior === 'allow') {
+                  if ((result as { dontAskAgain?: boolean }).dontAskAgain) {
+                    session.permissionMode = 'acceptEdits'
+                  } else {
+                    session.permissionMode = 'default'
+                  }
+                  this.send('claude:modeChange', sessionId, session.permissionMode)
+                }
+                // deny: don't change mode, stay in plan
+                resolve(result)
+              }
+            : resolve
+          session.pendingPermissions.set(opts.toolUseID, { resolve: wrappedResolve })
+          logger.log(`[Permission] toolName=${toolName} suggestions=${JSON.stringify(opts.suggestions)}`)
           this.send('claude:permission-request', sessionId, {
             toolUseId: opts.toolUseID,
             toolName,
@@ -545,13 +566,8 @@ export class ClaudeAgentManager {
                     session.permissionMode = 'plan'
                   }
                   this.send('claude:modeChange', sessionId, session.permissionMode)
-                } else if (toolBlock.name === 'ExitPlanMode') {
-                  // In planBypass, mode transition is handled by canUseTool approval flow
-                  if (session.permissionMode !== 'planBypass') {
-                    session.permissionMode = 'default'
-                    this.send('claude:modeChange', sessionId, 'default')
-                  }
                 }
+                // ExitPlanMode mode transition is handled by canUseTool resolve callback
               }
               if ('type' in block && block.type === 'tool_result') {
                 const resultBlock = block as { tool_use_id: string; content?: string; is_error?: boolean }
@@ -1034,7 +1050,7 @@ export class ClaudeAgentManager {
     return { ...session.metadata, permissionMode: session.permissionMode }
   }
 
-  resolvePermission(sessionId: string, toolUseId: string, result: { behavior: string; updatedInput?: Record<string, unknown>; message?: string }): boolean {
+  resolvePermission(sessionId: string, toolUseId: string, result: { behavior: string; updatedInput?: Record<string, unknown>; updatedPermissions?: unknown[]; message?: string; dontAskAgain?: boolean }): boolean {
     const session = this.sessions.get(sessionId)
     if (!session) return false
     const pending = session.pendingPermissions.get(toolUseId)
