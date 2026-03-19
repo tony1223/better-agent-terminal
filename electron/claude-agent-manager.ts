@@ -324,7 +324,6 @@ export class ClaudeAgentManager {
       const claudeCodePath = resolveClaudeCodePath()
       logger.log(`[Claude] runQuery: cwd=${session.cwd}, resumeId=${resumeId || 'none'}, claudeCodePath=${claudeCodePath || 'none'}`)
       const canUseTool: CanUseTool = async (toolName, input, opts) => {
-        logger.log(`[canUseTool] toolName=${toolName} permissionMode=${session.permissionMode} toolUseID=${opts.toolUseID}`)
         // Check if this is an AskUserQuestion tool — always show UI
         if (toolName === 'AskUserQuestion') {
           return new Promise((resolve) => {
@@ -343,7 +342,6 @@ export class ClaudeAgentManager {
             return new Promise((resolve) => {
               session.pendingPermissions.set(opts.toolUseID, {
                 resolve: (result: unknown) => {
-                  logger.log(`[ExitPlanMode planBypass] resolve result=${JSON.stringify(result)}`)
                   if ((result as { behavior: string }).behavior === 'allow') {
                     if ((result as { dontAskAgain?: boolean }).dontAskAgain) {
                       session.permissionMode = 'bypassPermissions'
@@ -357,7 +355,6 @@ export class ClaudeAgentManager {
                   resolve(result)
                 }
               })
-              logger.log(`[Permission] toolName=${toolName} suggestions=${JSON.stringify(opts.suggestions)}`)
               this.send('claude:permission-request', sessionId, {
                 toolUseId: opts.toolUseID,
                 toolName,
@@ -389,14 +386,12 @@ export class ClaudeAgentManager {
         return new Promise((resolve) => {
           const wrappedResolve = toolName === 'ExitPlanMode'
             ? (result: unknown) => {
-                logger.log(`[ExitPlanMode plan] resolve result=${JSON.stringify(result)}`)
                 if ((result as { behavior: string }).behavior === 'allow') {
                   if ((result as { dontAskAgain?: boolean }).dontAskAgain) {
                     session.permissionMode = 'acceptEdits'
                   } else {
                     session.permissionMode = 'default'
                   }
-                  logger.log(`[ExitPlanMode plan] set permissionMode=${session.permissionMode}`)
                   this.send('claude:modeChange', sessionId, session.permissionMode)
                 }
                 // deny: don't change mode, stay in plan
@@ -404,7 +399,6 @@ export class ClaudeAgentManager {
               }
             : resolve
           session.pendingPermissions.set(opts.toolUseID, { resolve: wrappedResolve })
-          logger.log(`[Permission] toolName=${toolName} suggestions=${JSON.stringify(opts.suggestions)}`)
           this.send('claude:permission-request', sessionId, {
             toolUseId: opts.toolUseID,
             toolName,
@@ -573,7 +567,6 @@ export class ClaudeAgentManager {
                   logger.log(`[activeTasks] Registered ${toolBlock.name} tool_use_id=${toolBlock.id.slice(0, 12)} desc=${desc.slice(0, 60)}`)
                 }
                 // Detect plan mode transitions and notify UI
-                logger.log(`[tool_use block] name=${toolBlock.name} permissionMode=${session.permissionMode}`)
                 if (toolBlock.name === 'EnterPlanMode') {
                   // Preserve planBypass if already in it; otherwise set to plan
                   if (session.permissionMode !== 'planBypass') {
@@ -971,7 +964,6 @@ export class ClaudeAgentManager {
     const session = this.sessions.get(sessionId)
     if (!session) return false
     // Always track the mode on the session so the next runQuery picks it up
-    logger.log(`[setPermissionMode] sessionId=${sessionId} mode=${mode} caller=${new Error().stack?.split('\n')[2]?.trim()}`)
     session.permissionMode = mode
     if (!session.queryInstance) return true
     try {
@@ -1070,13 +1062,11 @@ export class ClaudeAgentManager {
     if (!session) return false
     const pending = session.pendingPermissions.get(toolUseId)
     if (!pending) return false
-    logger.log(`[resolvePermission] toolUseId=${toolUseId} result=${JSON.stringify(result)} currentMode=${session.permissionMode}`)
     // Apply setMode directives from updatedPermissions (e.g. "don't ask again" → acceptEdits)
     if (result.behavior === 'allow' && result.updatedPermissions) {
       for (const perm of result.updatedPermissions) {
         const p = perm as { type?: string; mode?: string }
         if (p.type === 'setMode' && p.mode) {
-          logger.log(`[resolvePermission] setMode directive: ${p.mode}`)
           session.permissionMode = p.mode as AppPermissionMode
           this.send('claude:modeChange', sessionId, session.permissionMode)
         }
