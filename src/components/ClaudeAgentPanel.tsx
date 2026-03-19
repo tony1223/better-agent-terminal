@@ -1117,6 +1117,19 @@ export function ClaudeAgentPanel({ sessionId, cwd, isActive, workspaceId }: Read
 
   const showDontAskAgain = (pendingPermission?.suggestions?.length ?? 0) > 0
     || pendingPermission?.toolName === 'ExitPlanMode'
+
+  const dontAskAgainLabel = useMemo(() => {
+    if (!pendingPermission?.suggestions?.length) return "Yes, don't ask again for this session"
+    const suggestion = pendingPermission.suggestions[0] as { type?: string; rules?: { toolName?: string; ruleContent?: string }[] }
+    if (suggestion.type === 'addRules' && suggestion.rules?.length) {
+      const descriptions = suggestion.rules.map(r => {
+        const cmd = r.ruleContent?.split(':')[0] ?? r.ruleContent
+        return cmd
+      })
+      return `Yes, and don't ask again for ${descriptions.join(' and ')} commands`
+    }
+    return "Yes, don't ask again for this session"
+  }, [pendingPermission])
   const PERMISSION_OPTION_COUNT = showDontAskAgain ? 4 : 3 // with don't-ask-again: 0=Yes, 1=Yes always, 2=No, 3=custom; without: 0=Yes, 1=No, 2=custom
 
   const handlePermissionSelect = useCallback((index?: number) => {
@@ -2238,7 +2251,7 @@ export function ClaudeAgentPanel({ sessionId, cwd, isActive, workspaceId }: Read
                 onMouseEnter={() => setPermissionFocus(1)}
               >
                 <span className="claude-permission-option-num">2</span>
-                <span className="claude-permission-option-label">Yes, don't ask again for this session</span>
+                <span className="claude-permission-option-label">{dontAskAgainLabel}</span>
               </div>
             )}
             <div
