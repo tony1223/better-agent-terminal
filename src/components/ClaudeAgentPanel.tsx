@@ -656,13 +656,7 @@ export function ClaudeAgentPanel({ sessionId, cwd, isActive, workspaceId }: Read
 
       api.onModeChange((sid: string, mode: string) => {
         if (sid !== sessionId) return
-        // When exiting plan mode, restore to bypass
-        if (mode === 'default') {
-          setPermissionMode('bypassPermissions')
-          window.electronAPI.claude.setPermissionMode(sessionId, 'bypassPermissions')
-        } else {
-          setPermissionMode(mode)
-        }
+        setPermissionMode(mode)
       }),
 
       api.onPromptSuggestion((sid: string, suggestion: string) => {
