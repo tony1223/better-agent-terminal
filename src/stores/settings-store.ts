@@ -192,6 +192,24 @@ class SettingsStore {
     this.save()
   }
 
+  setNotifyOnComplete(enabled: boolean): void {
+    this.settings = { ...this.settings, notifyOnComplete: enabled }
+    this.notify()
+    this.save()
+  }
+
+  setNotifySound(enabled: boolean): void {
+    this.settings = { ...this.settings, notifySound: enabled }
+    this.notify()
+    this.save()
+  }
+
+  setNotifyOnlyBackground(enabled: boolean): void {
+    this.settings = { ...this.settings, notifyOnlyBackground: enabled }
+    this.notify()
+    this.save()
+  }
+
   // Get the agent command to execute
   getAgentCommand(): string | null {
     if (!this.settings.agentAutoCommand) return null

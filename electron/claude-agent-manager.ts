@@ -1,4 +1,4 @@
-import { BrowserWindow } from 'electron'
+import { BrowserWindow, Notification, app } from 'electron'
 import { createRequire } from 'module'
 import * as fsSync from 'fs'
 import * as fsPromises from 'fs/promises'
@@ -169,6 +169,58 @@ export class ClaudeAgentManager {
       }
     }
     broadcastHub.broadcast(channel, ...args)
+  }
+
+  /**
+   * Send a macOS/Windows/Linux system notification when Agent completes.
+   * Reads settings from settings.json to check if notifications are enabled.
+   */
+  private sendCompletionNotification(session: { cwd: string }, result?: string) {
+    try {
+      if (!Notification.isSupported()) return
+
+      // Read settings directly from file (main process doesn't have settings store)
+      const settingsPath = pathModule.join(app.getPath('userData'), 'settings.json')
+      let settings: Record<string, unknown> = {}
+      try {
+        settings = JSON.parse(fsSync.readFileSync(settingsPath, 'utf-8'))
+      } catch { /* settings file doesn't exist or is invalid */ }
+
+      // Check if notifications are enabled (default: true)
+      if (settings.notifyOnComplete === false) return
+
+      // Check if only notify when window is not focused
+      if (settings.notifyOnlyBackground !== false) {
+        const focused = this.getWindows().some(w => !w.isDestroyed() && w.isFocused())
+        if (focused) return
+      }
+
+      const workspaceName = pathModule.basename(session.cwd)
+      const body = result
+        ? result.slice(0, 100) + (result.length > 100 ? '...' : '')
+        : 'Task completed'
+
+      const notification = new Notification({
+        title: `✅ ${workspaceName}`,
+        body,
+        silent: settings.notifySound === false,
+      })
+
+      notification.on('click', () => {
+        // Focus the main window when notification is clicked
+        for (const win of this.getWindows()) {
+          if (!win.isDestroyed()) {
+            win.show()
+            win.focus()
+            break
+          }
+        }
+      })
+
+      notification.show()
+    } catch (err) {
+      logger.error('[notification] Failed to send:', err)
+    }
   }
 
   private static readonly MSG_BUFFER_CAP = 300
@@ -820,6 +872,9 @@ export class ClaudeAgentManager {
             result: resultMsg.result,
             errors: resultMsg.errors,
           })
+
+          // Send system notification on agent completion
+          this.sendCompletionNotification(session, resultMsg.result)
         }
       }
     } catch (error: unknown) {
