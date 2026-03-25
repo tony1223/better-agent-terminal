@@ -813,6 +813,13 @@ export function ClaudeAgentPanel({ sessionId, cwd, isActive, workspaceId }: Read
     })
   }, [])
 
+  // Update usage from SDK rate_limit_event (no polling needed, fires on every query)
+  useEffect(() => {
+    return window.electronAPI.claude.onUsageUpdate((info) => {
+      workspaceStore.applyRateLimitEvent(info)
+    })
+  }, [])
+
   // File picker: debounced search
   useEffect(() => {
     if (!showFilePicker) return

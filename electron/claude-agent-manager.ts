@@ -588,6 +588,14 @@ export class ClaudeAgentManager {
         }
         if (message.type === 'rate_limit_event') {
           logger.log(`[claude:rate_limit_event] ${JSON.stringify(message)}`)
+          const info = (message as { rate_limit_info?: { rateLimitType?: string; utilization?: number; resetsAt?: number } }).rate_limit_info
+          if (info?.rateLimitType && info.utilization !== undefined) {
+            this.send('claude:usage-update', {
+              rateLimitType: info.rateLimitType,
+              utilization: info.utilization,
+              resetsAt: info.resetsAt,
+            })
+          }
         }
         if (message.type === 'assistant') {
           const blocks = (message as { message?: { content?: unknown[] } }).message?.content

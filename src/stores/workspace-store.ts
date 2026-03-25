@@ -93,6 +93,18 @@ class WorkspaceStore {
     document.addEventListener('visibilitychange', this._visibilityHandler)
   }
 
+  /** Update usage from SDK rate_limit_event — no API call needed */
+  applyRateLimitEvent(info: { rateLimitType: string; utilization: number; resetsAt?: number }) {
+    const prev = this._claudeUsage ?? { fiveHour: null, sevenDay: null, fiveHourReset: null, sevenDayReset: null }
+    const resetIso = info.resetsAt ? new Date(info.resetsAt).toISOString() : null
+    if (info.rateLimitType === 'five_hour') {
+      this._claudeUsage = { ...prev, fiveHour: info.utilization, fiveHourReset: resetIso }
+    } else if (info.rateLimitType === 'seven_day' || info.rateLimitType === 'seven_day_opus' || info.rateLimitType === 'seven_day_sonnet') {
+      this._claudeUsage = { ...prev, sevenDay: info.utilization, sevenDayReset: resetIso }
+    }
+    this.notify()
+  }
+
   /** Call after agent activity (turn completed, session ended) for a timely refresh */
   refreshUsageNow() {
     if (!this._usagePollingStarted) return
