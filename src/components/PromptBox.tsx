@@ -78,14 +78,16 @@ export function PromptBox({ terminalId }: Readonly<PromptBoxProps>) {
     const history = getHistory()
     if (history.length === 0) return
 
-    // Up arrow: only when cursor is at the start (first line)
+    const textarea = textareaRef.current
+    const isMultiLine = text.includes('\n')
+
+    // Up arrow: navigate history only when single-line or already browsing history
     if (e.key === 'ArrowUp') {
-      const textarea = textareaRef.current
+      if (isMultiLine && historyIndex === -1) return // let textarea handle cursor movement
       if (textarea && textarea.selectionStart !== 0) return
 
       e.preventDefault()
       if (historyIndex === -1) {
-        // Save current draft before navigating history
         draftRef.current = text
       }
       const newIndex = historyIndex === -1 ? history.length - 1 : Math.max(0, historyIndex - 1)
@@ -94,16 +96,15 @@ export function PromptBox({ terminalId }: Readonly<PromptBoxProps>) {
       return
     }
 
-    // Down arrow: only when cursor is at the end (last line)
+    // Down arrow: navigate history only when single-line or already browsing history
     if (e.key === 'ArrowDown') {
-      const textarea = textareaRef.current
+      if (isMultiLine && historyIndex === -1) return
       if (textarea && textarea.selectionStart !== textarea.value.length) return
       if (historyIndex === -1) return
 
       e.preventDefault()
       const newIndex = historyIndex + 1
       if (newIndex >= history.length) {
-        // Back to draft
         setHistoryIndex(-1)
         setText(draftRef.current)
       } else {
@@ -120,6 +121,12 @@ export function PromptBox({ terminalId }: Readonly<PromptBoxProps>) {
     if (historyIndex !== -1) {
       setHistoryIndex(-1)
       draftRef.current = ''
+    }
+    // Auto-resize textarea height
+    const ta = textareaRef.current
+    if (ta) {
+      ta.style.height = 'auto'
+      ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`
     }
   }
 
@@ -152,8 +159,8 @@ export function PromptBox({ terminalId }: Readonly<PromptBoxProps>) {
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
           placeholder={imagePath ? t('promptBox.placeholderWithImage') : t('promptBox.placeholder')}
-          style={{ fontFamily }}
-          rows={3}
+          style={{ fontFamily, overflowY: 'auto', maxHeight: 200, resize: 'none' }}
+          rows={1}
         />
         <button
           className="prompt-box-send"
