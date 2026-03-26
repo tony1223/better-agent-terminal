@@ -2191,8 +2191,8 @@ export function ClaudeAgentPanel({ sessionId, cwd, isActive, workspaceId }: Read
               dangerouslySetInnerHTML={{ __html: renderChatMarkdown(msg.content) }}
               onClick={(e) => {
                 const target = e.target as HTMLElement
-                const link = target.closest('a[data-external-link]') as HTMLAnchorElement | null
-                if (link) {
+                const link = target.closest('a') as HTMLAnchorElement | null
+                if (link?.href) {
                   e.preventDefault()
                   window.electronAPI.shell.openExternal(link.href)
                 }
