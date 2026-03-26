@@ -15,10 +15,17 @@ import DOMPurify from 'dompurify'
 // Both use the same settings (gfm, breaks, highlight.js, link interception),
 // so sharing is intentional and avoids configuration drift.
 function renderChatMarkdown(text: string): string {
-  const rawHtml = marked.parse(text) as string
+  // Pre-process: convert bare file:// URLs to markdown links so marked renders them as <a>
+  // marked only auto-links http/https by default
+  const processed = text.replace(
+    /(?<!\[.*?\]\()(?<!\()(file:\/\/\/[^\s<>)\]`'"]+)/g,
+    '[$1]($1)'
+  )
+  const rawHtml = marked.parse(processed) as string
   return DOMPurify.sanitize(rawHtml, {
     ADD_TAGS: ['input'],
     ADD_ATTR: ['checked', 'disabled', 'type', 'data-external-link'],
+    ALLOWED_URI_REGEXP: /^(?:https?|mailto|tel|file):/i,
   })
 }
 
