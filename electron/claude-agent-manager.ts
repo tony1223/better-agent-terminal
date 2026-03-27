@@ -261,7 +261,7 @@ export class ClaudeAgentManager {
     this.send('claude:tool-result', sessionId, { id: toolId, ...updates })
   }
 
-  async startSession(sessionId: string, options: { cwd: string; prompt?: string; sdkSessionId?: string; permissionMode?: AppPermissionMode; model?: string; effort?: 'low' | 'medium' | 'high' | 'max' }): Promise<boolean> {
+  async startSession(sessionId: string, options: { cwd: string; prompt?: string; sdkSessionId?: string; permissionMode?: AppPermissionMode; model?: string; effort?: 'low' | 'medium' | 'high' | 'max'; enable1MContext?: boolean }): Promise<boolean> {
     // Prevent duplicate session creation
     if (this.sessions.has(sessionId)) {
       return true
@@ -301,7 +301,7 @@ export class ClaudeAgentManager {
         pendingAskUser: new Map(),
         permissionMode: options.permissionMode || 'default',
         effort: options.effort || 'medium',
-        enable1MContext: false,
+        enable1MContext: options.enable1MContext ?? false,
         model: options.model,
         messageQueue: [],
         activeTasks: new Map(),
@@ -509,6 +509,7 @@ export class ClaudeAgentManager {
       const currentMode = session.permissionMode
       // Map app-level bypassPlan to SDK's plan mode
       const sdkMode: PermissionMode = currentMode === 'bypassPlan' ? 'plan' : currentMode
+
       const queryOptions: Record<string, unknown> = {
         abortController: session.abortController,
         cwd: session.cwd,
@@ -1172,6 +1173,15 @@ export class ClaudeAgentManager {
     // Always persist the model on the session so the next runQuery picks it up
     session.model = model
     session.metadata.model = model
+    if (session.enable1MContext && model.includes('haiku')) {
+      this.send('claude:message', sessionId, {
+        id: `warn-1m-${Date.now()}`,
+        sessionId,
+        role: 'system',
+        content: `⚠ 1M context is enabled but model "${model}" does not support it. Beta will be ignored by API.`,
+        timestamp: Date.now(),
+      } satisfies ClaudeMessage)
+    }
 
     if (!session.queryInstance) {
       // No active query yet — model will be used when the next query starts
@@ -1203,6 +1213,15 @@ export class ClaudeAgentManager {
     const session = this.sessions.get(sessionId)
     if (!session) return false
     session.enable1MContext = enable
+    if (enable && session.model?.includes('haiku')) {
+      this.send('claude:message', sessionId, {
+        id: `warn-1m-${Date.now()}`,
+        sessionId,
+        role: 'system',
+        content: `⚠ 1M context is enabled but model "${session.model}" does not support it. Beta will be ignored by API.`,
+        timestamp: Date.now(),
+      } satisfies ClaudeMessage)
+    }
     return true
   }
 
@@ -1538,7 +1557,7 @@ export class ClaudeAgentManager {
     this.send('claude:history', sessionId, items)
   }
 
-  async resumeSession(sessionId: string, sdkSessionIdToResume: string, cwd: string, model?: string): Promise<boolean> {
+  async resumeSession(sessionId: string, sdkSessionIdToResume: string, cwd: string, model?: string, enable1MContext?: boolean): Promise<boolean> {
     // Stop current session if running
     const session = this.sessions.get(sessionId)
     if (session) {
@@ -1549,7 +1568,7 @@ export class ClaudeAgentManager {
     // Store the SDK session ID so startSession will use it for resume
     sdkSessionIds.set(sessionId, sdkSessionIdToResume)
     // startSession already calls loadSessionHistory when sdkSessionId is provided
-    const result = await this.startSession(sessionId, { cwd, sdkSessionId: sdkSessionIdToResume, model, permissionMode: 'bypassPermissions' })
+    const result = await this.startSession(sessionId, { cwd, sdkSessionId: sdkSessionIdToResume, model, permissionMode: 'bypassPermissions', enable1MContext })
     return result
   }
 
@@ -1591,15 +1610,7 @@ export class ClaudeAgentManager {
     sdkSessionIds.delete(sessionId)
 
     // Start a fresh session preserving settings
-    const ok = await this.startSession(sessionId, { cwd, permissionMode })
-    if (ok) {
-      const newSession = this.sessions.get(sessionId)
-      if (newSession) {
-        newSession.effort = effort
-        newSession.enable1MContext = enable1MContext
-        newSession.model = model
-      }
-    }
+    const ok = await this.startSession(sessionId, { cwd, permissionMode, effort, enable1MContext, model })
     // Notify all windows to clear UI for this session
     this.send('claude:session-reset', sessionId)
     return ok

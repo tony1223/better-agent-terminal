@@ -284,6 +284,8 @@
     "removeImage": "移除圖片",
     "addImage": "新增圖片",
     "effortLevel": "投入程度",
+    "1MContextEnabled": "1M 上下文已啟用（點擊停用）",
+    "1MContextDisabled": "1M 上下文已停用（點擊啟用）",
     "forkSession": "分支：從目前對話建立新分頁",
     "forkButton": "用目前進度分支",
     "attachImages": "附加圖片（最多 5 張）",

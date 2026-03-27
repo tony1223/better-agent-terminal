@@ -129,7 +129,7 @@ export function ClaudeAgentPanel({ sessionId, cwd, isActive, workspaceId }: Read
   const [permissionMode, setPermissionMode] = useState<string>('bypassPermissions')
   const [currentModel, setCurrentModel] = useState<string>('')
   const [effortLevel, setEffortLevel] = useState<string>('medium')
-  const [enable1MContext, setEnable1MContext] = useState(false)
+  const [enable1MContext, setEnable1MContext] = useState(() => settingsStore.getSettings().enable1MContext !== false)
   const [claudeUsage, setClaudeUsage] = useState(workspaceStore.claudeUsage)
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([])
   const [pendingPermission, setPendingPermission] = useState<PendingPermission | null>(null)
@@ -744,13 +744,17 @@ export function ClaudeAgentPanel({ sessionId, cwd, isActive, workspaceId }: Read
       const effectiveEffort = globalSettings.defaultEffort || 'medium'
       setEffortLevel(effectiveEffort)
 
+      // Use global default 1M context setting
+      const effective1MContext = globalSettings.enable1MContext !== false
+      setEnable1MContext(effective1MContext)
+
       if (savedSdkSessionId) {
         dlog(`${stag} AUTO-RESUME sdkSessionId=${savedSdkSessionId.slice(0, 8)}`)
         historyLoadedRef.current = true
-        window.electronAPI.claude.resumeSession(sessionId, savedSdkSessionId, cwd, savedModel)
+        window.electronAPI.claude.resumeSession(sessionId, savedSdkSessionId, cwd, savedModel, effective1MContext)
       } else {
         dlog(`${stag} FRESH startSession`)
-        window.electronAPI.claude.startSession(sessionId, { cwd, permissionMode, model: effectiveModel, effort: effectiveEffort as 'low' | 'medium' | 'high' | 'max' })
+        window.electronAPI.claude.startSession(sessionId, { cwd, permissionMode, model: effectiveModel, effort: effectiveEffort as 'low' | 'medium' | 'high' | 'max', enable1MContext: effective1MContext })
       }
     }
     return () => {
@@ -866,7 +870,7 @@ export function ClaudeAgentPanel({ sessionId, cwd, isActive, workspaceId }: Read
     sessionStartedRef.current = false
     // Mark that history will be loaded — prevents sys-init from wiping messages
     historyLoadedRef.current = true
-    await window.electronAPI.claude.resumeSession(sessionId, sdkSessionId, cwd)
+    await window.electronAPI.claude.resumeSession(sessionId, sdkSessionId, cwd, undefined, enable1MContext)
     workspaceStore.setTerminalSdkSessionId(sessionId, sdkSessionId)
   }, [sessionId, cwd])
 
@@ -2692,6 +2696,13 @@ export function ClaudeAgentPanel({ sessionId, cwd, isActive, workspaceId }: Read
               <option value="medium">medium</option>
               <option value="high">high</option>
             </select>
+            <span
+              className={`claude-status-btn${enable1MContext ? ' active' : ''}`}
+              onClick={handle1MContextToggle}
+              title={enable1MContext ? t('claude.1MContextEnabled') : t('claude.1MContextDisabled')}
+            >
+              1M
+            </span>
             {accountInfo?.organization && (
               <span className="claude-status-btn claude-account-info" title={`${accountInfo.email || ''} (${accountInfo.subscriptionType || 'unknown'})`}>
                 {accountInfo.organization}

@@ -441,7 +441,7 @@ function registerProxiedHandlers() {
   })
 
   // Claude Agent SDK
-  registerHandler('claude:start-session', (sessionId: string, options: { cwd: string; prompt?: string; permissionMode?: string; model?: string; effort?: string }) => claudeManager?.startSession(sessionId, options))
+  registerHandler('claude:start-session', (sessionId: string, options: { cwd: string; prompt?: string; permissionMode?: string; model?: string; effort?: string; enable1MContext?: boolean }) => claudeManager?.startSession(sessionId, options))
   registerHandler('claude:send-message', (sessionId: string, prompt: string, images?: string[]) => claudeManager?.sendMessage(sessionId, prompt, images))
   registerHandler('claude:stop-session', (sessionId: string) => claudeManager?.stopSession(sessionId))
   registerHandler('claude:set-permission-mode', (sessionId: string, mode: string) => claudeManager?.setPermissionMode(sessionId, mode as import('@anthropic-ai/claude-agent-sdk').PermissionMode))
@@ -486,7 +486,7 @@ function registerProxiedHandlers() {
   registerHandler('claude:resolve-permission', (sessionId: string, toolUseId: string, result: { behavior: string; updatedInput?: Record<string, unknown>; updatedPermissions?: unknown[]; message?: string; dontAskAgain?: boolean }) => claudeManager?.resolvePermission(sessionId, toolUseId, result))
   registerHandler('claude:resolve-ask-user', (sessionId: string, toolUseId: string, answers: Record<string, string>) => claudeManager?.resolveAskUser(sessionId, toolUseId, answers))
   registerHandler('claude:list-sessions', (cwd: string) => claudeManager?.listSessions(cwd))
-  registerHandler('claude:resume-session', (sessionId: string, sdkSessionId: string, cwd: string, model?: string) => claudeManager?.resumeSession(sessionId, sdkSessionId, cwd, model))
+  registerHandler('claude:resume-session', (sessionId: string, sdkSessionId: string, cwd: string, model?: string, enable1MContext?: boolean) => claudeManager?.resumeSession(sessionId, sdkSessionId, cwd, model, enable1MContext))
   registerHandler('claude:fork-session', (sessionId: string) => claudeManager?.forkSession(sessionId))
   registerHandler('claude:stop-task', (sessionId: string, taskId: string) => claudeManager?.stopTask(sessionId, taskId))
   registerHandler('claude:rest-session', (sessionId: string) => claudeManager?.restSession(sessionId))

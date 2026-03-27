@@ -284,6 +284,8 @@
     "removeImage": "Remove image",
     "addImage": "Add image",
     "effortLevel": "Effort level",
+    "1MContextEnabled": "1M context enabled (click to disable)",
+    "1MContextDisabled": "1M context disabled (click to enable)",
     "forkSession": "Fork: create a new tab from current conversation",
     "forkButton": "Fork from current progress",
     "attachImages": "Attach images (max 5)",
