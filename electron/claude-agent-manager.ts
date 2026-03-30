@@ -79,6 +79,27 @@ function resolveClaudeCodePath(): string {
   return resolved
 }
 
+function getClaudeQueryRuntime(cwd: string, options?: { includeExecutable?: boolean }) {
+  const runtimeOptions: Record<string, unknown> = { cwd }
+  const claudeCodePath = resolveClaudeCodePath()
+  const electronFallback = isElectronFallback()
+  const nodeExecutable = getNodeExecutable()
+
+  if (claudeCodePath) {
+    runtimeOptions.pathToClaudeCodeExecutable = claudeCodePath
+  }
+  if (options?.includeExecutable !== false && (nodeExecutable !== 'node' || electronFallback)) {
+    runtimeOptions.executable = nodeExecutable
+  }
+
+  return {
+    runtimeOptions,
+    claudeCodePath,
+    nodeExecutable,
+    electronFallback,
+  }
+}
+
 export interface SessionSummary {
   sdkSessionId: string
   timestamp: number
@@ -398,12 +419,15 @@ export class ClaudeAgentManager {
 
     // Declare resumeId outside try so it's accessible in catch for retry logic
     const resumeId = session.sdkSessionId
-    const electronFallback = isElectronFallback()
+    const {
+      runtimeOptions,
+      claudeCodePath,
+      nodeExecutable,
+      electronFallback,
+    } = getClaudeQueryRuntime(session.cwd)
 
     try {
       const query = await getQuery()
-      const claudeCodePath = resolveClaudeCodePath()
-      const nodeExecutable = getNodeExecutable()
       if (electronFallback) {
         process.env.ELECTRON_RUN_AS_NODE = '1'
         logger.log('[Claude] Using Electron binary as Node.js runtime (ELECTRON_RUN_AS_NODE=1)')
@@ -519,7 +543,6 @@ export class ClaudeAgentManager {
       const sdkMode: PermissionMode = currentMode === 'bypassPlan' ? 'plan' : currentMode
       const queryOptions: Record<string, unknown> = {
         abortController: session.abortController,
-        cwd: session.cwd,
         systemPrompt: { type: 'preset', preset: 'claude_code' },
         tools: { type: 'preset', preset: 'claude_code' },
         permissionMode: sdkMode,
@@ -534,8 +557,7 @@ export class ClaudeAgentManager {
         ...(session.model ? { model: session.model } : {}),
         ...(installedPlugins.length > 0 ? { plugins: installedPlugins } : {}),
         canUseTool,
-        ...(claudeCodePath ? { pathToClaudeCodeExecutable: claudeCodePath } : {}),
-        ...(nodeExecutable !== 'node' || electronFallback ? { executable: nodeExecutable } : {}),
+        ...runtimeOptions,
         stderr: (data: string) => {
           logger.error('[Claude Code stderr]', data)
           stderrOutput += data
@@ -1205,13 +1227,21 @@ export class ClaudeAgentManager {
     return true
   }
 
-  async getSupportedModels(_sessionId: string): Promise<Array<{ value: string; displayName: string; description: string; source: 'builtin' | 'sdk' }>> {
+  async getSupportedModels(sessionId: string): Promise<Array<{ value: string; displayName: string; description: string; source: 'builtin' | 'sdk' }>> {
+    const session = this.sessions.get(sessionId)
     const builtinValues = new Set(BAT_BUILTIN_MODELS.map(m => m.value))
     const builtins = BAT_BUILTIN_MODELS.map(m => ({ ...m, source: 'builtin' as const }))
     try {
-      const query = await getQuery()
-      const instance = query({ prompt: '', cwd: '/' })
-      const sdkModels = await instance.supportedModels()
+      let sdkModels: Array<{ value: string; displayName: string; description: string }>
+      if (session?.queryInstance) {
+        sdkModels = await session.queryInstance.supportedModels()
+      } else {
+        const query = await getQuery()
+        const cwd = session?.cwd || '/'
+        const { runtimeOptions } = getClaudeQueryRuntime(cwd, { includeExecutable: false })
+        const instance = query({ prompt: '', options: runtimeOptions })
+        sdkModels = await instance.supportedModels()
+      }
       // Exclude from SDK list any model already covered by builtins (including [1m] variants)
       const sdkFiltered = sdkModels
         .filter(m => !builtinValues.has(m.value) && !builtinValues.has(`${m.value}[1m]`))
@@ -1633,9 +1663,8 @@ export class ClaudeAgentManager {
     // Correct approach: call query() with { resume: currentSdkId, forkSession: true },
     // capture the new session_id from system:init, then abort immediately.
     const query = await getQuery()
-    const claudeCodePath = resolveClaudeCodePath()
-    const nodeExecutable = getNodeExecutable()
     const cwd = session?.cwd
+    const { runtimeOptions } = getClaudeQueryRuntime(cwd || '')
 
     logger.log(`[forkSession] starting: sdkSessionId=${currentSdkId.slice(0, 8)} cwd=${cwd}`)
 
@@ -1647,11 +1676,9 @@ export class ClaudeAgentManager {
         prompt: ' ',
         options: {
           abortController,
-          cwd,
           resume: currentSdkId,
           forkSession: true,
-          ...(claudeCodePath ? { pathToClaudeCodeExecutable: claudeCodePath } : {}),
-          ...(nodeExecutable !== 'node' ? { executable: nodeExecutable } : {}),
+          ...runtimeOptions,
         } as Parameters<typeof query>[0]['options'],
       })
 
