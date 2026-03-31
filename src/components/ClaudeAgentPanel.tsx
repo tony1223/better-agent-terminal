@@ -1242,11 +1242,37 @@ export function ClaudeAgentPanel({ sessionId, cwd, isActive, workspaceId, showUs
       }
       return
     }
+    // PageUp: scroll messages up by 85% viewport height
+    if (e.key === 'PageUp') {
+      e.preventDefault()
+      const container = messagesContainerRef.current
+      if (container) {
+        container.scrollTop -= container.clientHeight * 0.85
+      }
+      return
+    }
+    // PageDown: scroll messages down by 85% viewport height
+    if (e.key === 'PageDown') {
+      e.preventDefault()
+      const container = messagesContainerRef.current
+      if (container) {
+        container.scrollTop += container.clientHeight * 0.85
+      }
+      return
+    }
+    // End: scroll to bottom ONLY when input is empty
+    if (e.key === 'End' && !inputValueRef.current) {
+      const container = messagesContainerRef.current
+      if (container) {
+        container.scrollTop = container.scrollHeight
+      }
+      // Fall through to native behavior if input has content
+    }
     if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault()
       handleSend()
     }
-  }, [handleSend, handlePermissionModeCycle, setInputValue, showSlashMenu, filteredSlashCommands, slashMenuIndex, handleSlashSelect, promptSuggestion])
+  }, [handleSend, handlePermissionModeCycle, setInputValue, showSlashMenu, filteredSlashCommands, slashMenuIndex, handleSlashSelect, promptSuggestion, messagesContainerRef])
 
   const handleModelCycle = useCallback(async () => {
     if (availableModels.length === 0) return
