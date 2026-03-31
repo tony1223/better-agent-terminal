@@ -184,7 +184,11 @@
     "deleteConfirm": "确定要删除此代码片段吗？",
     "md": "MD",
     "text": "文本",
-    "edit": "编辑"
+    "edit": "编辑",
+    "scopeAll": "全部",
+    "scopeGlobal": "全局",
+    "scopeWorkspace": "工作区",
+    "scopeToWorkspace": "限定此工作区"
   },
   "skills": {
     "title": "Skills",

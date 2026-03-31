@@ -650,6 +650,7 @@ export default function App() {
                   isVisible={true}
                   width={panelSettings.snippetSidebar.width}
                   collapsed={false}
+                  workspaceId={state.activeWorkspaceId ?? undefined}
                   onCollapse={handleSnippetCollapse}
                   onPasteToTerminal={handlePasteToTerminal}
                 />

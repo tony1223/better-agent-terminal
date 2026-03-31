@@ -1413,6 +1413,7 @@ function registerProxiedHandlers() {
   registerHandler('snippet:search', (_ctx, query: string) => snippetDb.search(query))
   registerHandler('snippet:getCategories', (_ctx) => snippetDb.getCategories())
   registerHandler('snippet:getFavorites', (_ctx) => snippetDb.getFavorites())
+  registerHandler('snippet:getByWorkspace', (_ctx, workspaceId?: string) => snippetDb.getByWorkspace(workspaceId))
 
   // Profile (subset exposed to remote clients)
   registerHandler('profile:list', (_ctx) => profileManager.list())

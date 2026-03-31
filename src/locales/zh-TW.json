@@ -192,7 +192,11 @@
     "deleteConfirm": "確定要刪除此片段嗎？",
     "md": "MD",
     "text": "文字",
-    "edit": "編輯"
+    "edit": "編輯",
+    "scopeAll": "全部",
+    "scopeGlobal": "全域",
+    "scopeWorkspace": "工作區",
+    "scopeToWorkspace": "限定此工作區"
   },
 
   "skills": {

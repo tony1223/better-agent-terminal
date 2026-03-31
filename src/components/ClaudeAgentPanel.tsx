@@ -1034,6 +1034,56 @@ export function ClaudeAgentPanel({ sessionId, cwd, isActive, workspaceId, showUs
       return
     }
 
+    // Intercept /snippet command — inject snippet context into Claude session
+    if (trimmed === '/snippet' || trimmed.startsWith('/snippet ')) {
+      const query = trimmed.slice('/snippet'.length).trim()
+      clearInput()
+      try {
+        const snippets = query
+          ? await window.electronAPI.snippet.search(query)
+          : await window.electronAPI.snippet.getByWorkspace(workspaceId)
+        const snippetsJsonPath = '~/Library/Application Support/better-agent-terminal/snippets.json'
+        const snippetList = snippets.length === 0
+          ? 'No snippets exist yet.'
+          : snippets.map((s: { id: number; title: string; workspaceId?: string }) => `- [${s.id}] ${s.title}${s.workspaceId ? ' (workspace)' : ''}`).join('\n')
+        const contextPrompt = [
+          `[BAT Snippets Context]`,
+          `Snippets file: ${snippetsJsonPath}`,
+          `JSON structure: { "snippets": [{ id, title, content, format ("plaintext"|"markdown"), category?, tags?, workspaceId?, isFavorite, createdAt, updatedAt }], "nextId": N }`,
+          workspaceId ? `Current workspaceId: "${workspaceId}"` : '',
+          ``,
+          `${snippets.length} snippet(s)${query ? ` matching "${query}"` : ''}:`,
+          snippetList,
+          ``,
+          `Use Read tool to see full content. Use Write/Edit tool to create/update/delete snippets in the JSON file.`,
+          `Set workspaceId on a snippet to scope it to a specific workspace, or omit for global visibility.`,
+          query ? '' : `How would you like to work with your snippets?`,
+        ].filter(Boolean).join('\n')
+        // Show clean user message
+        setMessages(prev => [...prev, {
+          id: `user-${Date.now()}`,
+          sessionId,
+          role: 'user' as const,
+          content: trimmed,
+          timestamp: Date.now(),
+        }])
+        setIsStreaming(true)
+        setIsInterrupted(false)
+        setStreamingText('')
+        setStreamingThinking('')
+        await window.electronAPI.claude.sendMessage(sessionId, contextPrompt)
+      } catch {
+        setMessages(prev => [...prev, {
+          id: `error-${Date.now()}`,
+          sessionId,
+          role: 'system' as const,
+          content: 'Failed to load snippets.',
+          timestamp: Date.now(),
+        }])
+      }
+      return
+    }
+
     const imageDataUrls = attachedImages.map(i => i.dataUrl)
     const filePaths = attachedFiles.map(f => f.path)
     clearInput()
@@ -1145,6 +1195,7 @@ export function ClaudeAgentPanel({ sessionId, cwd, isActive, workspaceId, showUs
     const builtIn: SlashCommandInfo[] = [
       { name: 'new', description: 'Reset session (clear conversation)', argumentHint: '' },
       { name: 'clear', description: 'Reset session (same as /new)', argumentHint: '' },
+      { name: 'snippet', description: 'Show snippets to Claude for management', argumentHint: '' },
       { name: 'resume', description: 'Resume a previous session', argumentHint: '' },
       { name: 'model', description: 'Select model', argumentHint: '' },
     ]

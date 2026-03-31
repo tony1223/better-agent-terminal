@@ -294,6 +294,64 @@
   margin-bottom: 4px;
 }
 
+.snippet-item-badges {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+}
+
+.snippet-item-scope.workspace {
+  font-size: 8px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: #2563eb20;
+  color: #60a5fa;
+  font-weight: 600;
+}
+
+/* Scope filter bar */
+.snippet-sidebar-scope {
+  display: flex;
+  gap: 2px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.snippet-scope-btn {
+  flex: 1;
+  padding: 3px 6px;
+  font-size: 10px;
+  background: transparent;
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.snippet-scope-btn:hover {
+  background: var(--bg-hover);
+}
+
+.snippet-scope-btn.active {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  border-color: var(--accent-color, #60a5fa);
+}
+
+/* Edit dialog inline form group */
+.form-group-inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-direction: row !important;
+}
+
+.form-group-inline label {
+  margin-bottom: 0 !important;
+}
+
 .snippet-item-title {
   font-size: 12px;
   font-weight: 500;

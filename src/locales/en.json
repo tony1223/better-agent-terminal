@@ -192,7 +192,11 @@
     "deleteConfirm": "Are you sure you want to delete this snippet?",
     "md": "MD",
     "text": "Text",
-    "edit": "Edit"
+    "edit": "Edit",
+    "scopeAll": "All",
+    "scopeGlobal": "Global",
+    "scopeWorkspace": "Workspace",
+    "scopeToWorkspace": "Scope to this workspace"
   },
 
   "skills": {

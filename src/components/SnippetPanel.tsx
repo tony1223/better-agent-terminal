@@ -11,6 +11,7 @@ interface Snippet {
     format: SnippetFormat
     category?: string
     tags?: string
+    workspaceId?: string
     isFavorite: boolean
     createdAt: number
     updatedAt: number
@@ -20,6 +21,7 @@ interface SnippetSidebarProps {
     isVisible: boolean
     width?: number
     collapsed?: boolean
+    workspaceId?: string
     onCollapse?: () => void
     onPasteToClipboard?: (content: string) => void
     onPasteToTerminal?: (content: string) => void
@@ -28,20 +30,27 @@ interface SnippetSidebarProps {
 interface EditDialogProps {
     snippet: Snippet | null
     isNew: boolean
-    onSave: (snippet: Partial<Snippet> & { title: string; content: string; format: SnippetFormat }) => void
+    workspaceId?: string
+    onSave: (snippet: Partial<Snippet> & { title: string; content: string; format: SnippetFormat; workspaceId?: string }) => void
     onClose: () => void
 }
 
 // Edit/Create Dialog Component
-function EditDialog({ snippet, isNew, onSave, onClose }: Readonly<EditDialogProps>) {
+function EditDialog({ snippet, isNew, workspaceId, onSave, onClose }: Readonly<EditDialogProps>) {
     const { t } = useTranslation()
     const [title, setTitle] = useState(snippet?.title || '')
     const [content, setContent] = useState(snippet?.content || '')
     const [format, setFormat] = useState<SnippetFormat>(snippet?.format || 'plaintext')
+    const [scopeToWorkspace, setScopeToWorkspace] = useState(!!snippet?.workspaceId)
 
     const handleSave = () => {
         if (!title.trim() || !content.trim()) return
-        onSave({ title: title.trim(), content: content.trim(), format })
+        onSave({
+            title: title.trim(),
+            content: content.trim(),
+            format,
+            workspaceId: scopeToWorkspace && workspaceId ? workspaceId : undefined,
+        })
         onClose()
     }
 
@@ -70,6 +79,17 @@ function EditDialog({ snippet, isNew, onSave, onClose }: Readonly<EditDialogProp
                             <option value="markdown">{t('snippets.markdown')}</option>
                         </select>
                     </div>
+                    {workspaceId && (
+                        <div className="form-group form-group-inline">
+                            <input
+                                type="checkbox"
+                                id="scope-workspace"
+                                checked={scopeToWorkspace}
+                                onChange={e => setScopeToWorkspace(e.target.checked)}
+                            />
+                            <label htmlFor="scope-workspace">{t('snippets.scopeToWorkspace')}</label>
+                        </div>
+                    )}
                     <div className="form-group">
                         <label>{t('snippets.content')}</label>
                         <textarea
@@ -95,10 +115,13 @@ function EditDialog({ snippet, isNew, onSave, onClose }: Readonly<EditDialogProp
     )
 }
 
+type ScopeFilter = 'all' | 'global' | 'workspace'
+
 export function SnippetSidebar({
     isVisible,
     width = 280,
     collapsed = false,
+    workspaceId,
     onCollapse,
     onPasteToClipboard,
     onPasteToTerminal
@@ -112,6 +135,8 @@ export function SnippetSidebar({
     const [doubleClickAction, setDoubleClickAction] = useState<'clipboard' | 'terminal' | 'edit'>('terminal')
     // Auto-execute: automatically press Enter after pasting to terminal
     const [autoExecute, setAutoExecute] = useState(true)
+    // Scope filter
+    const [scopeFilter, setScopeFilter] = useState<ScopeFilter>('all')
 
     const loadSnippets = useCallback(async () => {
         try {
@@ -119,13 +144,19 @@ export function SnippetSidebar({
             if (searchQuery) {
                 data = await window.electronAPI.snippet.search(searchQuery)
             } else {
-                data = await window.electronAPI.snippet.getAll()
+                data = await window.electronAPI.snippet.getByWorkspace(workspaceId)
+            }
+            // Apply scope filter
+            if (scopeFilter === 'global') {
+                data = data.filter(s => !s.workspaceId)
+            } else if (scopeFilter === 'workspace' && workspaceId) {
+                data = data.filter(s => s.workspaceId === workspaceId)
             }
             setSnippets(data)
         } catch (error) {
             console.error('Failed to load snippets:', error)
         }
-    }, [searchQuery])
+    }, [searchQuery, workspaceId, scopeFilter])
 
     useEffect(() => {
         if (isVisible) {
@@ -133,7 +164,7 @@ export function SnippetSidebar({
         }
     }, [isVisible, loadSnippets])
 
-    const handleCreate = async (data: { title: string; content: string; format: SnippetFormat }) => {
+    const handleCreate = async (data: { title: string; content: string; format: SnippetFormat; workspaceId?: string }) => {
         try {
             await window.electronAPI.snippet.create(data)
             loadSnippets()
@@ -142,7 +173,7 @@ export function SnippetSidebar({
         }
     }
 
-    const handleUpdate = async (id: number, data: Partial<{ title: string; content: string; format: SnippetFormat }>) => {
+    const handleUpdate = async (id: number, data: Partial<{ title: string; content: string; format: SnippetFormat; workspaceId?: string }>) => {
         try {
             await window.electronAPI.snippet.update(id, data)
             loadSnippets()
@@ -228,6 +259,29 @@ export function SnippetSidebar({
                     />
                 </div>
 
+                {workspaceId && (
+                    <div className="snippet-sidebar-scope">
+                        <button
+                            className={`snippet-scope-btn ${scopeFilter === 'all' ? 'active' : ''}`}
+                            onClick={() => setScopeFilter('all')}
+                        >
+                            {t('snippets.scopeAll')}
+                        </button>
+                        <button
+                            className={`snippet-scope-btn ${scopeFilter === 'global' ? 'active' : ''}`}
+                            onClick={() => setScopeFilter('global')}
+                        >
+                            {t('snippets.scopeGlobal')}
+                        </button>
+                        <button
+                            className={`snippet-scope-btn ${scopeFilter === 'workspace' ? 'active' : ''}`}
+                            onClick={() => setScopeFilter('workspace')}
+                        >
+                            {t('snippets.scopeWorkspace')}
+                        </button>
+                    </div>
+                )}
+
                 <div className="snippet-sidebar-options">
                     <label>{t('snippets.doubleClick')}</label>
                     <select
@@ -267,9 +321,14 @@ export function SnippetSidebar({
                             >
                                 <div className="snippet-item-main">
                                     <span className="snippet-item-title">{snippet.title}</span>
-                                    <span className={`snippet-item-format ${snippet.format}`}>
-                                        {snippet.format === 'markdown' ? t('snippets.md') : t('snippets.text')}
-                                    </span>
+                                    <div className="snippet-item-badges">
+                                        {snippet.workspaceId && (
+                                            <span className="snippet-item-scope workspace" title={t('snippets.scopeWorkspace')}>W</span>
+                                        )}
+                                        <span className={`snippet-item-format ${snippet.format}`}>
+                                            {snippet.format === 'markdown' ? t('snippets.md') : t('snippets.text')}
+                                        </span>
+                                    </div>
                                 </div>
                                 <div className="snippet-item-preview">
                                     {snippet.content.substring(0, 50)}
@@ -316,6 +375,7 @@ export function SnippetSidebar({
                 <EditDialog
                     snippet={editingSnippet}
                     isNew={isCreating}
+                    workspaceId={workspaceId}
                     onSave={(data) => {
                         if (isCreating) {
                             handleCreate(data)

@@ -13,6 +13,7 @@ export interface Snippet {
     format: SnippetFormat
     category?: string
     tags?: string
+    workspaceId?: string  // if set, only visible in this workspace
     isFavorite: boolean
     createdAt: number
     updatedAt: number
@@ -24,6 +25,7 @@ export interface CreateSnippetInput {
     format?: SnippetFormat
     category?: string
     tags?: string
+    workspaceId?: string
     isFavorite?: boolean
 }
 
@@ -75,6 +77,7 @@ class SnippetDatabase {
             format: input.format || 'plaintext',
             category: input.category,
             tags: input.tags,
+            workspaceId: input.workspaceId,
             isFavorite: input.isFavorite || false,
             createdAt: now,
             updatedAt: now
@@ -127,6 +130,7 @@ class SnippetDatabase {
             format: updates.format ?? existing.format,
             category: updates.category ?? existing.category,
             tags: updates.tags ?? existing.tags,
+            workspaceId: updates.workspaceId !== undefined ? updates.workspaceId : existing.workspaceId,
             isFavorite: updates.isFavorite ?? existing.isFavorite,
             updatedAt: Date.now()
         }
@@ -147,6 +151,12 @@ class SnippetDatabase {
         const snippet = this.getById(id)
         if (!snippet) return null
         return this.update(id, { isFavorite: !snippet.isFavorite })
+    }
+
+    getByWorkspace(workspaceId?: string): Snippet[] {
+        return this.data.snippets
+            .filter(s => !s.workspaceId || s.workspaceId === workspaceId)
+            .sort((a, b) => b.updatedAt - a.updatedAt)
     }
 
     getCategories(): string[] {
