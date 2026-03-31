@@ -37,6 +37,8 @@
     "autoRunAgentCommandHint": "建立 Agent 終端時自動執行 Agent 指令（例如 `claude`）。",
     "allowBypassPermissions": "允許跳過權限確認",
     "allowBypassPermissionsHint": "啟用後，在 Claude Agent 面板中切換至 bypassPermissions 模式時不會顯示確認對話框。請謹慎使用。",
+    "collapseToolOutputs": "預設折疊所有工具輸出",
+    "collapseToolOutputsHint": "啟用後，所有工具輸出預設為折疊狀態，點擊可展開。唯讀工具（Read、Glob、Grep）不受此設定影響，一律折疊。",
     "defaultModel": "預設模型",
     "defaultModelPlaceholder": "例如 claude-sonnet-4-5-20250514",
     "defaultModelHint": "新 Agent 對話使用的模型 ID。留空則使用 SDK 預設。",

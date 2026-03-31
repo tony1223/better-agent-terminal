@@ -2192,7 +2192,9 @@ export function ClaudeAgentPanel({ sessionId, cwd, isActive, workspaceId, showUs
               {item.result && (() => {
                 const raw = typeof item.result === 'string' ? item.result : String(item.result)
                 const { content: outText, reminders, errors } = splitSystemReminders(raw)
-                // All tool outputs are collapsed by default
+                // Collapse by default for read-only tools; collapse all if setting enabled
+                const isReadOnlyTool = ['Read', 'Glob', 'Grep', 'LS', 'NotebookRead'].includes(item.toolName)
+                const shouldCollapse = isReadOnlyTool || settingsStore.getSettings().collapseToolOutputs
                 const isOutExpanded = expandedTools.has(outBlockId)
                 return (
                   <>
@@ -2202,7 +2204,7 @@ export function ClaudeAgentPanel({ sessionId, cwd, isActive, workspaceId, showUs
                         <span className="claude-tool-row-content">{err}</span>
                       </div>
                     ))}
-                    {outText && (
+                    {outText && shouldCollapse && (
                       <div
                         className="claude-tool-row"
                         onClick={() => toggleTool(outBlockId)}
@@ -2215,6 +2217,19 @@ export function ClaudeAgentPanel({ sessionId, cwd, isActive, workspaceId, showUs
                           }
                         </span>
                         <span className={`claude-tool-chevron ${isOutExpanded ? 'expanded' : ''}`}>&#9654;</span>
+                      </div>
+                    )}
+                    {outText && !shouldCollapse && (
+                      <div
+                        className="claude-tool-row"
+                        onClick={() => handleCopyBlock(outText, outBlockId)}
+                        title={t('claude.clickToCopy')}
+                      >
+                        <span className="claude-tool-row-label">{t('claude.out')}</span>
+                        <span className="claude-tool-row-content"><LinkedText text={outText} /></span>
+                        <span className={`claude-tool-row-copy ${copiedId === outBlockId ? 'copied' : ''}`}>
+                          {copiedId === outBlockId ? '✓' : '⧉'}
+                        </span>
                       </div>
                     )}
                     {reminders.length > 0 && (

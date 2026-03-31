@@ -37,6 +37,8 @@
     "autoRunAgentCommandHint": "Automatically execute the agent command (e.g., `claude`) when creating an Agent Terminal.",
     "allowBypassPermissions": "Allow bypass permissions without confirmation",
     "allowBypassPermissionsHint": "When enabled, switching to bypassPermissions mode in Claude Agent Panel will not show a confirmation dialog. Use with caution.",
+    "collapseToolOutputs": "Collapse all tool outputs by default",
+    "collapseToolOutputsHint": "When enabled, all tool outputs are collapsed by default. Click to expand. Read-only tools (Read, Glob, Grep) are always collapsed regardless of this setting.",
     "defaultModel": "Default Model",
     "defaultModelPlaceholder": "e.g., claude-sonnet-4-5-20250514",
     "defaultModelHint": "Model ID used for new Agent sessions. Leave empty to use SDK default.",

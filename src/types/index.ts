@@ -217,6 +217,7 @@ export interface AppSettings {
   notifySound?: boolean;               // 通知時播放聲音
   notifyOnlyBackground?: boolean;      // 僅在視窗不在前景時通知
   statuslineItems?: StatuslineItemConfig[];  // 自訂 statusline 項目排序和顯示
+  collapseToolOutputs?: boolean;  // 預設折疊所有工具輸出（預設 false = 展開）
 }
 
 // ============================================

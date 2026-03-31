@@ -313,6 +313,18 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
               <p className="settings-hint">{t('settings.allowBypassPermissionsHint')}</p>
             </div>
 
+            <div className="settings-group checkbox-group">
+              <label>
+                <input
+                  type="checkbox"
+                  checked={settings.collapseToolOutputs === true}
+                  onChange={e => settingsStore.setCollapseToolOutputs(e.target.checked)}
+                />
+                {t('settings.collapseToolOutputs')}
+              </label>
+              <p className="settings-hint">{t('settings.collapseToolOutputsHint')}</p>
+            </div>
+
             <div className="settings-group">
               <label>{t('settings.defaultModel')}</label>
               <input

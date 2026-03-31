@@ -186,6 +186,12 @@ class SettingsStore {
   }
 
 
+  setCollapseToolOutputs(collapse: boolean): void {
+    this.settings = { ...this.settings, collapseToolOutputs: collapse }
+    this.notify()
+    this.save()
+  }
+
   setDefaultModel(model: string): void {
     this.settings = { ...this.settings, defaultModel: model || undefined }
     this.notify()
