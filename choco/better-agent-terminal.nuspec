@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+  <metadata>
+    <id>better-agent-terminal</id>
+    <version>2.1.3</version>
+    <title>Better Agent Terminal</title>
+    <authors>TonyQ CO., LTD.</authors>
+    <owners>tonyq</owners>
+    <projectUrl>https://github.com/tony1223/better-agent-terminal</projectUrl>
+    <iconUrl>https://raw.githubusercontent.com/tony1223/better-agent-terminal/main/assets/icon-128.png</iconUrl>
+    <licenseUrl>https://github.com/tony1223/better-agent-terminal/blob/main/LICENSE</licenseUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <description>Terminal aggregator with multi-workspace support and Claude Code integration. Features include multi-tab terminal management, Claude Code agent mode with streaming UI, detachable windows, snippet manager, and API usage monitoring.</description>
+    <summary>Terminal aggregator with Claude Code integration</summary>
+    <tags>terminal electron claude ai developer-tools agent</tags>
+    <packageSourceUrl>https://github.com/tony1223/better-agent-terminal</packageSourceUrl>
+    <bugTrackerUrl>https://github.com/tony1223/better-agent-terminal/issues</bugTrackerUrl>
+    <releaseNotes>https://github.com/tony1223/better-agent-terminal/releases</releaseNotes>
+  </metadata>
+  <files>
+    <file src="tools\**" target="tools" />
+  </files>
+</package>

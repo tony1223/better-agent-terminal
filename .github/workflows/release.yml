@@ -153,3 +153,61 @@ jobs:
           repository: tonyq-org/homebrew-tap
           event-type: update-cask
           client-payload: '{"version": "${{ steps.version.outputs.VERSION }}"}'
+
+  choco:
+    needs: [build, release]
+    runs-on: windows-latest
+    if: ${{ !contains(github.ref, '-pre') }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: release-win
+          path: artifacts
+
+      - name: Extract version from tag
+        id: version
+        shell: bash
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Find installer and compute checksum
+        id: checksum
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.VERSION }}"
+          $exe = Get-ChildItem -Path artifacts -Filter "*Setup*.exe" | Select-Object -First 1
+          if (-not $exe) { throw "No .exe found in artifacts" }
+          Write-Host "Found installer: $($exe.Name)"
+          $hash = (Get-FileHash $exe.FullName -Algorithm SHA256).Hash
+          Write-Host "SHA256: $hash"
+          echo "SHA256=$hash" >> $env:GITHUB_OUTPUT
+          echo "EXE_NAME=$($exe.Name)" >> $env:GITHUB_OUTPUT
+
+      - name: Prepare Chocolatey package
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.VERSION }}"
+          $checksum = "${{ steps.checksum.outputs.SHA256 }}"
+
+          # Update version in nuspec
+          $nuspec = Get-Content choco/better-agent-terminal.nuspec -Raw
+          $nuspec = $nuspec -replace '<version>.*?</version>', "<version>$version</version>"
+          Set-Content choco/better-agent-terminal.nuspec $nuspec
+
+          # Update checksum in install script
+          $install = Get-Content choco/tools/chocolateyinstall.ps1 -Raw
+          $install = $install -replace '__CHECKSUM64__', $checksum
+          Set-Content choco/tools/chocolateyinstall.ps1 $install
+
+      - name: Pack and push
+        shell: pwsh
+        run: |
+          choco pack choco/better-agent-terminal.nuspec --output-directory .
+          $nupkg = Get-ChildItem -Filter "*.nupkg" | Select-Object -First 1
+          if (-not $nupkg) { throw "choco pack failed - no .nupkg file created" }
+          Write-Host "Pushing $($nupkg.Name)..."
+          choco push $nupkg.FullName --source https://push.chocolatey.org/ --api-key "${{ secrets.CHOCO_API_KEY }}"

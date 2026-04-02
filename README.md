@@ -114,7 +114,13 @@ brew tap tonyq-org/tap
 brew install --cask better-agent-terminal
 ```
 
-### Option 2: Download Release
+### Option 2: Chocolatey (Windows)
+
+```powershell
+choco install better-agent-terminal
+```
+
+### Option 3: Download Release
 
 Download from [Releases](https://github.com/tony1223/better-agent-terminal/releases/latest) for your platform:
 
@@ -132,7 +138,7 @@ Download from [Releases](https://github.com/tony1223/better-agent-terminal/relea
 4. On first launch, macOS may block the app — go to **System Settings > Privacy & Security**, scroll down and click **Open Anyway**
 5. Make sure [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) is installed (`npm install -g @anthropic-ai/claude-code`)
 
-### Option 3: Build from Source
+### Option 4: Build from Source
 
 **Prerequisites:**
 - [Node.js](https://nodejs.org/) 18+
@@ -154,7 +160,7 @@ npm run dev
 npm run build
 ```
 
-### Option 4: Quick Install (Script)
+### Option 5: Quick Install (Script)
 
 Run the following command in your terminal (macOS, Linux, or Windows with Git Bash/MSYS2):
 
