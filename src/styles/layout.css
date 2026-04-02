@@ -346,11 +346,13 @@
 }
 
 .workspace-container.hidden {
-  display: none;
+  visibility: hidden;
+  pointer-events: none;
 }
 
 .workspace-container.active {
-  display: flex;
+  visibility: visible;
+  pointer-events: auto;
   z-index: 1;
 }
 

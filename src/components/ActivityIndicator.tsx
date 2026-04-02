@@ -8,56 +8,71 @@ interface ActivityIndicatorProps {
   size?: 'small' | 'medium'
 }
 
+function getActivityData(
+  propActivityTime: number | null | undefined,
+  workspaceId: string | undefined,
+  terminalId: string | undefined
+): { lastActivityTime: number | null; hasPending: boolean } {
+  if (terminalId) {
+    const terminal = workspaceStore.getState().terminals.find(t => t.id === terminalId)
+    return {
+      lastActivityTime: terminal?.lastActivityTime ?? null,
+      hasPending: terminal?.hasPendingAction ?? false,
+    }
+  }
+  if (workspaceId) {
+    const terminals = workspaceStore.getWorkspaceTerminals(workspaceId)
+    return {
+      lastActivityTime: workspaceStore.getWorkspaceLastActivity(workspaceId),
+      hasPending: terminals.some(t => t.hasPendingAction),
+    }
+  }
+  return { lastActivityTime: propActivityTime ?? null, hasPending: false }
+}
+
 export function ActivityIndicator({
   lastActivityTime: propActivityTime,
   workspaceId,
   terminalId,
   size = 'small'
 }: ActivityIndicatorProps) {
+  const [activityData, setActivityData] = useState(() =>
+    getActivityData(propActivityTime, workspaceId, terminalId)
+  )
   const [isActive, setIsActive] = useState(false)
-  const [hasPending, setHasPending] = useState(false)
 
+  // Subscribe to store changes — no polling needed
   useEffect(() => {
-    const checkActivity = () => {
-      let lastActivityTime: number | null = propActivityTime ?? null
-      let pending = false
-
-      if (terminalId) {
-        const terminal = workspaceStore.getState().terminals.find(t => t.id === terminalId)
-        lastActivityTime = terminal?.lastActivityTime ?? null
-        pending = terminal?.hasPendingAction ?? false
-      } else if (workspaceId) {
-        lastActivityTime = workspaceStore.getWorkspaceLastActivity(workspaceId)
-        // Check if any terminal in the workspace has a pending action
-        const terminals = workspaceStore.getWorkspaceTerminals(workspaceId)
-        pending = terminals.some(t => t.hasPendingAction)
-      }
-
-      setHasPending(pending)
-
-      if (!lastActivityTime) {
-        setIsActive(false)
-        return
-      }
-
-      const timeSinceActivity = Date.now() - lastActivityTime
-      // Active (yellow) if activity within last 10 seconds
-      setIsActive(timeSinceActivity <= 10000)
-    }
-
-    checkActivity()
-
-    // Check every 1 second
-    const interval = setInterval(checkActivity, 1000)
-
-    return () => clearInterval(interval)
+    return workspaceStore.subscribe(() => {
+      setActivityData(getActivityData(propActivityTime, workspaceId, terminalId))
+    })
   }, [propActivityTime, workspaceId, terminalId])
 
-  const className = `activity-indicator ${size} ${isActive ? 'active' : 'inactive'}${hasPending ? ' pending' : ''}`
+  // Single timeout for active→inactive transition (replaces 1s interval)
+  useEffect(() => {
+    const { lastActivityTime } = activityData
+
+    if (!lastActivityTime) {
+      setIsActive(false)
+      return
+    }
+
+    const timeSinceActivity = Date.now() - lastActivityTime
+    if (timeSinceActivity >= 10000) {
+      setIsActive(false)
+      return
+    }
+
+    setIsActive(true)
+    const timeout = setTimeout(() => setIsActive(false), 10000 - timeSinceActivity)
+    return () => clearTimeout(timeout)
+  }, [activityData.lastActivityTime])
+
+  const className = `activity-indicator ${size} ${isActive ? 'active' : 'inactive'}${activityData.hasPending ? ' pending' : ''}`
 
   return (
     <div className={className}>
-      {hasPending && <span className="activity-indicator-badge">?</span>}
+      {activityData.hasPending && <span className="activity-indicator-badge">?</span>}
     </div>
   )
 }

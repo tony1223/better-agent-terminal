@@ -7,10 +7,28 @@ import { getAgentPreset } from '../types/agent-presets'
 // Global preview cache - persists across component unmounts
 const MAX_PREVIEW_CACHE = 100
 const previewCache = new Map<string, string>()
+const previewSubscribers = new Map<string, Set<() => void>>()
 
 /** Remove a terminal's preview from the cache (call when terminal is destroyed) */
 export function clearPreviewCache(terminalId: string) {
   previewCache.delete(terminalId)
+  previewSubscribers.delete(terminalId)
+}
+
+function updatePreviewCache(id: string, value: string) {
+  previewCache.set(id, value)
+  previewSubscribers.get(id)?.forEach(fn => fn())
+}
+
+function subscribeToPreview(id: string, fn: () => void): () => void {
+  if (!previewSubscribers.has(id)) previewSubscribers.set(id, new Set())
+  previewSubscribers.get(id)!.add(fn)
+  return () => {
+    const subs = previewSubscribers.get(id)
+    if (!subs) return
+    subs.delete(fn)
+    if (subs.size === 0) previewSubscribers.delete(id)
+  }
 }
 
 // Strip all ANSI escape sequences and problematic characters
@@ -60,7 +78,7 @@ const setupGlobalListener = () => {
     // Keep last 8 lines, clean all ANSI escape sequences for readability
     const cleaned = stripAnsi(combined)
     const lines = cleaned.split('\n').slice(-8)
-    previewCache.set(id, lines.join('\n'))
+    updatePreviewCache(id, lines.join('\n'))
     evictIfNeeded()
   })
 
@@ -69,7 +87,7 @@ const setupGlobalListener = () => {
     const msg = message as { role?: string; content?: string }
     if (msg.role === 'assistant' && msg.content) {
       const lines = msg.content.split('\n').slice(-8)
-      previewCache.set(sessionId, lines.join('\n'))
+      updatePreviewCache(sessionId, lines.join('\n'))
     }
   })
 
@@ -80,7 +98,7 @@ const setupGlobalListener = () => {
       const prev = previewCache.get(sessionId) || ''
       const combined = prev + stream.text
       const lines = combined.split('\n').slice(-8)
-      previewCache.set(sessionId, lines.join('\n'))
+      updatePreviewCache(sessionId, lines.join('\n'))
     }
   })
 }
@@ -108,11 +126,10 @@ export const TerminalThumbnail = memo(function TerminalThumbnail({ terminal, isA
   useEffect(() => {
     setupGlobalListener()
 
-    // Poll for updates from cache
-    const interval = setInterval(() => {
-      const cached = previewCache.get(terminal.id) || ''
-      setPreview(cached)
-    }, 500)
+    // Subscribe to cache updates for this terminal (event-driven, no polling)
+    const unsubscribePreview = subscribeToPreview(terminal.id, () => {
+      setPreview(previewCache.get(terminal.id) || '')
+    })
 
     // Subscribe to settings changes for font updates
     const unsubscribeSettings = settingsStore.subscribe(() => {
@@ -120,7 +137,7 @@ export const TerminalThumbnail = memo(function TerminalThumbnail({ terminal, isA
     })
 
     return () => {
-      clearInterval(interval)
+      unsubscribePreview()
       unsubscribeSettings()
     }
   }, [terminal.id])
