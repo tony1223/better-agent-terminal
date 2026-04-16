@@ -1287,6 +1287,11 @@ function registerProxiedHandlers() {
 
   // Profile (subset exposed to remote clients)
   registerHandler('profile:list', (_ctx) => profileManager.list())
+  // Local-only profile list (never proxied to remote). Used by the renderer
+  // to resolve the window's own identity when connected to a remote host,
+  // since the proxied profile:list returns the REMOTE host's profiles and
+  // the client's local aliases won't be found there.
+  ipcMain.handle('profile:list-local', () => profileManager.list())
   registerHandler('profile:load', (_ctx, profileId: string) => profileManager.load(profileId))
   registerHandler('profile:load-snapshot', (_ctx, profileId: string) => profileManager.loadSnapshot(profileId))
   registerHandler('profile:get-active-ids', (_ctx) => profileManager.getActiveProfileIds())

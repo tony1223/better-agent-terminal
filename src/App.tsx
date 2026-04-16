@@ -303,7 +303,21 @@ export default function App() {
         // 3. First active profile as fallback
         const windowProfileId = await window.electronAPI.app.getWindowProfile()
         const profileId = launchProfileId || windowProfileId || result.activeProfileIds[0]
-        const active = result.profiles.find(p => p.id === profileId)
+        let active = result.profiles.find(p => p.id === profileId)
+
+        // If the id doesn't match anything in `result` (which is the REMOTE
+        // host's profile list when a remote connection is already active),
+        // fall back to the local profile list. This happens when the window
+        // is bound to a LOCAL profile that acts as an alias for a remote
+        // connection (e.g. launched with --profile=<local-remote-alias>).
+        if (!active && profileId) {
+          try {
+            const localResult = await window.electronAPI.profile.listLocal()
+            active = localResult.profiles.find(p => p.id === profileId)
+          } catch {
+            // listLocal may not exist on older builds — fall through
+          }
+        }
 
         if (active?.type === 'remote' && active.remoteHost && active.remoteToken) {
           // Try connecting to remote

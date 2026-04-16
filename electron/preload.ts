@@ -301,6 +301,10 @@ const electronAPI = {
   },
   profile: {
     list: () => ipcRenderer.invoke('profile:list') as Promise<{ profiles: { id: string; name: string; type: 'local' | 'remote'; remoteHost?: string; remotePort?: number; remoteToken?: string; remoteProfileId?: string; createdAt: number; updatedAt: number }[]; activeProfileIds: string[] }>,
+    // Local-only profile list — returns THIS machine's profiles even when
+    // connected to a remote host (where profile:list would return the remote's
+    // profiles). Used to resolve window identity / local aliases.
+    listLocal: () => ipcRenderer.invoke('profile:list-local') as Promise<{ profiles: { id: string; name: string; type: 'local' | 'remote'; remoteHost?: string; remotePort?: number; remoteToken?: string; remoteProfileId?: string; createdAt: number; updatedAt: number }[]; activeProfileIds: string[] }>,
     create: (name: string, options?: { type?: 'local' | 'remote'; remoteHost?: string; remotePort?: number; remoteToken?: string; remoteProfileId?: string }) =>
       ipcRenderer.invoke('profile:create', name, options) as Promise<{ id: string; name: string; type: 'local' | 'remote'; createdAt: number; updatedAt: number }>,
     save: (profileId: string) => ipcRenderer.invoke('profile:save', profileId) as Promise<boolean>,
