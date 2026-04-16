@@ -1296,11 +1296,21 @@ function registerProxiedHandlers() {
 
 // ── Bind all proxied handlers to ipcMain ──
 
+// Channels that MUST run locally even when connected to a remote host.
+// These handlers depend on ctx.windowId which the remote protocol doesn't
+// forward; proxying them would return null and break the UI.
+// The snapshot data for workspaces is already replicated into the local
+// windowRegistry via applySnapshot() at startup, so reading locally works.
+const ALWAYS_LOCAL_CHANNELS = new Set([
+  'workspace:save', 'workspace:load',
+])
+
 function bindProxiedHandlersToIpc() {
   for (const channel of PROXIED_CHANNELS) {
     ipcMain.handle(channel, async (event, ...args: unknown[]) => {
-      // If remote client is connected, route to remote server
-      if (remoteClient?.isConnected) {
+      // If remote client is connected, route to remote server — unless this
+      // channel is pinned to local execution.
+      if (remoteClient?.isConnected && !ALWAYS_LOCAL_CHANNELS.has(channel)) {
         return remoteClient.invoke(channel, args)
       }
       const windowId = getWindowIdByWebContents(event.sender)
