@@ -363,6 +363,25 @@ export function WorkspaceView({ workspace, terminals, focusedTerminalId, isActiv
     workspaceStore.save()
   }, [workspace.id, workspace.folderPath, workspace.envVars])
 
+  // Listen for keyboard shortcut events to create new terminals
+  useEffect(() => {
+    if (!isActive) return
+    // Like `handleCloseTerminal` except with the current terminal ID filled in
+    function handleAppCloseTerminalEvent(e: Event) {
+      const { terminalId } = (e as CustomEvent).detail as { terminalId: string }
+      // Only close terminal when in the terminal tab
+      if (activeTab === 'terminal' && terminalId) {
+        handleCloseTerminal(terminalId)
+      }
+    }
+    window.addEventListener('workspace-add-terminal', handleAddTerminal)
+    window.addEventListener('workspace-close-terminal', handleAppCloseTerminalEvent)
+    return () => {
+      window.removeEventListener('workspace-add-terminal', handleAddTerminal)
+      window.removeEventListener('workspace-close-terminal', handleAppCloseTerminalEvent)
+    }
+  }, [isActive, activeTab])
+
   const handleAddWorktreeTerminal = useCallback(async () => {
     const terminal = workspaceStore.addTerminal(workspace.id)
     const wtResult = await window.electronAPI.worktree.create(terminal.id, workspace.folderPath)

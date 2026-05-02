@@ -306,6 +306,38 @@ export default function App() {
         workspaceStore.setActiveWorkspace(workspaces[nextIndex].id)
         return
       }
+
+      // Cmd+t or Ctrl+Shift+T: Open new terminal
+      if (
+        (e.metaKey && !e.shiftKey && e.key === "t") ||
+        (e.ctrlKey && e.shiftKey && e.key === "T")
+      ) {
+        e.preventDefault()
+        const currentState = workspaceStore.getState()
+        if (currentState.activeWorkspaceId) {
+          // Ensure we're on the terminal tab
+          window.dispatchEvent(new CustomEvent('workspace-switch-tab', { detail: { tab: 'terminal' } }))
+          window.dispatchEvent(new CustomEvent('workspace-add-terminal'))
+        }
+        return
+      }
+
+      // Cmd+w or Ctrl+Shift+W: Close current terminal
+      if (
+        (e.metaKey && !e.shiftKey && e.key === "w") ||
+        (e.ctrlKey && e.shiftKey && e.key === "W")
+      ) {
+        e.preventDefault()
+        const currentState = workspaceStore.getState()
+        if (currentState.focusedTerminalId) {
+          window.dispatchEvent(
+            new CustomEvent("workspace-close-terminal", {
+              detail: { terminalId: currentState.focusedTerminalId },
+            }),
+          );
+        }
+        return
+      }
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
