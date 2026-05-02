@@ -37,6 +37,7 @@
     "defaultShell": "Default Shell",
     "customShellPath": "Custom Shell Path",
     "defaultTerminalCount": "Default Terminals per Workspace: {{count}}",
+    "closeTerminalAfterProcessExit": "Close Terminal After Process Exits",
     "createAgentTerminalByDefault": "Create Agent Terminal by default",
     "createAgentTerminalHint": "When enabled, new workspaces will include an Agent Terminal.",
     "defaultAgent": "Default Agent",

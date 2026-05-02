@@ -12,6 +12,7 @@ const dlog = (...args: unknown[]) => window.electronAPI?.debug?.log(...args)
 
 interface TerminalPanelProps {
   terminalId: string
+  onClose?: (id: string) => void
   isActive?: boolean
   terminalType?: 'terminal' | 'code-agent'
   agentPreset?: AgentPresetId
@@ -31,7 +32,7 @@ function getWindowsBuildNumber(): number | undefined {
 }
 
 let renderCount = 0
-export const TerminalPanel = memo(function TerminalPanel({ terminalId, isActive = true, terminalType, agentPreset }: TerminalPanelProps) {
+export const TerminalPanel = memo(function TerminalPanel({ terminalId, onClose, isActive = true, terminalType, agentPreset }: TerminalPanelProps) {
   renderCount++
   if (renderCount <= 50 || renderCount % 50 === 0) {
     dlog(`[render] TerminalPanel render #${renderCount} terminal=${terminalId} active=${isActive}`)
@@ -461,6 +462,9 @@ export const TerminalPanel = memo(function TerminalPanel({ terminalId, isActive 
     const unsubscribeExit = window.electronAPI.pty.onExit((id, exitCode) => {
       if (id === terminalId) {
         terminal.write(`\r\n\x1b[90m[Process exited with code ${exitCode}]\x1b[0m\r\n`)
+        if (settingsStore.getCloseTerminalAfterProcessExit()) {
+          onClose?.(terminalId)
+        }
       }
     })
 

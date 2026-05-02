@@ -37,6 +37,7 @@
     "defaultShell": "預設 Shell",
     "customShellPath": "自訂 Shell 路徑",
     "defaultTerminalCount": "每個工作區預設終端數量：{{count}}",
+    "closeTerminalAfterProcessExit": "程序結束後自動關閉終端機",
     "createAgentTerminalByDefault": "預設建立 Agent 終端",
     "createAgentTerminalHint": "啟用後，新工作區將自動包含一個 Agent 終端。",
     "defaultAgent": "預設 Agent",

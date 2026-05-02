@@ -35,6 +35,7 @@
     "defaultShell": "默认 Shell",
     "customShellPath": "自定义 Shell 路径",
     "defaultTerminalCount": "每个工作区默认终端数量：{{count}}",
+    "closeTerminalAfterProcessExit": "程序结束后自动关闭终端",
     "createAgentTerminalByDefault": "默认创建 Agent 终端",
     "createAgentTerminalHint": "启用后，新工作区将自动包含一个 Agent 终端。",
     "defaultAgent": "默认 Agent",

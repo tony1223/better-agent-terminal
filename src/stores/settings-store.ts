@@ -33,6 +33,7 @@ const defaultSettings: AppSettings = {
   agentCommandType: 'claude',
   agentCustomCommand: '',
   defaultTerminalCount: 1,
+  closeTerminalAfterProcessExit: false,
   createDefaultAgentTerminal: true,
   allowBypassPermissions: true,
   defaultEffort: 'high',
@@ -177,6 +178,12 @@ class SettingsStore {
 
   setDefaultTerminalCount(count: number): void {
     this.settings = { ...this.settings, defaultTerminalCount: Math.max(1, Math.min(5, count)) }
+    this.notify()
+    this.save()
+  }
+
+  setCloseTerminalAfterProcessExit(close: boolean): void {
+    this.settings = { ...this.settings, closeTerminalAfterProcessExit: close }
     this.notify()
     this.save()
   }
@@ -335,6 +342,10 @@ class SettingsStore {
     this.settings = { ...this.settings, remoteServerBindInterface: bindInterface }
     this.notify()
     this.save()
+  }
+
+  getCloseTerminalAfterProcessExit(): boolean {
+    return this.settings.closeTerminalAfterProcessExit
   }
 
   // Get the agent command to execute

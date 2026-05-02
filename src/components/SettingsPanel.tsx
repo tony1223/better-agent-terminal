@@ -465,6 +465,12 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
                     onChange={e => settingsStore.setDefaultTerminalCount(Number(e.target.value))}
                   />
                 </div>
+                <div className="settings-group checkbox-group">
+                  <label>
+                    <input type="checkbox" checked={settings.closeTerminalAfterProcessExit !== false} onChange={e => settingsStore.setCloseTerminalAfterProcessExit(e.target.checked)} />
+                    {t('settings.closeTerminalAfterProcessExit')}
+                  </label>
+                </div>
               </div>
 
               <div className="settings-section">

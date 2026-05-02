@@ -231,6 +231,7 @@ export interface AppSettings {
   agentCommandType: AgentCommandType;  // Agent 命令類型
   agentCustomCommand: string;     // 自定義 Agent 命令
   defaultTerminalCount: number;   // 每個 workspace 預設的 terminal 數量
+  closeTerminalAfterProcessExit: boolean;  // 程序結束後是否自動關閉終端機
   createDefaultAgentTerminal: boolean;  // 是否預設建立 Agent Terminal
   allowBypassPermissions: boolean;  // 允許切換 bypassPermissions 模式不再確認；同時讓 Codex 以 danger-full-access 啟動
   defaultModel?: string;     // Legacy Claude 預設模型（保留用於遷移）

@@ -209,7 +209,12 @@ export const MainPanel = memo(function MainPanel({ terminal, isActive, onClose, 
             )}
           </Suspense>
         ) : (
-          <TerminalPanel terminalId={terminal.id} isActive={isActive} agentPreset={terminal.agentPreset} />
+          <TerminalPanel
+            terminalId={terminal.id}
+            isActive={isActive}
+            onClose={onClose}
+            agentPreset={terminal.agentPreset}
+          />
         )}
       </div>
       {!isClaudeCode && showPromptBox && (
