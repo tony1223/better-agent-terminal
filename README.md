@@ -166,8 +166,8 @@ After installing, run `cx lang add <language>` for each language you want gramma
 
 | Shortcut | Action |
 |---|---|
-| `Ctrl+`` ` `` (Windows) | Switch to the next BAT window |
-| `Cmd+`` ` `` (macOS) / `Ctrl+`` ` `` (Linux) | Toggle between Agent terminal and first regular terminal |
+| `` Ctrl+` `` (Windows) | Switch to the next BAT window |
+| `` Cmd+` `` (macOS) / `` Ctrl+` `` (Linux) | Toggle between Agent terminal and first regular terminal |
 | `Ctrl+←/→` / `Cmd+←/→` | Cycle workspace tabs (Terminal / Files / Git) |
 | `Ctrl+↑/↓` / `Cmd+↑/↓` | Switch to previous / next workspace |
 | `Ctrl+P` / `Cmd+P` | File picker (search & attach files to agent context) |
