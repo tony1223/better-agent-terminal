@@ -2379,6 +2379,10 @@ export function ClaudeAgentPanel({ sessionId, cwd, isActive, workspaceId, onClos
     if (e.key === 'ArrowUp' && !e.shiftKey && !e.nativeEvent.isComposing) {
       const history = inputHistoryRef.current
       if (history.length === 0) return
+      const ta = textareaRef.current
+      const cursorPos = ta ? ta.selectionStart : 0
+      const textBeforeCursor = (ta ? ta.value : inputValueRef.current).substring(0, cursorPos)
+      if (textBeforeCursor.includes('\n')) return
       e.preventDefault()
       if (inputHistoryIndexRef.current === -1) {
         inputDraftRef.current = inputValueRef.current
@@ -2391,6 +2395,10 @@ export function ClaudeAgentPanel({ sessionId, cwd, isActive, workspaceId, onClos
     }
     if (e.key === 'ArrowDown' && !e.shiftKey && !e.nativeEvent.isComposing) {
       if (inputHistoryIndexRef.current === -1) return
+      const ta = textareaRef.current
+      const cursorPos = ta ? ta.selectionStart : inputValueRef.current.length
+      const textAfterCursor = (ta ? ta.value : inputValueRef.current).substring(cursorPos)
+      if (textAfterCursor.includes('\n')) return
       e.preventDefault()
       const history = inputHistoryRef.current
       if (inputHistoryIndexRef.current < history.length - 1) {
