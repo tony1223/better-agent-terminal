@@ -3,6 +3,7 @@ import { initReactI18next } from 'react-i18next'
 import en from './locales/en.json'
 import zhTW from './locales/zh-TW.json'
 import zhCN from './locales/zh-CN.json'
+import ja from './locales/ja.json'
 
 i18next
   .use(initReactI18next)
@@ -11,6 +12,7 @@ i18next
       en: { translation: en },
       'zh-TW': { translation: zhTW },
       'zh-CN': { translation: zhCN },
+      ja: { translation: ja },
     },
     lng: 'en',
     fallbackLng: 'en',

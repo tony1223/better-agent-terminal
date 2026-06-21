@@ -236,7 +236,7 @@ export const AGENT_COMMAND_OPTIONS: { id: AgentCommandType; name: string; comman
   { id: 'custom', name: 'Custom', command: '' },
 ];
 
-export type LanguageCode = 'en' | 'zh-TW' | 'zh-CN';
+export type LanguageCode = 'en' | 'zh-TW' | 'zh-CN' | 'ja';
 
 export interface AppSettings {
   language: LanguageCode;
