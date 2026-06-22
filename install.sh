@@ -95,7 +95,7 @@ elif [ "$OS" = "Linux" ]; then
         DOWNLOAD_URL=$(printf '%s\n' "$APPIMAGE_URLS" | grep -E '[-_]arm64\.AppImage$' | head -n 1)
     else
         # x64 has no arch marker in its name; exclude any arm64/aarch64 assets.
-        DOWNLOAD_URL=$(printf '%s\n' "$APPIMAGE_URLS" | grep -vE '[-_](arm64|aarch64)\.AppImage$' | head -n 1)
+        DOWNLOAD_URL=$(printf '%s\n' "$APPIMAGE_URLS" | grep -vE '[-_](arm64|aarch64)(\.lightweight)?\.AppImage$' | head -n 1)
     fi
     if [ -z "$DOWNLOAD_URL" ]; then
         echo "Error: Could not find a Linux $LINUX_ARCH .AppImage in the latest release." >&2
