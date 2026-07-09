@@ -813,13 +813,32 @@ jobs:
             exit 0
           }
 
-  # Self-contained, install-and-go Linux server bundle for the tauri-free
+  # Self-contained, install-and-go Linux server bundles for the tauri-free
   # `bat-server` (no WebKit, no xvfb, no manual sidecar provisioning). Runs AFTER
   # the release is published and uploads to it via `gh release upload`, so nothing
   # depends on this job — a failure here can never block the desktop release.
+  #
+  # Matrixed over both Linux arches, each on a NATIVE runner (mirroring the
+  # desktop build's ubuntu-22.04-arm leg): x86_64 and aarch64. The aarch64 leg is
+  # the actual #117 target (Oracle Linux 9 / glibc 2.34 ARM hosts) — the static
+  # musl binary has zero glibc requirement, so the bundle floor is set by the
+  # bundled Node runtime (glibc >= 2.28). fail-fast: false so a flaky ARM runner
+  # can't stop the x86_64 bundle from publishing, and vice versa.
   bat-server-bundle:
     needs: release
-    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            bundle_target: linux-x86_64
+            rust_target: x86_64-unknown-linux-musl
+            appimage_arch: x86_64
+          - os: ubuntu-22.04-arm
+            bundle_target: linux-aarch64
+            rust_target: aarch64-unknown-linux-musl
+            appimage_arch: aarch64
+    runs-on: ${{ matrix.os }}
     # Normal duration is well under an hour; without a cap a hung apt/runner
     # zombie holds the run "in_progress" for 12h+ (seen on v3.1.37-pre.2).
     timeout-minutes: 60
@@ -850,7 +869,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-unknown-linux-musl
+          targets: ${{ matrix.rust_target }}
 
       - name: Install libfuse2 (appimagetool runtime) + musl toolchain
         run: |
@@ -861,7 +880,8 @@ jobs:
             sudo apt-get install -y libfuse2
           fi
           # musl-gcc compiles the C deps (ring, vendored libdbus, zstd,
-          # mimalloc) for the fully static bat-server build below.
+          # mimalloc) for the fully static bat-server build below. On the
+          # native aarch64 runner this same package yields an aarch64 musl-gcc.
           sudo apt-get install -y musl-tools
 
       - name: Install dependencies
@@ -870,9 +890,9 @@ jobs:
       - name: Update version metadata
         run: pnpm run update:release-version
 
-      - name: Prepare bundle resources (linux-x86_64, all-in-one)
+      - name: Prepare bundle resources (${{ matrix.bundle_target }}, all-in-one)
         run: |
-          node scripts/fetch-node-runtime.mjs --target=linux-x86_64
+          node scripts/fetch-node-runtime.mjs --target=${{ matrix.bundle_target }}
           pnpm --dir node-sidecar install --frozen-lockfile --prefer-offline
           pnpm run build:tauri-sidecar
           pnpm run prune:tauri-sidecar
@@ -885,14 +905,16 @@ jobs:
         # glibc age. Building on ubuntu-22.04 for the gnu target linked
         # GLIBC_2.34 symbols, which refused to load on RHEL 8-era hosts
         # (glibc 2.28). With a static binary the bundle's floor is set by the
-        # official Node runtime instead (glibc >= 2.28).
+        # official Node runtime instead (glibc >= 2.28). Both CC_* vars are set
+        # unconditionally; cargo reads only the one matching --target.
         env:
           CC_x86_64_unknown_linux_musl: musl-gcc
-        run: cargo build --release --target x86_64-unknown-linux-musl --bin bat-server --no-default-features --features headless --manifest-path src-tauri/Cargo.toml
+          CC_aarch64_unknown_linux_musl: musl-gcc
+        run: cargo build --release --target ${{ matrix.rust_target }} --bin bat-server --no-default-features --features headless --manifest-path src-tauri/Cargo.toml
 
       - name: Verify bat-server is fully static
         run: |
-          BIN=src-tauri/target/x86_64-unknown-linux-musl/release/bat-server
+          BIN=src-tauri/target/${{ matrix.rust_target }}/release/bat-server
           file "$BIN"
           # Rust musl targets emit "static-pie linked"; plain static would say
           # "statically linked". Either is fine — dynamic is not.
@@ -901,34 +923,34 @@ jobs:
       - name: Fetch appimagetool
         run: |
           curl -fsSL -o "$RUNNER_TEMP/appimagetool" \
-            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${{ matrix.appimage_arch }}.AppImage
           chmod +x "$RUNNER_TEMP/appimagetool"
           echo "APPIMAGETOOL=$RUNNER_TEMP/appimagetool" >> "$GITHUB_ENV"
 
       - name: Assemble self-contained bundle (tar.gz + AppImage)
         run: |
           node scripts/build-bat-server-bundle.mjs \
-            --bin src-tauri/target/x86_64-unknown-linux-musl/release/bat-server \
-            --target linux-x86_64 \
+            --bin src-tauri/target/${{ matrix.rust_target }}/release/bat-server \
+            --target ${{ matrix.bundle_target }} \
             --appimage \
             --out dist-bat-server
 
       - name: Upload bat-server bundle artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bat-server-linux-x86_64
+          name: bat-server-${{ matrix.bundle_target }}
           path: |
-            dist-bat-server/bat-server-linux-x86_64.tar.gz
-            dist-bat-server/bat-server-x86_64.AppImage
+            dist-bat-server/bat-server-${{ matrix.bundle_target }}.tar.gz
+            dist-bat-server/bat-server-${{ matrix.appimage_arch }}.AppImage
           if-no-files-found: error
 
       - name: Publish bat-server bundle to the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload "$RELEASE_TAG" dist-bat-server/bat-server-linux-x86_64.tar.gz --clobber
-          if [ -f dist-bat-server/bat-server-x86_64.AppImage ]; then
-            gh release upload "$RELEASE_TAG" dist-bat-server/bat-server-x86_64.AppImage --clobber
+          gh release upload "$RELEASE_TAG" dist-bat-server/bat-server-${{ matrix.bundle_target }}.tar.gz --clobber
+          if [ -f dist-bat-server/bat-server-${{ matrix.appimage_arch }}.AppImage ]; then
+            gh release upload "$RELEASE_TAG" dist-bat-server/bat-server-${{ matrix.appimage_arch }}.AppImage --clobber
           else
             echo "AppImage not produced (appimagetool unavailable); published tarball only."
           fi

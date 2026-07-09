@@ -1,10 +1,21 @@
 # Headless `bat-server` decouple — migration & risk assessment (#117)
 
-Status: **in progress** (foundation landed, core pending). Tracking GitHub issue
+Status: **landed** (decouple complete; shipped for both Linux arches). Tracking
+GitHub issue
 [#117](https://github.com/tony1223/better-agent-terminal/issues/117): the Linux
 arm64 AppImage's `bat-server` links `libwebkit2gtk-4.1`, which requires
 `GLIBC_2.35` / `GLIBCXX_3.4.30`; Oracle Linux 9 / RHEL 9 ship glibc 2.34, so it
 fails to load **before `main()`**.
+
+The webkit-free decouple is done (the headless build compiles tauri-free and
+serves over `HostContext` — separation complete as of `8b66581`/`0e146cf`), and
+the `bat-server` binary is now built **static-musl** so it carries no glibc
+requirement at all (`d995379`); the bundle floor is the bundled Node runtime
+(glibc ≥ 2.28). The release workflow's `bat-server-bundle` job is matrixed over
+**`x86_64` and `aarch64`**, each on a native runner, so the ARM artifact #117
+actually needs (`bat-server-linux-aarch64.tar.gz` / `bat-server-aarch64.AppImage`)
+ships on every release. Sections below are retained as the migration record; the
+"Done so far" table predates the final separation commits.
 
 ## 0. Motivation — why decouple (beyond #117)
 

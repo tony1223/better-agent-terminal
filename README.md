@@ -291,6 +291,8 @@ Since it is a WebKitGTK app, on a box with no display server, run it under a vir
 xvfb-run -a ./BetterAgentTerminal-<version>-arm64.AppImage --bat-server
 ```
 
+> On enterprise ARM Linux (Oracle Linux 9 / RHEL 9, glibc 2.34) the desktop AppImage's WebKitGTK layer will not load. Use the **self-contained `bat-server` bundle** instead — it is statically linked and needs no display; see [Self-contained Linux bundle](#self-contained-linux-bundle-no-display-no-manual-setup) below (`bat-server-linux-aarch64`).
+
 **macOS DMG installation:**
 
 1. Download the `.dmg` file from Releases
@@ -482,16 +484,16 @@ On startup, the server prints the `wss://` URL, token, certificate fingerprint, 
 
 #### Self-contained Linux bundle (no display, no manual setup)
 
-Each release also publishes a **self-contained `bat-server` bundle** for Linux — the binary plus a bundled Node runtime, the node-sidecar, and the native Claude SDK, laid out so everything resolves with **zero system dependencies** (no system Node/Claude/pnpm) and **no `xvfb`** (unlike the WebKitGTK AppImage above). It mirrors the AppImage install-and-go flow:
+Each release also publishes a **self-contained `bat-server` bundle** for Linux — the binary plus a bundled Node runtime, the node-sidecar, and the native Claude SDK, laid out so everything resolves with **zero system dependencies** (no system Node/Claude/pnpm) and **no `xvfb`** (unlike the WebKitGTK AppImage above). The binary is statically linked (musl), so it has **no glibc requirement of its own** — the bundle's floor is set by the bundled Node runtime (glibc ≥ 2.28), which runs on enterprise Linux like Oracle Linux 9 / RHEL 9 (glibc 2.34). Published for both `x86_64` and `aarch64` (the ARM build closes [#117](https://github.com/tony1223/better-agent-terminal/issues/117)); swap the arch in the filenames below. It mirrors the AppImage install-and-go flow:
 
 ```bash
-# tarball + systemd installer
-tar -xzf bat-server-linux-x86_64.tar.gz
-sudo ./bat-server-linux-x86_64/install.sh     # writes a systemd unit + generates a token
+# tarball + systemd installer  (arch = x86_64 or aarch64)
+tar -xzf bat-server-linux-aarch64.tar.gz
+sudo ./bat-server-linux-aarch64/install.sh    # writes a systemd unit + generates a token
 
 # …or the single-file AppImage (same flags as the binary)
-chmod +x bat-server-x86_64.AppImage
-./bat-server-x86_64.AppImage --port=9876 --bind=localhost
+chmod +x bat-server-aarch64.AppImage
+./bat-server-aarch64.AppImage --port=9876 --bind=localhost
 ```
 
 Both set `IS_SANDBOX=1` so Claude Code's `bypassPermissions` is allowed when the service runs as root on a single-purpose box. Agent credentials (a logged-in `claude`/`codex` or an API key) are still provided once, the same as any host.
