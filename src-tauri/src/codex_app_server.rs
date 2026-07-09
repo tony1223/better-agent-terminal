@@ -37,6 +37,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const TURN_START_TIMEOUT: Duration = Duration::from_secs(60);
 const MSG_BUFFER_CAP: usize = 300;
 const DEFAULT_CODEX_CONTEXT_WINDOW: u64 = 1_000_000;
+const GPT_5_6_CONTEXT_WINDOW_FALLBACK: u64 = 353_400;
 const DEFAULT_CODEX_REASONING_SUMMARY: &str = "auto";
 const COMMAND_OUTPUT_EMIT_INTERVAL: Duration = Duration::from_millis(100);
 const CODEX_ACCOUNT_STATE_FILE: &str = "codex-account-state.json";
@@ -254,6 +255,7 @@ struct CodexSession {
     sandbox_mode: String,
     approval_policy: String,
     effort: String,
+    context_window: u64,
     start_time: Instant,
     active_turn_id: Option<String>,
     active_turn_key: Option<String>,
@@ -281,8 +283,9 @@ struct CodexSession {
 
 impl CodexSession {
     fn metadata(&self) -> Value {
-        let context_tokens = self.input_tokens + self.output_tokens + self.cache_read_tokens;
-        let context_window = codex_context_window_for_model(&self.model);
+        // cached input is a subset of input tokens in the Codex app-server
+        // protocol, so adding it again would double-count context usage.
+        let context_tokens = self.input_tokens + self.output_tokens;
         json!({
             "model": self.model,
             "sdkSessionId": self.thread_id,
@@ -292,7 +295,7 @@ impl CodexSession {
             "outputTokens": self.output_tokens,
             "durationMs": self.start_time.elapsed().as_millis() as u64,
             "numTurns": self.num_turns,
-            "contextWindow": context_window,
+            "contextWindow": self.context_window,
             "maxOutputTokens": 0,
             "contextTokens": context_tokens,
             "cacheReadTokens": self.cache_read_tokens,
@@ -346,8 +349,10 @@ fn remember_ignored_turn(session: &mut CodexSession, turn_id: String) {
 
 fn codex_context_window_for_model(model: &str) -> u64 {
     match model {
-        "gpt-5.6-sol"
-        | "gpt-5.5"
+        // The app-server reports the authoritative value in token usage updates.
+        // Keep this fallback accurate before the first update arrives.
+        "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna" => GPT_5_6_CONTEXT_WINDOW_FALLBACK,
+        "gpt-5.5"
         | "gpt-5.4"
         | "gpt-5.4-mini"
         | "gpt-5.3-codex"
@@ -438,7 +443,9 @@ fn worktree_payload(options: &Value) -> Option<Value> {
 
 fn normalize_effort(value: Option<&str>) -> String {
     match value {
-        Some("minimal" | "low" | "medium" | "high" | "xhigh") => value.unwrap().to_string(),
+        Some(effort @ ("minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra")) => {
+            effort.to_string()
+        }
         _ => "high".to_string(),
     }
 }
@@ -1576,7 +1583,6 @@ fn build_turn_start_params(
         "model": model,
         "effort": effort,
         "summary": DEFAULT_CODEX_REASONING_SUMMARY,
-        "reasoningEffort": effort,
         "approvalPolicy": approval_policy,
         "sandboxPolicy": app_server_sandbox_policy(sandbox_mode),
     })
@@ -3565,6 +3571,7 @@ impl CodexAppServerState {
             sandbox_mode: sandbox_mode.clone(),
             approval_policy: approval_policy.clone(),
             effort,
+            context_window: codex_context_window_for_model(&model),
             start_time: Instant::now(),
             active_turn_id: None,
             active_turn_key: None,
@@ -3727,6 +3734,7 @@ impl CodexAppServerState {
             return Err(bridge_error(err));
         }
 
+        let context_window = codex_context_window_for_model(&model);
         let session = CodexSession {
             session_id: session_id.clone(),
             thread_id: Some(sdk_session_id.clone()),
@@ -3735,6 +3743,7 @@ impl CodexAppServerState {
             sandbox_mode,
             approval_policy,
             effort: normalize_effort(options.get("effort").and_then(Value::as_str)),
+            context_window,
             start_time: Instant::now(),
             active_turn_id: None,
             active_turn_key: None,
@@ -4477,11 +4486,11 @@ impl CodexAppServerState {
     pub fn get_context_usage(&self, session_id: &str) -> Option<Value> {
         let sessions = self.inner.sessions.lock().expect("codex sessions lock");
         let session = sessions.get(session_id)?;
-        let total_tokens = session.input_tokens + session.output_tokens + session.cache_read_tokens;
+        let total_tokens = session.input_tokens + session.output_tokens;
         if total_tokens == 0 {
             return None;
         }
-        let max_tokens = codex_context_window_for_model(&session.model);
+        let max_tokens = session.context_window;
         let percentage = if max_tokens > 0 {
             ((total_tokens as f64 / max_tokens as f64) * 100.0).round() as u64
         } else {
@@ -4509,6 +4518,7 @@ impl CodexAppServerState {
             return Some(json!(true));
         }
         session.model = model;
+        session.context_window = codex_context_window_for_model(&session.model);
         let meta = session.metadata();
         let msg = make_system_message(
             session_id,
@@ -5561,7 +5571,15 @@ fn handle_usage_updated(
     let Some(session) = sessions.get_mut(session_id) else {
         return;
     };
-    let usage = params.get("usage").unwrap_or(params);
+    update_session_usage(session, params);
+    emit(app, "claude:status", session_id, "meta", session.metadata());
+}
+
+fn update_session_usage(session: &mut CodexSession, params: &Value) {
+    let usage = params
+        .get("tokenUsage")
+        .or_else(|| params.get("usage"))
+        .unwrap_or(params);
     if let Some(v) = read_usage_u64(usage, &["inputTokens", "input_tokens", "input"]) {
         session.input_tokens = v;
     }
@@ -5572,13 +5590,21 @@ fn handle_usage_updated(
         usage,
         &[
             "cacheReadTokens",
+            "cachedInputTokens",
             "cached_input_tokens",
             "cache_read_tokens",
         ],
     ) {
         session.cache_read_tokens = v;
     }
-    emit(app, "claude:status", session_id, "meta", session.metadata());
+    if let Some(v) = read_usage_u64(
+        usage,
+        &["modelContextWindow", "model_context_window"],
+    )
+    .filter(|value| *value > 0)
+    {
+        session.context_window = v;
+    }
 }
 
 fn read_usage_u64(usage: &Value, keys: &[&str]) -> Option<u64> {
@@ -5799,6 +5825,7 @@ mod tests {
             .iter()
             .filter_map(|model| model.get("value").and_then(Value::as_str))
             .collect::<Vec<_>>();
+        assert!(values.contains(&"gpt-5.6-sol"));
         assert!(values.contains(&"gpt-5.5"));
         assert!(values.contains(&"gpt-5.3-codex"));
         assert!(!values.iter().any(|value| value.starts_with("claude-")));
@@ -5844,18 +5871,29 @@ mod tests {
         let params = build_turn_start_params(
             "thread-1",
             json!([{ "type": "text", "text": "hello", "text_elements": [] }]),
-            "gpt-5.5",
-            "high",
+            "gpt-5.6-sol",
+            "max",
             "on-request",
             "workspace-write",
         );
         assert_eq!(params["threadId"], "thread-1");
-        assert_eq!(params["model"], "gpt-5.5");
-        assert_eq!(params["effort"], "high");
+        assert_eq!(params["model"], "gpt-5.6-sol");
+        assert_eq!(params["effort"], "max");
         assert_eq!(params["summary"], DEFAULT_CODEX_REASONING_SUMMARY);
-        assert_eq!(params["reasoningEffort"], "high");
+        assert!(params.get("reasoningEffort").is_none());
         assert_eq!(params["approvalPolicy"], "on-request");
         assert_eq!(params["sandboxPolicy"], json!({ "type": "workspaceWrite" }));
+    }
+
+    #[test]
+    fn codex_effort_normalization_preserves_all_supported_tiers() {
+        for effort in [
+            "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+        ] {
+            assert_eq!(normalize_effort(Some(effort)), effort);
+        }
+        assert_eq!(normalize_effort(None), "high");
+        assert_eq!(normalize_effort(Some("invalid")), "high");
     }
 
     #[test]
@@ -6083,10 +6121,11 @@ mod tests {
             session_id: "s-1".to_string(),
             thread_id: Some("thread-1".to_string()),
             cwd: "/repo".to_string(),
-            model: "gpt-5.3-codex".to_string(),
+            model: "gpt-5.6-sol".to_string(),
             sandbox_mode: "workspace-write".to_string(),
             approval_policy: "on-request".to_string(),
             effort: "high".to_string(),
+            context_window: codex_context_window_for_model("gpt-5.6-sol"),
             start_time: Instant::now(),
             active_turn_id: None,
             active_turn_key: None,
@@ -6113,8 +6152,8 @@ mod tests {
         };
 
         let meta = session.metadata();
-        assert_eq!(meta["contextWindow"], DEFAULT_CODEX_CONTEXT_WINDOW);
-        assert_eq!(meta["contextTokens"], 175);
+        assert_eq!(meta["contextWindow"], GPT_5_6_CONTEXT_WINDOW_FALLBACK);
+        assert_eq!(meta["contextTokens"], 150);
     }
 
     #[test]
@@ -6127,6 +6166,7 @@ mod tests {
             sandbox_mode: "workspace-write".to_string(),
             approval_policy: "on-request".to_string(),
             effort: "high".to_string(),
+            context_window: DEFAULT_CODEX_CONTEXT_WINDOW,
             start_time: Instant::now(),
             active_turn_id: None,
             active_turn_key: None,
@@ -6166,57 +6206,80 @@ mod tests {
     }
 
     #[test]
-    fn codex_context_usage_uses_cached_usage_shape() {
+    fn codex_context_usage_uses_app_server_usage_shape() {
         let state = CodexAppServerState::default();
+        let mut session = CodexSession {
+            session_id: "s-1".to_string(),
+            thread_id: Some("thread-1".to_string()),
+            cwd: "/repo".to_string(),
+            model: "gpt-5.6-sol".to_string(),
+            sandbox_mode: "workspace-write".to_string(),
+            approval_policy: "on-request".to_string(),
+            effort: "high".to_string(),
+            context_window: DEFAULT_CODEX_CONTEXT_WINDOW,
+            start_time: Instant::now(),
+            active_turn_id: None,
+            active_turn_key: None,
+            assistant_text: String::new(),
+            thinking_text: String::new(),
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            num_turns: 1,
+            last_turn_started_at: None,
+            last_turn_first_token_ms: None,
+            last_turn_duration_ms: None,
+            messages: Vec::new(),
+            temporary_image_paths: Vec::new(),
+            command_outputs: HashMap::new(),
+            command_output_last_emit: HashMap::new(),
+            runtime_status: None,
+            runtime_message: None,
+            runtime_status_started_at: None,
+            is_running: false,
+            is_resting: false,
+            abort_requested: false,
+            ignored_turn_ids: Vec::new(),
+        };
+        update_session_usage(
+            &mut session,
+            &json!({
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "tokenUsage": {
+                    "modelContextWindow": 353_400,
+                    "last": {
+                        "inputTokens": 25,
+                        "cachedInputTokens": 5,
+                        "outputTokens": 10,
+                        "reasoningOutputTokens": 2,
+                        "totalTokens": 35
+                    },
+                    "total": {
+                        "inputTokens": 150,
+                        "cachedInputTokens": 100,
+                        "outputTokens": 30,
+                        "reasoningOutputTokens": 10,
+                        "totalTokens": 180
+                    }
+                }
+            }),
+        );
         state
             .inner
             .sessions
             .lock()
             .expect("codex sessions lock")
-            .insert(
-                "s-1".to_string(),
-                CodexSession {
-                    session_id: "s-1".to_string(),
-                    thread_id: Some("thread-1".to_string()),
-                    cwd: "/repo".to_string(),
-                    model: "gpt-5.5".to_string(),
-                    sandbox_mode: "workspace-write".to_string(),
-                    approval_policy: "on-request".to_string(),
-                    effort: "high".to_string(),
-                    start_time: Instant::now(),
-                    active_turn_id: None,
-                    active_turn_key: None,
-                    assistant_text: String::new(),
-                    thinking_text: String::new(),
-                    input_tokens: 150,
-                    output_tokens: 30,
-                    cache_read_tokens: 250,
-                    num_turns: 1,
-                    last_turn_started_at: None,
-                    last_turn_first_token_ms: None,
-                    last_turn_duration_ms: None,
-                    messages: Vec::new(),
-                    temporary_image_paths: Vec::new(),
-                    command_outputs: HashMap::new(),
-                    command_output_last_emit: HashMap::new(),
-                    runtime_status: None,
-                    runtime_message: None,
-                    runtime_status_started_at: None,
-                    is_running: false,
-                    is_resting: false,
-                    abort_requested: false,
-                    ignored_turn_ids: Vec::new(),
-                },
-            );
+            .insert("s-1".to_string(), session);
 
         let usage = state.get_context_usage("s-1").expect("usage");
-        assert_eq!(usage["totalTokens"], 430);
-        assert_eq!(usage["maxTokens"], DEFAULT_CODEX_CONTEXT_WINDOW);
+        assert_eq!(usage["totalTokens"], 180);
+        assert_eq!(usage["maxTokens"], 353_400);
         assert_eq!(usage["percentage"], 0);
-        assert_eq!(usage["model"], "gpt-5.5");
+        assert_eq!(usage["model"], "gpt-5.6-sol");
         assert_eq!(usage["apiUsage"]["input_tokens"], 150);
         assert_eq!(usage["apiUsage"]["output_tokens"], 30);
-        assert_eq!(usage["apiUsage"]["cache_read_input_tokens"], 250);
+        assert_eq!(usage["apiUsage"]["cache_read_input_tokens"], 100);
         assert_eq!(usage["categories"][0]["name"], "Context");
         assert_eq!(state.get_context_usage("missing"), None);
     }
