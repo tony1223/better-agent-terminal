@@ -1,4 +1,5 @@
 import type { CodexEffortLevel } from '../types'
+import { CODEX_EFFORT_LEVELS as CODEX_EFFORT_LEVELS_SOURCE } from '../types'
 
 export type CodexModelInfo = {
   value: string
@@ -6,12 +7,15 @@ export type CodexModelInfo = {
   description: string
 }
 
-export const CODEX_EFFORT_LEVELS: readonly CodexEffortLevel[] = ['minimal', 'low', 'medium', 'high', 'xhigh']
+// Re-export the single source of truth (renderer/src/types) so callers that
+// import from this module keep working without a second, drifting list.
+export const CODEX_EFFORT_LEVELS: readonly CodexEffortLevel[] = CODEX_EFFORT_LEVELS_SOURCE
 
-export const DEFAULT_CODEX_MODEL = 'gpt-5.5'
+export const DEFAULT_CODEX_MODEL = 'gpt-5.6-sol'
 
 export const CODEX_MODELS: CodexModelInfo[] = [
-  { value: 'gpt-5.5', displayName: 'GPT-5.5', description: 'Newest frontier · recommended (ChatGPT login)' },
+  { value: 'gpt-5.6-sol', displayName: 'GPT-5.6 Sol', description: 'Newest frontier · recommended (ChatGPT login)' },
+  { value: 'gpt-5.5', displayName: 'GPT-5.5', description: 'Previous frontier GPT-5.5' },
   { value: 'gpt-5.4', displayName: 'GPT-5.4', description: 'Flagship GPT-5.4' },
   { value: 'gpt-5.4-mini', displayName: 'GPT-5.4 Mini', description: 'Fast GPT-5.4' },
   { value: 'gpt-5.3-codex', displayName: 'GPT-5.3 Codex', description: 'GPT-5.3 · codex variant' },

@@ -32,7 +32,7 @@ use tauri::Manager;
 
 use crate::host_context::HostContext;
 
-const DEFAULT_CODEX_MODEL: &str = "gpt-5.5";
+const DEFAULT_CODEX_MODEL: &str = "gpt-5.6-sol";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const TURN_START_TIMEOUT: Duration = Duration::from_secs(60);
 const MSG_BUFFER_CAP: usize = 300;
@@ -346,7 +346,8 @@ fn remember_ignored_turn(session: &mut CodexSession, turn_id: String) {
 
 fn codex_context_window_for_model(model: &str) -> u64 {
     match model {
-        "gpt-5.5"
+        "gpt-5.6-sol"
+        | "gpt-5.5"
         | "gpt-5.4"
         | "gpt-5.4-mini"
         | "gpt-5.3-codex"
@@ -2233,7 +2234,8 @@ impl CodexAppServerState {
 
     pub fn supported_models(&self) -> Value {
         let mut models = vec![
-            json!({ "value": "gpt-5.5", "displayName": "GPT-5.5", "description": "Newest frontier - recommended (ChatGPT login)", "source": "builtin" }),
+            json!({ "value": "gpt-5.6-sol", "displayName": "GPT-5.6 Sol", "description": "Newest frontier - recommended (ChatGPT login)", "source": "builtin" }),
+            json!({ "value": "gpt-5.5", "displayName": "GPT-5.5", "description": "Previous frontier GPT-5.5", "source": "builtin" }),
             json!({ "value": "gpt-5.4", "displayName": "GPT-5.4", "description": "Flagship GPT-5.4", "source": "builtin" }),
             json!({ "value": "gpt-5.4-mini", "displayName": "GPT-5.4 Mini", "description": "Fast GPT-5.4", "source": "builtin" }),
             json!({ "value": "gpt-5.3-codex", "displayName": "GPT-5.3 Codex", "description": "GPT-5.3 - codex variant", "source": "builtin" }),
@@ -2255,7 +2257,9 @@ impl CodexAppServerState {
     }
 
     pub fn supported_efforts(&self) -> Value {
-        json!(["minimal", "low", "medium", "high", "xhigh"])
+        // `max`/`ultra` require Codex CLI >= 0.143.0 (GPT-5.6 tier). Older
+        // models ignore the higher tiers; the runtime enforces per-model support.
+        json!(["minimal", "low", "medium", "high", "xhigh", "max", "ultra"])
     }
 
     pub fn supported_sandbox_modes(&self) -> Value {

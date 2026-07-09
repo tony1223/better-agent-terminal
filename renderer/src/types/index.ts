@@ -40,7 +40,11 @@ export function isUltracodeEffortMode(mode?: string): boolean {
   return mode === 'ultracode'
 }
 
-export const CODEX_EFFORT_LEVELS = ['minimal', 'low', 'medium', 'high', 'xhigh'] as const
+// Codex reasoning efforts, ascending. `max` and `ultra` require Codex CLI
+// >= 0.143.0 (GPT-5.6 Sol/Terra/Luna); older models ignore them. `minimal` is
+// still accepted by o-series/older models, so we keep the full superset here
+// and let the runtime enforce per-model support.
+export const CODEX_EFFORT_LEVELS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const
 export type CodexEffortLevel = typeof CODEX_EFFORT_LEVELS[number]
 
 export const CODEX_SANDBOX_MODES = ['read-only', 'workspace-write', 'danger-full-access'] as const

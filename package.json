@@ -93,7 +93,7 @@
     "@anthropic-ai/claude-code": "^2.1.195",
     "@anthropic-ai/sdk": "^0.100.1",
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@openai/codex": "0.142.4",
+    "@openai/codex": "0.144.0",
     "@vscode/ripgrep": "^1.17.1",
     "better-sqlite3": "^12.5.0",
     "selfsigned": "^5.5.0",

@@ -30,31 +30,31 @@
     }
   },
   "codex": {
-    "version": "0.142.4",
+    "version": "0.144.0",
     "platforms": {
       "darwin-arm64": {
-        "npmVersion": "0.142.4-darwin-arm64",
-        "integrity": "sha512-CfXp5jilBOxD8zLuG6Nk7w5ZPP3roE3s1rsr60za9PQKI7kaJ/5G+oP3Z0N1CoB4mpy+5JHkMLTZAZZPGFlSgQ=="
+        "npmVersion": "0.144.0-darwin-arm64",
+        "integrity": "sha512-rqFAJdOa2I0VRgepVsSZeLxs96+Y+LXTjccOOvH6894FyaFAYPZ/o+6hgpB1iGHxxdoY/DsGa8jrJC8Leqn9Kg=="
       },
       "darwin-x64": {
-        "npmVersion": "0.142.4-darwin-x64",
-        "integrity": "sha512-H9ia31pkJFtBk+UrREAfJiTUfcvgactKbG4W4SF2LFfJOTRsrsJZGtscHQ8/lLGeKEfOk/psrbSOPDyrZnxvnQ=="
+        "npmVersion": "0.144.0-darwin-x64",
+        "integrity": "sha512-4p2jxRbN+Khg5UQzpkzT9upFj+qkEF/abmdvrtflkkWmVKP6Nt+yi8ospdqv9PDqvQ9SotPvX7iXaFaeUTrtmA=="
       },
       "linux-arm64": {
-        "npmVersion": "0.142.4-linux-arm64",
-        "integrity": "sha512-/bBcEm+OKmlGHH0c88jrVgYMRyaNC/hGOW/znP/PiHQEeIf4UdsUGQ7x4FAZm648140cgaeKYIBoRBbHizS+5w=="
+        "npmVersion": "0.144.0-linux-arm64",
+        "integrity": "sha512-k++xhZrn9P3laO00Q92APG6mdOFDD66nUBo+8ExCa1NXi2pjLEMLC4+UNJTUUtUT1PEflOZ5pDKxPXgzaiFFFg=="
       },
       "linux-x64": {
-        "npmVersion": "0.142.4-linux-x64",
-        "integrity": "sha512-t3tNOkDdiO5/gRqkTmuMcAj5JjCbeWotOJzxV7pPkD2u2KvzVRrk7jPAjuy+85wPc12lsIupYgxHlK7CkVLOjA=="
+        "npmVersion": "0.144.0-linux-x64",
+        "integrity": "sha512-GmKtQeX+cO9lN7mQD1FEVcXYEMLMgMByHwZdvlluH0bj/+c2ind3hwbRtE3eECFDekNhEiB80Ez0FfbkyFQqoA=="
       },
       "win32-arm64": {
-        "npmVersion": "0.142.4-win32-arm64",
-        "integrity": "sha512-QBGeoYk3pmVscVIxeW21cvPJIjsnmD5dOTqMAzypXGik5soNIKHbps2Kj1LBKOjVbbx5qoDEbTwDfYmnjfqgdQ=="
+        "npmVersion": "0.144.0-win32-arm64",
+        "integrity": "sha512-e2yGSgwdzrT1SoJMoOzWD58WBEsIaAMZpEchuV2VGkE2T955SG7dn7EyVQTQcy7/rdpE8aEDktZ/1eQQfjkdtQ=="
       },
       "win32-x64": {
-        "npmVersion": "0.142.4-win32-x64",
-        "integrity": "sha512-W0rSPT0t7FnKlJYNu9/HpHzaSOutuSSYjIVunKorYmrScXk9pQxBEhEuyn16JOtywc/2nX8nHEmWsuj2sd8suw=="
+        "npmVersion": "0.144.0-win32-x64",
+        "integrity": "sha512-QiholLCYqNeYvNM77HOmPtrOFrY0rQc/N9nXt+sQGXO3rEGmcWjpLzujY4Oegl3CLRHoieWqlep3EqEvFBjoIA=="
       }
     }
   },
