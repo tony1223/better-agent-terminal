@@ -635,6 +635,23 @@ fn tag_remote_workspace_reload(params: Value, remote_origin: &str) -> Value {
     }
 }
 
+/// Profile ids are only unique inside one host (nearly every installation has
+/// a `default`). Stamp the source connection on proxied profile events so two
+/// remote windows attached to different hosts cannot consume each other's
+/// `profile:changed` broadcast.
+fn tag_remote_profile_changed(params: Value, remote_origin: &str) -> Value {
+    match params {
+        Value::Object(mut map) => {
+            map.insert(
+                "remoteOrigin".to_string(),
+                Value::String(remote_origin.to_string()),
+            );
+            Value::Object(map)
+        }
+        other => other,
+    }
+}
+
 fn handle_frame(
     app: &HostContext,
     pending: &mut HashMap<String, PendingInvoke>,
@@ -678,6 +695,8 @@ fn handle_frame(
         });
         if channel == "workspace:reload" {
             params = tag_remote_workspace_reload(params, remote_origin);
+        } else if channel == "profile:changed" {
+            params = tag_remote_profile_changed(params, remote_origin);
         }
         publish_runtime_event(app, &channel, params, "rust-remote-client");
     }
@@ -1102,6 +1121,19 @@ mod tests {
             tag_remote_workspace_reload(Value::String("{\"workspaces\":[]}".into()), "hostb:9876");
         assert_eq!(wrapped["remoteOrigin"], json!("hostb:9876"));
         assert_eq!(wrapped["data"], json!("{\"workspaces\":[]}"));
+    }
+
+    #[test]
+    fn tags_remote_profile_changed_payloads() {
+        let tagged = tag_remote_profile_changed(
+            json!({
+                "profiles": [{ "id": "default", "name": "Default", "type": "local" }],
+                "activeProfileIds": ["default"],
+            }),
+            "hostb:9876",
+        );
+        assert_eq!(tagged["remoteOrigin"], json!("hostb:9876"));
+        assert_eq!(tagged["profiles"][0]["id"], json!("default"));
     }
 
     #[test]

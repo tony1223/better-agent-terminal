@@ -20,6 +20,11 @@ import { ProfilePanel } from './components/ProfilePanel'
 import { ProfileWindowCloseDialog } from './components/ProfileWindowCloseDialog'
 import { FolderPicker } from './components/FolderPicker'
 import { consumeKeyboardShortcut, isBackquoteShortcutEvent } from './utils/keyboard-shortcuts'
+import {
+  normalizeProfileChangedPayload,
+  profileChangeMatchesRemoteOrigin,
+  type ProfileEntryLike,
+} from './utils/remote-profile-events'
 import type { AppState, EnvVariable, TerminalInstance } from './types'
 
 // Panel settings interface
@@ -48,39 +53,12 @@ const RECONNECT_BACKOFF_MIN = 3000
 const RECONNECT_BACKOFF_MAX = 30000
 const EMPTY_TERMINALS: TerminalInstance[] = []
 
-type ProfileEntryLike = {
-  id?: string
-  type?: string
-  remoteProfileId?: string
-}
-type ProfileChangedPayload = {
-  profiles?: ProfileEntryLike[]
-  activeProfileIds?: string[]
-}
 type ProfileWindowCloseAction = 'temporary' | 'removeFromProfile' | 'cancel'
 type ProfileWindowCloseRequest = {
   windowId: string
   profileId: string
   windowIndex: number
   windowCount: number
-}
-
-function normalizeProfileChangedPayload(payload: unknown): ProfileChangedPayload | null {
-  if (!payload || typeof payload !== 'object') return null
-  const record = payload as Record<string, unknown>
-  const profiles = Array.isArray(record.profiles)
-    ? record.profiles
-      .filter((profile): profile is Record<string, unknown> => !!profile && typeof profile === 'object')
-      .map(profile => ({
-        id: typeof profile.id === 'string' ? profile.id : undefined,
-        type: typeof profile.type === 'string' ? profile.type : undefined,
-        remoteProfileId: typeof profile.remoteProfileId === 'string' ? profile.remoteProfileId : undefined,
-      }))
-    : undefined
-  const activeProfileIds = Array.isArray(record.activeProfileIds)
-    ? record.activeProfileIds.filter((id): id is string => typeof id === 'string')
-    : undefined
-  return { profiles, activeProfileIds }
 }
 
 // Compute parent of a path, supporting both POSIX and Windows separators.
@@ -194,6 +172,7 @@ export default function App() {
   const currentWindowIdRef = useRef<string | null>(null)
   const activeProfileIdRef = useRef<string | null>(null)
   const activeRemoteProfileIdRef = useRef<string | null>(null)
+  const activeRemoteOriginRef = useRef<string | null>(null)
   const activeProfileIsRemoteRef = useRef(false)
   const remoteUnavailableRef = useRef(false)
   // Connection params captured on the initial remote connect so the status
@@ -206,6 +185,7 @@ export default function App() {
 
   useEffect(() => { activeProfileIdRef.current = activeProfileId }, [activeProfileId])
   useEffect(() => { activeRemoteProfileIdRef.current = activeRemoteProfileId }, [activeRemoteProfileId])
+  useEffect(() => { activeRemoteOriginRef.current = activeRemoteOrigin }, [activeRemoteOrigin])
   useEffect(() => {
     activeProfileIsRemoteRef.current = activeProfileIsRemote
     if (!activeProfileIsRemote) remoteUnavailableRef.current = false
@@ -876,6 +856,16 @@ export default function App() {
       const localProfileId = activeProfileIdRef.current
       const remoteProfileId = activeRemoteProfileIdRef.current || 'default'
       const payload = normalizeProfileChangedPayload(rawPayload)
+      if (!profileChangeMatchesRemoteOrigin(payload, activeRemoteOriginRef.current)) {
+        if (host.debug.isDebugMode === true) {
+          void host.debug.log('[remote] profile change ignored: remote origin mismatch', {
+            viewedRemoteOrigin: activeRemoteOriginRef.current,
+            eventRemoteOrigin: payload?.remoteOrigin,
+            remoteProfileId,
+          }).catch(() => {})
+        }
+        return
+      }
 
       if (localProfileId) {
         try {
