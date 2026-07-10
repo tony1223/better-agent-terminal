@@ -36,7 +36,8 @@
     ],
     "resources": {
       "../node-sidecar/dist/server.mjs": "node-sidecar/dist/server.mjs",
-      "../node-sidecar/package.json": "node-sidecar/package.json"
+      "../node-sidecar/package.json": "node-sidecar/package.json",
+      "target/bundle-mode.txt": "bundle-mode.txt"
     },
     "windows": {
       "nsis": {

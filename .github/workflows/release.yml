@@ -183,6 +183,11 @@ jobs:
       # legs follow the usual rule: build on stable tags, or on -pre tags when the leg
       # opts in via prerelease: true.
       BUILD_MATRIX_ENTRY: ${{ (matrix.pre_only && contains(inputs.release_tag, '-pre')) || (!matrix.pre_only && (!contains(inputs.release_tag, '-pre') || matrix.prerelease)) }}
+      # Cache rustc outputs independently from Cargo's target-dir cache. The
+      # application library is an rlib with release metadata isolated in the
+      # thin binaries, so it can now be reused across tags and bundle modes.
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: "sccache"
 
     steps:
       - name: Skip non-prerelease target
@@ -214,6 +219,10 @@ jobs:
       - name: Setup Rust
         if: env.BUILD_MATRIX_ENTRY == 'true'
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup shared Rust compiler cache
+        if: env.BUILD_MATRIX_ENTRY == 'true'
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Ensure Rust shims are first on PATH
         if: env.BUILD_MATRIX_ENTRY == 'true'
@@ -319,42 +328,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ matrix.arch }}-tauri-tools-
 
-      - name: Cache root node_modules
-        if: env.BUILD_MATRIX_ENTRY == 'true'
-        continue-on-error: true
-        uses: actions/cache@v4
-        with:
-          path: node_modules
-          key: ${{ runner.os }}-${{ matrix.arch }}-root-node-modules-${{ hashFiles('pnpm-lock.yaml') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ matrix.arch }}-root-node-modules-
-
-      - name: Cache sidecar node_modules
-        id: sidecar-node-modules-cache
-        if: env.BUILD_MATRIX_ENTRY == 'true'
-        continue-on-error: true
-        uses: actions/cache@v4
-        with:
-          path: node-sidecar/node_modules
-          key: ${{ runner.os }}-${{ matrix.arch }}-sidecar-node-modules-${{ hashFiles('node-sidecar/pnpm-lock.yaml') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ matrix.arch }}-sidecar-node-modules-
-
-      - name: Wait before retrying sidecar node_modules cache
-        if: env.BUILD_MATRIX_ENTRY == 'true' && steps.sidecar-node-modules-cache.outcome == 'failure'
-        shell: bash
-        run: sleep 10
-
-      - name: Retry sidecar node_modules cache
-        if: env.BUILD_MATRIX_ENTRY == 'true' && steps.sidecar-node-modules-cache.outcome == 'failure'
-        continue-on-error: true
-        uses: actions/cache@v4
-        with:
-          path: node-sidecar/node_modules
-          key: ${{ runner.os }}-${{ matrix.arch }}-sidecar-node-modules-${{ hashFiles('node-sidecar/pnpm-lock.yaml') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ matrix.arch }}-sidecar-node-modules-
-
       - name: Compute Tauri resource cache keys
         if: env.BUILD_MATRIX_ENTRY == 'true' && matrix.bundle_mode == 'all-in-one'
         id: tauri-resource-cache-keys
@@ -440,6 +413,7 @@ jobs:
         if: env.BUILD_MATRIX_ENTRY == 'true'
         shell: bash
         run: |
+          node scripts/prepare-tauri-bundle-mode.mjs --mode=${{ matrix.bundle_mode }}
           if [[ "${{ matrix.bundle_mode }}" == "lightweight" ]]; then
             pnpm run prepare:tauri-bundle:ci:lightweight
             pnpm run verify:tauri-preview-readiness:lightweight
@@ -479,9 +453,6 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_PROVIDER_SHORT_NAME: ${{ secrets.APPLE_PROVIDER_SHORT_NAME }}
-          # Bake the bundle mode into the binary (build.rs -> update_get_bundle_mode)
-          # so a lightweight install only ever upgrades to a lightweight build.
-          BAT_BUNDLE_MODE: ${{ matrix.bundle_mode }}
           # Sign the updater artifacts (.AppImage.sig) with the minisign key.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -537,9 +508,6 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_PROVIDER_SHORT_NAME: ${{ secrets.APPLE_PROVIDER_SHORT_NAME }}
-          # Bake the bundle mode into the binary (build.rs -> update_get_bundle_mode)
-          # so a lightweight install only ever upgrades to a lightweight build.
-          BAT_BUNDLE_MODE: ${{ matrix.bundle_mode }}
           # Sign the updater artifacts (.app.tar.gz.sig on mac, -setup.exe.sig on
           # win) with the minisign key matching the pubkey in tauri.conf.json.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -631,9 +599,16 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Download all artifacts
+      - name: Download desktop release artifacts
         uses: actions/download-artifact@v4
         with:
+          pattern: release-*
+          path: artifacts
+
+      - name: Download updater metadata
+        uses: actions/download-artifact@v4
+        with:
+          pattern: updater-meta-*
           path: artifacts
 
       - name: Display structure of downloaded files
@@ -814,9 +789,9 @@ jobs:
           }
 
   # Self-contained, install-and-go Linux server bundles for the tauri-free
-  # `bat-server` (no WebKit, no xvfb, no manual sidecar provisioning). Runs AFTER
-  # the release is published and uploads to it via `gh release upload`, so nothing
-  # depends on this job — a failure here can never block the desktop release.
+  # `bat-server` (no WebKit, no xvfb, no manual sidecar provisioning). Compile in
+  # parallel with the desktop matrix; a separate publish job waits for the GitHub
+  # release, so a server failure can never block the desktop release.
   #
   # Matrixed over both Linux arches, each on a NATIVE runner (mirroring the
   # desktop build's ubuntu-22.04-arm leg): x86_64 and aarch64. The aarch64 leg is
@@ -824,8 +799,8 @@ jobs:
   # musl binary has zero glibc requirement, so the bundle floor is set by the
   # bundled Node runtime (glibc >= 2.28). fail-fast: false so a flaky ARM runner
   # can't stop the x86_64 bundle from publishing, and vice versa.
-  bat-server-bundle:
-    needs: release
+  bat-server-build:
+    needs: verify
     strategy:
       fail-fast: false
       matrix:
@@ -834,18 +809,24 @@ jobs:
             bundle_target: linux-x86_64
             rust_target: x86_64-unknown-linux-musl
             appimage_arch: x86_64
+            aarch64_rustflags: ''
           - os: ubuntu-22.04-arm
             bundle_target: linux-aarch64
             rust_target: aarch64-unknown-linux-musl
             appimage_arch: aarch64
+            # libdbus is compiled by GCC and uses the AArch64 atomic helpers
+            # from libgcc. rustc links with -nodefaultlibs, so request libgcc
+            # explicitly or the final static link misses __aarch64_ldadd4_sync.
+            aarch64_rustflags: '-C link-arg=-lgcc'
     runs-on: ${{ matrix.os }}
     # Normal duration is well under an hour; without a cap a hung apt/runner
     # zombie holds the run "in_progress" for 12h+ (seen on v3.1.37-pre.2).
     timeout-minutes: 60
-    permissions:
-      contents: write
     env:
       APPIMAGE_EXTRACT_AND_RUN: "1"
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: "sccache"
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS: ${{ matrix.aarch64_rustflags }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -870,6 +851,23 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.rust_target }}
+
+      - name: Setup shared Rust compiler cache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Compute Rust base cache key
+        id: rust-base-cache-key
+        run: node scripts/rust-base-cache-key.mjs
+
+      - name: Cache bat-server Rust build outputs
+        continue-on-error: true
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          shared-key: bat-server-${{ matrix.bundle_target }}
+          key: base-${{ steps.rust-base-cache-key.outputs.base }}
+          cache-on-failure: true
+          cache-bin: "false"
 
       - name: Install libfuse2 (appimagetool runtime) + musl toolchain
         run: |
@@ -944,13 +942,34 @@ jobs:
             dist-bat-server/bat-server-${{ matrix.appimage_arch }}.AppImage
           if-no-files-found: error
 
-      - name: Publish bat-server bundle to the release
+  bat-server-publish:
+    needs: [release, bat-server-build]
+    if: ${{ always() && needs.release.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # One architecture is allowed to fail independently. Download and publish
+      # every artifact that the successful matrix legs produced.
+      - name: Download available bat-server bundles
+        id: download
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bat-server-*
+          path: dist-bat-server
+          merge-multiple: true
+
+      - name: Publish bat-server bundles to the release
+        if: steps.download.outcome == 'success'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload "$RELEASE_TAG" dist-bat-server/bat-server-${{ matrix.bundle_target }}.tar.gz --clobber
-          if [ -f dist-bat-server/bat-server-${{ matrix.appimage_arch }}.AppImage ]; then
-            gh release upload "$RELEASE_TAG" dist-bat-server/bat-server-${{ matrix.appimage_arch }}.AppImage --clobber
-          else
-            echo "AppImage not produced (appimagetool unavailable); published tarball only."
-          fi
+          find dist-bat-server -type f \( -name '*.tar.gz' -o -name '*.AppImage' \) -print0 | \
+            while IFS= read -r -d '' asset; do
+              gh release upload "$RELEASE_TAG" "$asset" --clobber
+            done
+
+      - name: Report missing server bundles
+        if: steps.download.outcome != 'success'
+        run: echo "No bat-server matrix artifact was available; desktop release remains published."

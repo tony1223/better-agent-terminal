@@ -6,8 +6,9 @@
 use crate::sidecar::BridgeError;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::path::Path;
 use std::time::Duration;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use tauri_plugin_updater::UpdaterExt;
 
 const GITHUB_LATEST_RELEASE: &str =
@@ -34,19 +35,36 @@ pub fn update_get_version(app: tauri::AppHandle) -> String {
     app.package_info().version.to_string()
 }
 
-/// Which bundle this binary was built as: "all-in-one" or "lightweight".
-/// Baked at compile time by build.rs from the BAT_BUNDLE_MODE env var so the
-/// auto-updater can fetch the matching update channel ("lightweight 用
-/// lightweight"). Defaults to "all-in-one" for plain dev builds.
+fn bundle_mode_from_resource_dir(
+    resource_dir: Option<&Path>,
+    prefer_all_in_one: bool,
+) -> &'static str {
+    if prefer_all_in_one {
+        return "all-in-one";
+    }
+    match resource_dir {
+        Some(dir) => match std::fs::read_to_string(dir.join("bundle-mode.txt")) {
+            Ok(marker) if marker.trim() == "lightweight" => "lightweight",
+            Ok(marker) if marker.trim() == "all-in-one" => "all-in-one",
+            _ if dir.join("node-runtime").is_dir() => "all-in-one",
+            _ => "lightweight",
+        },
+        // Preserve the historical safe default if Tauri cannot resolve its
+        // resource directory. An all-in-one update still works everywhere;
+        // the inverse could remove runtimes from an existing installation.
+        None => "all-in-one",
+    }
+}
+
+/// Which package was installed: "all-in-one" or "lightweight". The packaged
+/// Node runtime is the mode marker, allowing both flavors to share an identical
+/// compiled Rust library. Debug/dev builds keep the historical all-in-one
+/// default even when no bundle resource directory exists yet.
 #[cfg(feature = "desktop")]
 #[tauri::command]
-pub fn update_get_bundle_mode() -> &'static str {
-    let mode = env!("BAT_BUNDLE_MODE");
-    if mode == "lightweight" {
-        "lightweight"
-    } else {
-        "all-in-one"
-    }
+pub fn update_get_bundle_mode(app: tauri::AppHandle) -> &'static str {
+    let resource_dir = app.path().resource_dir().ok();
+    bundle_mode_from_resource_dir(resource_dir.as_deref(), cfg!(debug_assertions))
 }
 
 const MANIFEST_BASE: &str =
@@ -55,8 +73,7 @@ const MANIFEST_BASE: &str =
 /// Resolve the Tauri-updater manifest URL for the requested channel and the
 /// build's own bundle mode (so a lightweight install only ever upgrades to a
 /// lightweight build, and vice versa).
-fn manifest_endpoint(channel: &str) -> String {
-    let mode = update_get_bundle_mode();
+fn manifest_endpoint(channel: &str, mode: &str) -> String {
     let ch = if channel == "pre" { "pre" } else { "stable" };
     format!("{MANIFEST_BASE}/latest-{ch}-{mode}.json")
 }
@@ -65,7 +82,9 @@ fn build_updater(
     app: &tauri::AppHandle,
     channel: &str,
 ) -> Result<tauri_plugin_updater::Updater, BridgeError> {
-    let endpoint = manifest_endpoint(channel);
+    let resource_dir = app.path().resource_dir().ok();
+    let mode = bundle_mode_from_resource_dir(resource_dir.as_deref(), cfg!(debug_assertions));
+    let endpoint = manifest_endpoint(channel, mode);
     let url = reqwest::Url::parse(&endpoint).map_err(|err| BridgeError {
         message: format!("invalid updater endpoint {endpoint}: {err}"),
     })?;
@@ -272,5 +291,54 @@ mod tests {
         assert_eq!(value["hasUpdate"], false);
         assert_eq!(value["currentVersion"], "1.2.3");
         assert!(value["latestRelease"].is_null());
+    }
+
+    #[test]
+    fn packaged_node_runtime_marks_all_in_one_bundle() {
+        let root = std::env::temp_dir().join(format!(
+            "bat-update-bundle-mode-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("node-runtime")).unwrap();
+        assert_eq!(bundle_mode_from_resource_dir(Some(&root), false), "all-in-one");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn packaged_marker_takes_priority_over_leftover_runtime_files() {
+        let root = std::env::temp_dir().join(format!(
+            "bat-update-bundle-marker-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("node-runtime")).unwrap();
+        std::fs::write(root.join("bundle-mode.txt"), "lightweight\n").unwrap();
+        assert_eq!(bundle_mode_from_resource_dir(Some(&root), false), "lightweight");
+        std::fs::write(root.join("bundle-mode.txt"), "all-in-one\n").unwrap();
+        assert_eq!(bundle_mode_from_resource_dir(Some(&root), false), "all-in-one");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn missing_packaged_runtime_marks_lightweight_bundle() {
+        let root = std::env::temp_dir().join(format!(
+            "bat-update-lightweight-mode-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        assert_eq!(bundle_mode_from_resource_dir(Some(&root), false), "lightweight");
+        assert_eq!(bundle_mode_from_resource_dir(Some(&root), true), "all-in-one");
+        assert_eq!(bundle_mode_from_resource_dir(None, false), "all-in-one");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn updater_manifest_keeps_channel_and_bundle_mode_separate() {
+        assert!(manifest_endpoint("stable", "all-in-one")
+            .ends_with("/latest-stable-all-in-one.json"));
+        assert!(manifest_endpoint("pre", "lightweight")
+            .ends_with("/latest-pre-lightweight.json"));
     }
 }

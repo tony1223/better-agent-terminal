@@ -7,10 +7,12 @@ edition = "2021"
 default-run = "better-agent-terminal"
 
 [lib]
-# Tauri 2 ships application code as a library so the desktop binary and
-# (later) mobile targets can share it.
+# Desktop and headless binaries link this crate as an rlib. Building cdylib and
+# staticlib here made every release also link unused ~20 MB/~250 MB library
+# artifacts. Add the mobile-specific crate types back when a mobile target is
+# introduced; none of the current desktop/server targets consume them.
 name = "better_agent_terminal_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+crate-type = ["rlib"]
 
 # The desktop shell (GUI). It also handles `--bat-server` mode when launched
 # with the flag, but it links the full Tauri/Wry stack, so it cannot build

@@ -3,6 +3,7 @@
 import { spawn } from 'node:child_process'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { prepareTauriBundleMode } from './prepare-tauri-bundle-mode.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(here, '..')
@@ -45,6 +46,7 @@ function parseArgs(argv) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2))
+  await prepareTauriBundleMode(args.mode)
   const tauriArgs = [
     'exec',
     'tauri',

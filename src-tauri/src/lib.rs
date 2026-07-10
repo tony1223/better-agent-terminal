@@ -87,13 +87,16 @@ pub fn is_headless_server_invocation() -> bool {
     std::env::args().any(|arg| arg == "--bat-server")
 }
 
-pub fn run_headless_server_cli() -> i32 {
+fn execute_headless_server_cli<F>(run_server: F) -> i32
+where
+    F: FnOnce(HeadlessServerArgs) -> Result<(), String>,
+{
     match parse_headless_server_args(std::env::args().skip(1)) {
         Ok(HeadlessCliAction::Help) => {
             print_headless_server_help();
             0
         }
-        Ok(HeadlessCliAction::Run(args)) => match run_headless_server(args) {
+        Ok(HeadlessCliAction::Run(args)) => match run_server(args) {
             Ok(()) => 0,
             Err(err) => {
                 eprintln!("bat-server failed to start: {err}");
@@ -108,9 +111,18 @@ pub fn run_headless_server_cli() -> i32 {
     }
 }
 
+#[cfg(not(feature = "desktop"))]
+pub fn run_headless_server_cli() -> i32 {
+    execute_headless_server_cli(run_headless_server)
+}
+
 #[cfg(feature = "desktop")]
-pub fn run() {
-    let context = app_context();
+pub fn run_headless_server_cli(context: tauri::Context<tauri::Wry>) -> i32 {
+    execute_headless_server_cli(|args| run_headless_server(args, context))
+}
+
+#[cfg(feature = "desktop")]
+pub fn run(context: tauri::Context<tauri::Wry>) {
     let app = app_builder(false)
         .build(context)
         .expect("error while building better-agent-terminal");
@@ -123,11 +135,6 @@ pub fn run() {
             );
         }
     });
-}
-
-#[cfg(feature = "desktop")]
-fn app_context() -> tauri::Context<tauri::Wry> {
-    tauri::generate_context!()
 }
 
 #[cfg(feature = "desktop")]
@@ -532,12 +539,14 @@ fn print_headless_server_banner_headless(
 }
 
 #[cfg(feature = "desktop")]
-fn run_headless_server(args: HeadlessServerArgs) -> Result<(), String> {
+fn run_headless_server(
+    args: HeadlessServerArgs,
+    mut context: tauri::Context<tauri::Wry>,
+) -> Result<(), String> {
     if let Some(data_dir) = &args.data_dir {
         std::env::set_var(app_data::TAURI_DATA_DIR_ENV, data_dir);
     }
 
-    let mut context = app_context();
     context.config_mut().app.windows.clear();
 
     let app = app_builder(true)
