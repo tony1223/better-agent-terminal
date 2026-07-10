@@ -176,9 +176,9 @@ fn legacy_v1_param_keys(channel: &str) -> Option<&'static [&'static str]> {
         | "claude:account-list"
         | "claude:account-mark-warning-shown"
         | "claude:auth-login-start"
-        | "claude:auth-login-cancel"
         | "claude:get-cli-path" => Some(&[]),
-        "claude:auth-login-submit-code" => Some(&["code"]),
+        "claude:auth-login-submit-code" => Some(&["code", "loginId"]),
+        "claude:auth-login-cancel" => Some(&["loginId"]),
         "claude:prepare-cli-session" => Some(&[
             "terminalId",
             "workspaceId",
@@ -235,9 +235,8 @@ fn legacy_v1_param_keys(channel: &str) -> Option<&'static [&'static str]> {
         "claude:account-switch" | "claude:account-remove" => Some(&["accountId"]),
         "codex:account-list" => Some(&[]),
         "codex:account-switch" => Some(&["codexHome"]),
-        "codex:auth-login-device-start"
-        | "codex:auth-login-device-poll"
-        | "codex:auth-login-device-cancel" => Some(&[]),
+        "codex:auth-login-device-start" => Some(&[]),
+        "codex:auth-login-device-poll" | "codex:auth-login-device-cancel" => Some(&["loginId"]),
         "claude:check-mcp-json-status" | "claude:enable-all-project-mcp" => Some(&["cwd"]),
         "worktree:create" => Some(&["sessionId", "cwd", "installPnpm"]),
         "worktree:remove" => Some(&["sessionId", "deleteBranch"]),
@@ -701,6 +700,25 @@ mod tests {
                     "workspaceName": "Plan 5.3.7",
                 },
             })
+        );
+    }
+
+    #[test]
+    fn maps_remote_login_ids_without_breaking_legacy_calls() {
+        assert_eq!(
+            legacy_v1_args_to_params(
+                "claude:auth-login-submit-code",
+                &[json!("auth-code"), json!("claude-login-id")],
+            ),
+            json!({ "code": "auth-code", "loginId": "claude-login-id" })
+        );
+        assert_eq!(
+            legacy_v1_args_to_params("codex:auth-login-device-poll", &[json!("codex-login-id")],),
+            json!({ "loginId": "codex-login-id" })
+        );
+        assert_eq!(
+            legacy_v1_args_to_params("codex:auth-login-device-poll", &[]),
+            Value::Null
         );
     }
 

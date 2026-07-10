@@ -430,6 +430,20 @@ On the host BAT instance:
 3. Scan the QR code with a mobile device to retrieve the connection info
 4. The QR code contains the WebSocket URL and token (in JSON format)
 
+### Signing In to Claude or Codex on a Remote Host
+
+When a connected host advertises remote sign-in support, use the account chip
+or `/login` from an agent panel. Claude opens its authorization URL on the
+client and asks you to paste the returned code; Codex shows an official device
+code and completes automatically after browser approval. The resulting
+credential is finalized and stored on the host, not copied into the client.
+
+BAT allows only one remote sign-in ceremony per provider at a time and
+temporarily blocks remote account switching while it completes. Authorization URLs,
+codes, and raw provider output are not written to BAT logs. Older hosts remain
+compatible: the client hides this flow and asks you to sign in from a terminal
+on the host until BAT is updated there.
+
 ### Recommended: Use Tailscale for Cross-Network Connections
 
 If the host and client are not on the same local network (e.g., connecting from home to an office machine), we recommend using [Tailscale](https://tailscale.com/) to establish a secure peer-to-peer VPN:

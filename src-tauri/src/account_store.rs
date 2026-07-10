@@ -336,6 +336,56 @@ pub fn upsert_new_login_account(
     Ok(account)
 }
 
+/// Preserve the currently active CLI credential before an interactive login
+/// overwrites Claude's host-global credential store.
+pub fn snapshot_active_account_credential(app_data_dir: &Path) -> Result<(), AccountStoreError> {
+    let index = read_index(app_data_dir);
+    let Some(active_id) = index.active_account_id else {
+        return Ok(());
+    };
+    let Some(credential) = read_cli_credentials() else {
+        return Ok(());
+    };
+    save_account_credential(&active_id, &credential)
+}
+
+/// Register the credential written by a completed login and make it the
+/// account BAT reports as active without snapshotting it over the old account.
+pub fn activate_new_login_account(
+    app_data_dir: &Path,
+    status: AuthStatus,
+    credential_json: String,
+) -> Result<ClaudeAccount, AccountStoreError> {
+    let account = upsert_new_login_account(app_data_dir, status, credential_json)?;
+    set_active_account_id(app_data_dir, &account.id)?;
+    Ok(account)
+}
+
+fn set_active_account_id(app_data_dir: &Path, account_id: &str) -> Result<(), AccountStoreError> {
+    let mut index = read_index(app_data_dir);
+    if !index
+        .accounts
+        .iter()
+        .any(|account| account.id == account_id)
+    {
+        return Err(AccountStoreError::SafeStorage(format!(
+            "unknown account: {account_id}"
+        )));
+    }
+    index.active_account_id = Some(account_id.to_string());
+    write_index(app_data_dir, &index)
+}
+
+/// Restore the indexed active account after a cancelled or failed login.
+pub fn restore_active_account_credential(app_data_dir: &Path) -> Result<bool, AccountStoreError> {
+    let index = read_index(app_data_dir);
+    let Some(active_id) = index.active_account_id else {
+        return Ok(false);
+    };
+    let credential = load_account_credential(&active_id)?;
+    Ok(write_cli_credentials(&credential))
+}
+
 pub fn switch_account(app_data_dir: &Path, account_id: &str) -> Result<bool, AccountStoreError> {
     let mut index = read_index(app_data_dir);
     if !index
@@ -345,11 +395,7 @@ pub fn switch_account(app_data_dir: &Path, account_id: &str) -> Result<bool, Acc
     {
         return Ok(false);
     }
-    if let Some(active_id) = index.active_account_id.clone() {
-        if let Some(current_cred) = read_cli_credentials() {
-            let _ = save_account_credential(&active_id, &current_cred);
-        }
-    }
+    let _ = snapshot_active_account_credential(app_data_dir);
     let Ok(credential) = load_account_credential(account_id) else {
         return Ok(false);
     };
@@ -445,5 +491,29 @@ mod tests {
         assert!(status.logged_in);
         assert_eq!(status.email.as_deref(), Some("user@example.com"));
         assert_eq!(status.subscription_type.as_deref(), Some("pro"));
+    }
+
+    #[test]
+    fn active_account_marker_never_rewrites_credentials() {
+        let dir = temp_dir("activate");
+        let index = AccountIndex {
+            accounts: vec![ClaudeAccount {
+                id: "new-account".into(),
+                email: "new@example.com".into(),
+                subscription_type: Some("max".into()),
+                is_default: false,
+                created_at: 2,
+            }],
+            active_account_id: None,
+            switch_warning_shown: false,
+        };
+        write_index(&dir, &index).unwrap();
+        set_active_account_id(&dir, "new-account").unwrap();
+        assert_eq!(
+            read_index(&dir).active_account_id.as_deref(),
+            Some("new-account")
+        );
+        assert!(set_active_account_id(&dir, "missing").is_err());
+        fs::remove_dir_all(dir).ok();
     }
 }

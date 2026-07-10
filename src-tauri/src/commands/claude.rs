@@ -3424,13 +3424,18 @@ pub async fn claude_auth_login_submit_code(
     window: WebviewWindow,
     state: State<'_, SidecarState>,
     code: String,
+    login_id: Option<String>,
 ) -> Result<Value, BridgeError> {
+    let mut remote_args = vec![json!(code.clone())];
+    if let Some(login_id) = login_id.as_ref() {
+        remote_args.push(json!(login_id));
+    }
     if let Some(result) = remote_invoke_for_window(
         &HostContext::from_app(app.clone()),
         &state,
         &window,
         "agent:auth-login-submit-code",
-        vec![json!(code.clone())],
+        remote_args,
         AUTH_LOGIN_TIMEOUT,
     )
     .await
@@ -3441,7 +3446,7 @@ pub async fn claude_auth_login_submit_code(
         app,
         state,
         "claude.authLoginSubmitCode",
-        json!({ "code": code }),
+        json!({ "code": code, "loginId": login_id }),
         AUTH_LOGIN_TIMEOUT,
     )
     .await
@@ -3453,13 +3458,18 @@ pub async fn claude_auth_login_cancel(
     app: AppHandle,
     window: WebviewWindow,
     state: State<'_, SidecarState>,
+    login_id: Option<String>,
 ) -> Result<Value, BridgeError> {
+    let remote_args = login_id
+        .as_ref()
+        .map(|value| vec![json!(value)])
+        .unwrap_or_default();
     if let Some(result) = remote_invoke_for_window(
         &HostContext::from_app(app.clone()),
         &state,
         &window,
         "agent:auth-login-cancel",
-        vec![],
+        remote_args,
         DEFAULT_TIMEOUT,
     )
     .await
@@ -3470,7 +3480,7 @@ pub async fn claude_auth_login_cancel(
         app,
         state,
         "claude.authLoginCancel",
-        Value::Null,
+        json!({ "loginId": login_id }),
         DEFAULT_TIMEOUT,
     )
     .await
@@ -3767,13 +3777,10 @@ pub async fn codex_account_login_cancel(
     Ok(codex.account_login_cancel())
 }
 
-// Device-code login for remote hosts: `codex login --device-auth` prints a
-// sign-in URL + one-time code, then polls until the user approves in their own
-// browser and exits on its own. Unlike codex_account_login (local browser
-// OAuth), these route to the host when connected to a remote, so a client can
-// authenticate the host's codex with no browser on the host. The host keeps the
-// login child between the start (returns url+code) and poll (waits for exit)
-// calls. See codex_app_server::account_login_device_start / _poll.
+// Device-code login for remote hosts. Codex app-server returns structured
+// loginId/url/code fields and emits account/login/completed after browser
+// approval. These commands retain the existing renderer IPC names and route to
+// the connected host; loginId is additive for legacy client compatibility.
 #[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn codex_account_login_device_start(
@@ -3812,13 +3819,18 @@ pub async fn codex_account_login_device_poll(
     window: WebviewWindow,
     state: State<'_, SidecarState>,
     codex: State<'_, CodexAppServerState>,
+    login_id: Option<String>,
 ) -> Result<Value, BridgeError> {
+    let remote_args = login_id
+        .as_ref()
+        .map(|value| vec![json!(value)])
+        .unwrap_or_default();
     if let Some(result) = remote_invoke_for_window(
         &HostContext::from_app(app.clone()),
         &state,
         &window,
         "codex:auth-login-device-poll",
-        vec![],
+        remote_args,
         DEFAULT_TIMEOUT,
     )
     .await
@@ -3827,7 +3839,7 @@ pub async fn codex_account_login_device_poll(
     }
     let codex = codex.inner().clone();
     crate::async_rt::spawn_blocking(move || {
-        codex.account_login_device_poll(&HostContext::from_app(app.clone()))
+        codex.account_login_device_poll(&HostContext::from_app(app.clone()), login_id.as_deref())
     })
     .await
     .map_err(|err| BridgeError {
@@ -3843,20 +3855,27 @@ pub async fn codex_account_login_device_cancel(
     window: WebviewWindow,
     state: State<'_, SidecarState>,
     codex: State<'_, CodexAppServerState>,
+    login_id: Option<String>,
 ) -> Result<Value, BridgeError> {
+    let remote_args = login_id
+        .as_ref()
+        .map(|value| vec![json!(value)])
+        .unwrap_or_default();
     if let Some(result) = remote_invoke_for_window(
         &HostContext::from_app(app.clone()),
         &state,
         &window,
         "codex:auth-login-device-cancel",
-        vec![],
+        remote_args,
         DEFAULT_TIMEOUT,
     )
     .await
     {
         return result;
     }
-    Ok(codex.account_login_cancel())
+    codex
+        .account_login_device_cancel(&HostContext::from_app(app.clone()), login_id.as_deref())
+        .map_err(|message| BridgeError { message })
 }
 
 // --- read-only metadata ---------------------------------------------------

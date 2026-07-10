@@ -14,6 +14,11 @@ import { NewTerminalQuickPick, type QuickPickChoice } from './NewTerminalQuickPi
 import { AgentPresetId, getAgentPreset, getVisiblePresets } from '../types/agent-presets'
 import { isProcfileName } from '../utils/procfile-parser'
 import { getHostUsageSnapshot, subscribeHostUsage, type HostUsageSnapshot } from '../utils/claude-usage-cache'
+import {
+  normalizeRemoteAuthCapabilities,
+  supportsRemoteLogin,
+  type RemoteAuthCapabilities,
+} from '../utils/remote-auth'
 
 // Lazy load heavy components (xterm.js, Claude SDK, etc.)
 const MainPanel = lazy(() => import('./MainPanel').then(m => ({ default: m.MainPanel })))
@@ -119,6 +124,7 @@ interface WorkspaceViewProps {
   focusedTerminalId: string | null
   isActive: boolean
   isRemoteConnected?: boolean
+  remoteHostLabel?: string
 }
 
 // Helper to get shell path from settings
@@ -201,7 +207,7 @@ export function clearInitializedWorkspaces(): void {
   initializedWorkspaces.clear()
 }
 
-export const WorkspaceView = memo(function WorkspaceView({ workspace, terminals, focusedTerminalId, isActive, isRemoteConnected = false }: Readonly<WorkspaceViewProps>) {
+export const WorkspaceView = memo(function WorkspaceView({ workspace, terminals, focusedTerminalId, isActive, isRemoteConnected = false, remoteHostLabel }: Readonly<WorkspaceViewProps>) {
   const { t, i18n } = useTranslation()
   const [showCloseConfirm, setShowCloseConfirm] = useState<string | null>(null)
   const [thumbnailSettings, setThumbnailSettings] = useState<ThumbnailSettings>(loadThumbnailSettings)
@@ -317,6 +323,10 @@ export const WorkspaceView = memo(function WorkspaceView({ workspace, terminals,
   const [loginPending, setLoginPending] = useState(false)
   // Non-null while the remote URL ("paste code") login dialog is open.
   const [remoteLoginKind, setRemoteLoginKind] = useState<'claude' | 'codex' | null>(null)
+  // undefined = still loading, null = connected host does not advertise the
+  // additive remote-auth capability (typically an older host).
+  const [remoteAuthCapabilities, setRemoteAuthCapabilities] = useState<RemoteAuthCapabilities | null | undefined>(undefined)
+  const [remoteEndpointLabel, setRemoteEndpointLabel] = useState<string | null>(null)
   const [accountMenuError, setAccountMenuError] = useState<string | null>(null)
   // Id of the account row currently being switched to, so the menu can show a
   // spinner immediately (the backend switch is fast, but the agent then respawns).
@@ -325,6 +335,27 @@ export const WorkspaceView = memo(function WorkspaceView({ workspace, terminals,
   // Preset IDs the host knows how to start. `null` until fetched — fall back
   // to the local list so menus aren't empty during the brief load window.
   const [supportedPresetIds, setSupportedPresetIds] = useState<string[] | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    if (!isRemoteConnected) {
+      setRemoteAuthCapabilities(undefined)
+      setRemoteEndpointLabel(null)
+      return () => { cancelled = true }
+    }
+    setRemoteAuthCapabilities(undefined)
+    void host.remote.clientStatus()
+      .then(status => {
+        if (cancelled) return
+        setRemoteAuthCapabilities(normalizeRemoteAuthCapabilities(status))
+        const info = status?.info
+        setRemoteEndpointLabel(info ? `${info.host}:${info.port}` : null)
+      })
+      .catch(() => {
+        if (!cancelled) setRemoteAuthCapabilities(null)
+      })
+    return () => { cancelled = true }
+  }, [isRemoteConnected, remoteHostLabel])
 
   // Fetch the host-supported preset list once. Refreshes on profile switch
   // because workspaces re-mount when the active profile changes.
@@ -602,6 +633,24 @@ export const WorkspaceView = memo(function WorkspaceView({ workspace, terminals,
     // flow (display URL + one-time code, poll for approval). Both authenticate
     // the host with no browser on the host.
     if (isRemoteConnected) {
+      let capabilities = remoteAuthCapabilities
+      if (capabilities === undefined) {
+        try {
+          const status = await host.remote.clientStatus()
+          capabilities = normalizeRemoteAuthCapabilities(status)
+          setRemoteAuthCapabilities(capabilities)
+          const info = status?.info
+          if (info) setRemoteEndpointLabel(`${info.host}:${info.port}`)
+        } catch {
+          capabilities = null
+          setRemoteAuthCapabilities(null)
+        }
+      }
+      if (!supportsRemoteLogin(capabilities, kind)) {
+        setAccountMenuError(t('workspace.accountRemoteLoginUnsupported'))
+        setAccountMenuOpen(true)
+        return
+      }
       setAccountMenuOpen(false)
       setRemoteLoginKind(kind)
       return
@@ -637,7 +686,7 @@ export const WorkspaceView = memo(function WorkspaceView({ workspace, terminals,
     } else {
       setAccountMenuOpen(false)
     }
-  }, [refreshAccountChip, isRemoteConnected, loginPending])
+  }, [refreshAccountChip, isRemoteConnected, loginPending, remoteAuthCapabilities, t])
 
   // Cancel an in-flight Codex login (the browser OAuth hasn't completed yet).
   // The backend kills the pending `codex login` child, which makes the awaited
@@ -1186,10 +1235,12 @@ export const WorkspaceView = memo(function WorkspaceView({ workspace, terminals,
               className={`workspace-account-chip workspace-account-chip-${accountChip.kind}`}
               title={accountChip.title}
               onClick={() => {
-                // Not logged in → go straight to login (both Claude and Codex
-                // have real CLI login flows). In remote mode, open the menu so
-                // the "log in from a terminal" hint is shown instead.
-                if (!accountChip.loggedIn && !isRemoteConnected) {
+                // Signed-out profiles go straight to the appropriate ceremony
+                // when the local or remote host supports it.
+                if (!accountChip.loggedIn && (
+                  !isRemoteConnected
+                  || supportsRemoteLogin(remoteAuthCapabilities, accountChip.kind)
+                )) {
                   void handleLogin(accountChip.kind)
                   return
                 }
@@ -1272,9 +1323,26 @@ export const WorkspaceView = memo(function WorkspaceView({ workspace, terminals,
                     )}
                   </div>
                 ) : isRemoteConnected ? (
-                  <div className="workspace-account-menu-hint">
-                    {t('workspace.accountRemoteLoginHint')}
-                  </div>
+                  remoteAuthCapabilities === undefined ? (
+                    <div className="workspace-account-menu-hint">
+                      {t('workspace.accountRemoteLoginChecking')}
+                    </div>
+                  ) : supportsRemoteLogin(remoteAuthCapabilities, accountChip.kind) ? (
+                    <button
+                      className="workspace-account-menu-item workspace-account-menu-action"
+                      onClick={() => { void handleLogin(accountChip.kind) }}
+                    >
+                      <span className="workspace-account-menu-label">
+                        {t('workspace.accountRemoteLoginAction', {
+                          host: remoteHostLabel || remoteEndpointLabel || t('workspace.remoteHostFallback'),
+                        })}
+                      </span>
+                    </button>
+                  ) : (
+                    <div className="workspace-account-menu-hint">
+                      {t('workspace.accountRemoteLoginUnsupported')}
+                    </div>
+                  )
                 ) : (
                   <button
                     className="workspace-account-menu-item workspace-account-menu-action"
@@ -1417,6 +1485,7 @@ export const WorkspaceView = memo(function WorkspaceView({ workspace, terminals,
       {remoteLoginKind && (
         <RemoteLoginDialog
           kind={remoteLoginKind}
+          hostLabel={remoteHostLabel || remoteEndpointLabel || undefined}
           onClose={() => setRemoteLoginKind(null)}
           onSuccess={() => {
             setRemoteLoginKind(null)

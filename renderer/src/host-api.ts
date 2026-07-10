@@ -786,18 +786,22 @@ function createTauriHost(): BatAppAPI {
         getInvoke()<unknown>('codex_account_login', { apiKey }),
       accountLoginCancel: () =>
         getInvoke()<unknown>('codex_account_login_cancel'),
-      // Device-code login (remote hosts): start returns the sign-in URL +
-      // one-time code, poll waits for the user to approve in their browser.
+      // Structured app-server device login (remote hosts): start returns the
+      // URL, one-time code, and opaque login id; poll/cancel echo that id.
       authLoginDeviceStart: () =>
-        getInvoke()<{ ok?: boolean; url?: string; code?: string; error?: string }>(
+        getInvoke()<{ ok?: boolean; url?: string; code?: string; loginId?: string; error?: string }>(
           'codex_account_login_device_start',
         ),
-      authLoginDevicePoll: () =>
+      authLoginDevicePoll: (loginId?: string) =>
         getInvoke()<{ status?: string; account?: unknown; error?: string }>(
           'codex_account_login_device_poll',
+          loginId ? { loginId } : undefined,
         ),
-      authLoginDeviceCancel: () =>
-        getInvoke()<unknown>('codex_account_login_device_cancel'),
+      authLoginDeviceCancel: (loginId?: string) =>
+        getInvoke()<unknown>(
+          'codex_account_login_device_cancel',
+          loginId ? { loginId } : undefined,
+        ),
       // Codex Fugu (Sakana provider) config — write the provider block + key
       // into ~/.codex so the app-server can route the fugu model to provider
       // "sakana". BAT_DEBUG-gated feature.
@@ -1056,14 +1060,25 @@ function createTauriHost(): BatAppAPI {
         if (key === 'authLogout') return () => getInvoke()<unknown>('claude_auth_logout')
         // Interactive URL ("paste code") login — used for remote hosts.
         if (key === 'authLoginStart') {
-          return () => getInvoke()<{ ok: boolean; url?: string; error?: string }>('claude_auth_login_start')
+          return () => getInvoke()<{
+            ok: boolean
+            url?: string
+            loginId?: string
+            error?: string
+          }>('claude_auth_login_start')
         }
         if (key === 'authLoginSubmitCode') {
-          return (code: string) =>
-            getInvoke()<{ success: boolean; error?: string }>('claude_auth_login_submit_code', { code })
+          return (code: string, loginId?: string) =>
+            getInvoke()<{ success: boolean; error?: string }>(
+              'claude_auth_login_submit_code',
+              { code, ...(loginId ? { loginId } : {}) },
+            )
         }
         if (key === 'authLoginCancel') {
-          return () => getInvoke()<unknown>('claude_auth_login_cancel')
+          return (loginId?: string) => getInvoke()<unknown>(
+            'claude_auth_login_cancel',
+            loginId ? { loginId } : undefined,
+          )
         }
         if (key === 'accountImportCurrent') {
           return () => getInvoke()<unknown>('claude_account_import_current')
@@ -1414,7 +1429,11 @@ function createTauriHost(): BatAppAPI {
         getInvoke()<unknown>('remote_connect', { host, port, token, fingerprint, label }),
       disconnect: () => getInvoke()<unknown>('remote_disconnect'),
       clientStatus: () =>
-        getInvoke()<{ connected: boolean; info: { host: string; port: number } | null }>(
+        getInvoke()<{
+          connected: boolean
+          info: { host: string; port: number } | null
+          capabilities?: unknown
+        }>(
           'remote_client_status',
         ),
       testConnection: (host: string, port: number, token: string, fingerprint: string) =>

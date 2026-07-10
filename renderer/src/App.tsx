@@ -1053,6 +1053,7 @@ export default function App() {
               focusedTerminalId={state.focusedTerminalId}
               isActive={true}
               isRemoteConnected={isRemoteConnected}
+              remoteHostLabel={activeProfileIsRemote ? activeProfileName : undefined}
             />
           </div>
         </main>
@@ -1113,6 +1114,7 @@ export default function App() {
                   : workspace.focusedTerminalId ?? null}
                 isActive={workspace.id === state.activeWorkspaceId}
                 isRemoteConnected={isRemoteConnected}
+                remoteHostLabel={activeProfileIsRemote ? activeProfileName : undefined}
               />
             </div>
           ))

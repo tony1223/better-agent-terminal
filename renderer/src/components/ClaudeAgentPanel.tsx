@@ -194,6 +194,7 @@ export interface ClaudeAgentPanelProps {
   showThinkingMsg?: boolean
   isRemoteConnected?: boolean
   targetAgent?: 'claude' | 'codex'
+  onRequestLogin?: (kind: 'claude' | 'codex') => void
 }
 
 interface AttachedImage {
@@ -266,7 +267,7 @@ export function ClaudeAgentPanel({ isActive, ...props }: Readonly<ClaudeAgentPan
   return <ClaudeAgentPanelContent {...props} activation={activation} />
 }
 
-const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionId, cwd, activation, workspaceId, onClose, showUserMsg = true, showAssistantMsg = true, showToolMsg = true, showThinkingMsg = true, isRemoteConnected = false, targetAgent }: Readonly<ClaudeAgentPanelContentProps>) {
+const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionId, cwd, activation, workspaceId, onClose, showUserMsg = true, showAssistantMsg = true, showToolMsg = true, showThinkingMsg = true, isRemoteConnected = false, targetAgent, onRequestLogin }: Readonly<ClaudeAgentPanelContentProps>) {
   const { t, i18n } = useTranslation()
   // Determine backend/session flavor from agentPreset
   const terminal = workspaceStore.getState().terminals.find(t => t.id === sessionId)
@@ -2499,6 +2500,10 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
         id: `sys-login-${Date.now()}`, sessionId, role: 'system' as const,
         content: 'Opening Claude login...', timestamp: Date.now(),
       }])
+      if (isRemoteConnected && onRequestLogin) {
+        onRequestLogin('claude')
+        return
+      }
       const result = await host.claude.authLogin()
       if (result.success) {
         const status = await host.claude.authStatus()
@@ -2827,7 +2832,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
         host.debug.log(`[handleSend] sync=${sync.toFixed(1)}ms invoke=${invoke.toFixed(1)}ms total=${total.toFixed(1)}ms sessionId=${sessionId} promptLen=${trimmed.length}`)
       }
     }
-  }, [isRemoteConnected, isStreaming, isInterrupted, sessionId, attachedImages, attachedFiles, clearInput, setInputValue, sendClaudeMessage])
+  }, [isRemoteConnected, isStreaming, isInterrupted, sessionId, attachedImages, attachedFiles, clearInput, setInputValue, sendClaudeMessage, onRequestLogin])
 
   const handleInterrupt = useCallback(() => {
     if (!isStreaming) return

@@ -98,6 +98,8 @@ struct RunningClient {
     // compares it to the client's own version to surface a skew warning
     // (issue #115 was triggered by exactly that gap going undetected).
     server_version: Option<String>,
+    // Additive host feature advertisement. Missing against older hosts.
+    capabilities: Option<Value>,
     connected: Arc<AtomicBool>,
     tx: mpsc::Sender<ClientCommand>,
     // window_labels currently bound to this connection. The socket is torn down
@@ -128,6 +130,7 @@ struct RemoteConnection {
     protocol: String,
     compression: RemoteCompression,
     server_version: Option<String>,
+    capabilities: Option<Value>,
 }
 
 #[derive(Debug)]
@@ -237,6 +240,7 @@ impl RustRemoteClientState {
                 let compression = connection.compression;
                 let protocol = connection.protocol.clone();
                 let server_version = connection.server_version.clone();
+                let capabilities = connection.capabilities.clone();
                 let (tx, rx) = mpsc::channel();
                 let connected = Arc::new(AtomicBool::new(true));
                 let connected_for_loop = Arc::clone(&connected);
@@ -257,6 +261,7 @@ impl RustRemoteClientState {
                     compression,
                     protocol,
                     server_version,
+                    capabilities,
                     connected,
                     tx,
                     referrers: Mutex::new(HashSet::new()),
@@ -302,6 +307,7 @@ impl RustRemoteClientState {
             "protocol": client.protocol,
             "clientVersion": client_version,
             "serverVersion": server_version,
+            "capabilities": client.capabilities,
         }))
     }
 
@@ -376,6 +382,11 @@ impl RustRemoteClientState {
                     "port": client.port,
                     "compression": client.compression.as_str(),
                 })
+            } else {
+                Value::Null
+            },
+            "capabilities": if connected {
+                client.capabilities.clone().unwrap_or(Value::Null)
             } else {
                 Value::Null
             },
@@ -887,11 +898,16 @@ fn connect_socket(
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
                     .map(str::to_string);
+                let capabilities = frame
+                    .get("capabilities")
+                    .filter(|value| value.is_object())
+                    .cloned();
                 return Ok(RemoteConnection {
                     ws,
                     protocol,
                     compression,
                     server_version,
+                    capabilities,
                 });
             }
             Ok(_) => {}
@@ -1161,6 +1177,7 @@ mod tests {
             compression: RemoteCompression::None,
             protocol: "v2".to_string(),
             server_version: None,
+            capabilities: None,
             connected: Arc::new(AtomicBool::new(true)),
             tx,
             referrers: Mutex::new(HashSet::new()),

@@ -246,6 +246,7 @@ export const MainPanel = memo(function MainPanel({ terminal, isActive, onClose, 
                 showToolMsg={showToolMsg}
                 showThinkingMsg={showThinkingMsg}
                 isRemoteConnected={isRemoteConnected}
+                onRequestLogin={onRequestLogin}
               />
             )}
           </Suspense>

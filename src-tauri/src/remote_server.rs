@@ -50,6 +50,101 @@ use tungstenite::Message;
 const DEFAULT_REMOTE_PORT: u16 = 9876;
 const INVOKE_TIMEOUT: Duration = Duration::from_secs(15);
 const SESSION_INVOKE_TIMEOUT: Duration = Duration::from_secs(300);
+const CLAUDE_REMOTE_LOGIN_TTL: Duration = Duration::from_secs(180);
+
+struct ClaudeRemoteLoginClaim {
+    touched: Instant,
+    login_id: Option<String>,
+}
+
+static CLAUDE_REMOTE_LOGIN_CLAIM: Mutex<Option<ClaudeRemoteLoginClaim>> = Mutex::new(None);
+
+fn remote_capabilities() -> Value {
+    json!({
+        "remoteAuth": {
+            "claude": "paste-code-v1",
+            "codex": "device-code-v1",
+        }
+    })
+}
+
+fn clear_claude_remote_login_started() {
+    if let Ok(mut claim) = CLAUDE_REMOTE_LOGIN_CLAIM.lock() {
+        *claim = None;
+    }
+}
+
+fn try_begin_claude_remote_login() -> bool {
+    let Ok(mut claim) = CLAUDE_REMOTE_LOGIN_CLAIM.lock() else {
+        return false;
+    };
+    if claim
+        .as_ref()
+        .is_some_and(|value| value.touched.elapsed() < CLAUDE_REMOTE_LOGIN_TTL)
+    {
+        return false;
+    }
+    *claim = Some(ClaudeRemoteLoginClaim {
+        touched: Instant::now(),
+        login_id: None,
+    });
+    true
+}
+
+fn bind_claude_remote_login_id(login_id: Option<&str>) {
+    let Some(login_id) = login_id.filter(|value| !value.trim().is_empty()) else {
+        return;
+    };
+    if let Ok(mut claim) = CLAUDE_REMOTE_LOGIN_CLAIM.lock() {
+        if let Some(claim) = claim.as_mut() {
+            claim.login_id = Some(login_id.to_string());
+            claim.touched = Instant::now();
+        }
+    }
+}
+
+/// Validate a continuation before it reaches the sidecar and renew the claim
+/// for the bounded submit/cancel operation. Missing ids remain accepted for
+/// legacy clients; current clients must echo the id returned by start.
+fn touch_claude_remote_login(requested_login_id: Option<&str>) -> bool {
+    let Ok(mut claim) = CLAUDE_REMOTE_LOGIN_CLAIM.lock() else {
+        return false;
+    };
+    let Some(active) = claim.as_mut() else {
+        return false;
+    };
+    if active.touched.elapsed() >= CLAUDE_REMOTE_LOGIN_TTL {
+        *claim = None;
+        return false;
+    }
+    // A claim without an id is still starting (or belongs to an already-active
+    // local ceremony). Never let an origin-less remote continuation attach to it.
+    let Some(expected) = active.login_id.as_deref() else {
+        return false;
+    };
+    if requested_login_id.is_some_and(|requested| expected != requested) {
+        return false;
+    }
+    active.touched = Instant::now();
+    true
+}
+
+fn while_claude_remote_login_idle<T>(
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let mut claim = CLAUDE_REMOTE_LOGIN_CLAIM
+        .lock()
+        .map_err(|_| "Claude remote login state is unavailable".to_string())?;
+    if claim
+        .as_ref()
+        .is_some_and(|value| value.touched.elapsed() < CLAUDE_REMOTE_LOGIN_TTL)
+    {
+        return Err("auth_in_progress".to_string());
+    }
+    *claim = None;
+    operation()
+}
+
 const REMOTE_EVENT_BUFFER_FLUSH: Duration = Duration::from_secs(1);
 const RECENT_CLIENT_TTL_MS: u64 = 24 * 60 * 60 * 1000;
 const TOKEN_FILE: &str = "server-token.enc.json";
@@ -1110,6 +1205,7 @@ fn handle_client(
                     "protocol": protocol_name,
                     "compression": client_compression.as_str(),
                     "serverVersion": server_version,
+                    "capabilities": remote_capabilities(),
                 }),
                 RemoteCompression::None,
             )?;
@@ -1415,24 +1511,151 @@ fn invoke_sidecar_for_remote(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let params = match protocol {
+    let mut params = match protocol {
         RemoteProtocol::V2 => frame
             .get("params")
             .cloned()
             .unwrap_or_else(|| legacy_v1_args_to_params(channel, &args)),
         RemoteProtocol::LegacyV1 => legacy_v1_args_to_params(channel, &args),
     };
+    if matches!(
+        channel,
+        "claude:auth-login-submit-code" | "claude:auth-login-cancel"
+    ) {
+        if !params.is_object() {
+            params = json!({});
+        }
+        if let Some(map) = params.as_object_mut() {
+            map.insert("deferRelease".to_string(), Value::Bool(true));
+        }
+        let requested_login_id = params
+            .get("loginId")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty());
+        if !touch_claude_remote_login(requested_login_id) {
+            return Ok(json!({
+                "ok": false,
+                "success": false,
+                "error": "invalid login session",
+                "terminal": false,
+            }));
+        }
+    }
     log_remote_pty_write_params(&ctx, "remote-server.decoded", channel, &params);
     if let Some(result) = invoke_rust_for_remote(ctx, channel, &params) {
         return result;
+    }
+    let claimed_claude_login = channel == "claude:auth-login-start";
+    if claimed_claude_login {
+        if !try_begin_claude_remote_login() {
+            return Ok(json!({
+                "ok": false,
+                "error": "auth_in_progress",
+                "terminal": false,
+            }));
+        }
     }
     let method = channel_to_sidecar_method(channel);
     let cfg = ctx.sidecar_spawn_config().map_err(|err| err.message)?;
     let sink = ctx.sidecar_emit_sink();
     let timeout = remote_invoke_timeout(channel);
-    sidecar
-        .call_with_emit(&cfg, Some(sink), &method, params, timeout)
-        .map_err(|err| err.message)
+    let result = match sidecar.call_with_emit(&cfg, Some(sink), &method, params, timeout) {
+        Ok(result) => result,
+        Err(err) => {
+            if claimed_claude_login {
+                clear_claude_remote_login_started();
+            }
+            return Err(err.message);
+        }
+    };
+    let login_id = result
+        .get("loginId")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    if claimed_claude_login && result.get("ok").and_then(Value::as_bool) == Some(true) {
+        bind_claude_remote_login_id(login_id.as_deref());
+    }
+    let terminal = result
+        .get("terminal")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let finished = finish_remote_claude_login(ctx, channel, result);
+    if terminal || finished.is_err() {
+        clear_claude_remote_login_started();
+    }
+    if (terminal || finished.is_err()) && login_id.is_some() {
+        let release_sink = ctx.sidecar_emit_sink();
+        let _ = sidecar.call_with_emit(
+            &cfg,
+            Some(release_sink),
+            "claude.authLoginRelease",
+            json!({ "loginId": login_id }),
+            INVOKE_TIMEOUT,
+        );
+    }
+    finished
+}
+
+fn finish_remote_claude_login(
+    ctx: &HostContext,
+    channel: &str,
+    mut result: Value,
+) -> Result<Value, String> {
+    let terminal = result
+        .get("terminal")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let succeeded = result
+        .get("success")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let started = result.get("ok").and_then(Value::as_bool).unwrap_or(false);
+    if channel == "claude:auth-login-start" && started {
+        let data_dir = remote_app_data_dir(ctx, channel)?;
+        account_store::snapshot_active_account_credential(&data_dir)
+            .map_err(|err| format!("could not preserve the active Claude account: {err}"))?;
+    } else if channel == "claude:auth-login-submit-code" && succeeded {
+        let data_dir = remote_app_data_dir(ctx, channel)?;
+        let account = (|| {
+            let status_value = claude_cmd::fetch_auth_status_native(ctx);
+            let status = account_store::auth_status_from_value(&status_value).ok_or_else(|| {
+                "Claude login completed but the host could not verify it".to_string()
+            })?;
+            let credential = account_store::read_cli_credentials().ok_or_else(|| {
+                "Claude login completed but the host credential was unavailable".to_string()
+            })?;
+            account_store::activate_new_login_account(&data_dir, status, credential)
+                .map_err(|err| err.to_string())
+        })();
+        match account {
+            Ok(account) => {
+                if let Value::Object(map) = &mut result {
+                    map.insert(
+                        "account".to_string(),
+                        serde_json::to_value(account).unwrap_or(Value::Null),
+                    );
+                }
+            }
+            Err(err) => {
+                let _ = account_store::restore_active_account_credential(&data_dir);
+                return Err(format!(
+                    "Claude login completed but the account could not be registered: {err}"
+                ));
+            }
+        }
+    } else if terminal
+        && matches!(
+            channel,
+            "claude:auth-login-start"
+                | "claude:auth-login-submit-code"
+                | "claude:auth-login-cancel"
+        )
+    {
+        if let Ok(data_dir) = remote_app_data_dir(ctx, channel) {
+            let _ = account_store::restore_active_account_credential(&data_dir);
+        }
+    }
+    Ok(result)
 }
 
 fn profile_id_from_params(channel: &str, params: &Value) -> Result<String, String> {
@@ -1884,22 +2107,22 @@ fn invoke_rust_for_remote(
             serde_json::to_value(account_store::read_index(&data_dir))
                 .map_err(|err| format!("{channel} serialization failed: {err}"))
         }),
-        "claude:account-switch" => {
+        "claude:account-switch" => while_claude_remote_login_idle(|| {
             string_param(params, "accountId", channel).and_then(|account_id| {
                 let data_dir = remote_app_data_dir(ctx, channel)?;
                 account_store::switch_account(&data_dir, &account_id)
                     .map(Value::Bool)
                     .map_err(|err| err.to_string())
             })
-        }
-        "claude:account-remove" => {
+        }),
+        "claude:account-remove" => while_claude_remote_login_idle(|| {
             string_param(params, "accountId", channel).and_then(|account_id| {
                 let data_dir = remote_app_data_dir(ctx, channel)?;
                 account_store::remove_account(&data_dir, &account_id)
                     .map(Value::Bool)
                     .map_err(|err| err.to_string())
             })
-        }
+        }),
         "codex:account-list" => {
             let codex = ctx.state::<CodexAppServerState>();
             Ok(codex.account_list(&ctx))
@@ -1916,11 +2139,13 @@ fn invoke_rust_for_remote(
         }
         "codex:auth-login-device-poll" => {
             let codex = ctx.state::<CodexAppServerState>();
-            codex.account_login_device_poll(&ctx)
+            let login_id = optional_string_param(params, "loginId");
+            codex.account_login_device_poll(&ctx, login_id.as_deref())
         }
         "codex:auth-login-device-cancel" => {
             let codex = ctx.state::<CodexAppServerState>();
-            Ok(codex.account_login_cancel())
+            let login_id = optional_string_param(params, "loginId");
+            codex.account_login_device_cancel(&ctx, login_id.as_deref())
         }
         "claude:account-mark-warning-shown" => {
             remote_app_data_dir(ctx, channel).and_then(|data_dir| {
@@ -2674,8 +2899,8 @@ fn remote_invoke_timeout(channel: &str) -> Duration {
         | "claude:auth-login-start"
         | "claude:auth-login-submit-code"
         | "claude:auth-login-cancel"
-        // codex device login start blocks on the host while codex prints the
-        // sign-in URL + code (up to ~45s); poll waits for the user to approve.
+        // Auth start may lazily spawn a CLI/app-server; completion remains a
+        // separate poll/submit request with an opaque login id.
         | "codex:auth-login-device-start"
         | "codex:auth-login-device-poll"
         | "claude:fork-session" => SESSION_INVOKE_TIMEOUT,
@@ -2746,6 +2971,31 @@ mod tests {
             protocol: "bat-remote/v2".to_string(),
             compression: "none".to_string(),
         }
+    }
+
+    #[test]
+    fn advertises_structured_remote_auth_capabilities() {
+        let capabilities = remote_capabilities();
+        assert_eq!(capabilities["remoteAuth"]["claude"], json!("paste-code-v1"));
+        assert_eq!(capabilities["remoteAuth"]["codex"], json!("device-code-v1"));
+    }
+
+    #[test]
+    fn claude_remote_login_claim_blocks_competing_auth_mutations() {
+        clear_claude_remote_login_started();
+        assert!(try_begin_claude_remote_login());
+        assert!(!try_begin_claude_remote_login());
+        assert!(!touch_claude_remote_login(None));
+        bind_claude_remote_login_id(Some("login-a"));
+        assert!(!touch_claude_remote_login(Some("login-b")));
+        assert!(touch_claude_remote_login(Some("login-a")));
+        assert!(touch_claude_remote_login(None));
+        assert_eq!(
+            while_claude_remote_login_idle(|| Ok::<_, String>(true)).unwrap_err(),
+            "auth_in_progress"
+        );
+        clear_claude_remote_login_started();
+        assert!(while_claude_remote_login_idle(|| Ok(true)).unwrap());
     }
 
     #[test]

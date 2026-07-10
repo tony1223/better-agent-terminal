@@ -218,30 +218,28 @@ struct CodexInner {
     // Set by account_login_cancel() to abort an in-flight `codex login` child;
     // the run_codex_login poll loop kills the process when it sees this.
     login_cancel: AtomicBool,
-    // Remote device-code login child, kept alive between the device-login start
-    // RPC (returns the sign-in URL + one-time code) and the poll RPC (waits for
-    // the user to approve in their browser). None when no device login is in
-    // flight. See account_login_device_start / account_login_device_poll.
+    local_login_active: AtomicBool,
+    // One host-scoped app-server device-code login. The opaque login id is
+    // required by new clients for poll/cancel; legacy clients may omit it while
+    // exactly one login is pending.
     device_login: Mutex<Option<DeviceLoginSession>>,
+    // Covers the gap between account/login/start request and storing the
+    // returned app-server login id, so concurrent clients cannot both start.
+    device_login_start_lock: Mutex<()>,
 }
 
-/// Output captured from a running `codex login --device-auth` child while we
-/// wait for it to print the sign-in URL and one-time code.
-#[derive(Default)]
-struct DeviceCapture {
-    text: String,
-    url: Option<String>,
-    code: Option<String>,
-    saw_code_marker: bool,
+enum DeviceLoginStatus {
+    Pending,
+    Cancelling,
+    Completing,
+    Success(Value),
+    Error(String),
 }
 
-/// An in-flight `codex login --device-auth`. The child keeps polling OpenAI
-/// until the user approves (or it times out / is cancelled); we reap it in the
-/// poll RPC. Output is drained off-thread into `capture` so the pipe never
-/// blocks the child.
 struct DeviceLoginSession {
-    child: Child,
-    capture: Arc<Mutex<DeviceCapture>>,
+    login_id: String,
+    connection: Option<Arc<CodexConnection>>,
+    status: DeviceLoginStatus,
     started: Instant,
 }
 
@@ -1013,112 +1011,60 @@ fn build_codex_command_with_args(
 
 const CODEX_LOGIN_TIMEOUT: Duration = Duration::from_secs(300);
 
-// How long to wait for `codex login --device-auth` to print the sign-in URL +
-// one-time code before giving up on the start RPC.
-const DEVICE_PROMPT_TIMEOUT: Duration = Duration::from_secs(45);
-
-/// Drain a child stdout/stderr pipe line-by-line into the shared capture so the
-/// pipe never fills (codex keeps printing while it polls for approval), parsing
-/// out the sign-in URL and one-time code as they appear.
-fn spawn_device_drain<R: std::io::Read + Send + 'static>(
-    reader: R,
-    capture: Arc<Mutex<DeviceCapture>>,
-) {
-    std::thread::spawn(move || {
-        let buffered = BufReader::new(reader);
-        for line in buffered.lines() {
-            match line {
-                Ok(line) => {
-                    if let Ok(mut cap) = capture.lock() {
-                        ingest_device_line(&mut cap, &line);
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-    });
-}
-
-/// Parse one output line from `codex login --device-auth`. The CLI prints (with
-/// ANSI colour) a numbered list whose URL line holds `https://auth.openai.com/
-/// codex/device` and whose code line holds a bare one-time code like
-/// `G0GT-244PL` right after an "Enter this one-time code" marker.
-fn ingest_device_line(cap: &mut DeviceCapture, raw: &str) {
-    let line = strip_ansi(raw);
-    let trimmed = line.trim();
-    cap.text.push_str(trimmed);
-    cap.text.push('\n');
-
-    if cap.url.is_none() {
-        if let Some(idx) = trimmed.find("https://") {
-            let url: String = trimmed[idx..]
-                .chars()
-                .take_while(|c| !c.is_whitespace())
-                .collect();
-            if url.len() > "https://".len() {
-                cap.url = Some(url);
-            }
-        }
-    }
-
-    let lower = trimmed.to_ascii_lowercase();
-    if lower.contains("one-time code") {
-        cap.saw_code_marker = true;
-        return;
-    }
-    if cap.code.is_none() && cap.saw_code_marker && is_device_code(trimmed) {
-        cap.code = Some(trimmed.to_string());
-    }
-}
-
-/// Recognise a codex device code: two alphanumeric segments joined by a single
-/// dash, e.g. `G0GT-244PL`. Deliberately strict so prose lines never match.
 fn is_device_code(token: &str) -> bool {
     let mut parts = token.split('-');
     let (Some(first), Some(second), None) = (parts.next(), parts.next(), parts.next()) else {
         return false;
     };
-    let ok = |segment: &str| {
+    let valid = |segment: &str| {
         segment.len() >= 3
             && segment.len() <= 8
             && segment.chars().all(|c| c.is_ascii_alphanumeric())
     };
-    ok(first) && ok(second)
+    valid(first) && valid(second)
 }
 
-/// Strip ANSI/VT escape sequences (`\x1b[...m` and friends) from a line.
-fn strip_ansi(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut chars = input.chars();
-    while let Some(c) = chars.next() {
-        if c == '\u{1b}' {
-            // Skip a CSI sequence: ESC [ ... <final byte 0x40..=0x7e>.
-            if chars.next() == Some('[') {
-                for next in chars.by_ref() {
-                    if ('\u{40}'..='\u{7e}').contains(&next) {
-                        break;
-                    }
-                }
+/// Login failures can cross the remote transport and enter renderer logs.
+/// Remove URLs and device-code-shaped tokens before returning them.
+fn sanitize_login_error(input: &str) -> String {
+    input
+        .split_whitespace()
+        .map(|token| {
+            let trimmed = token.trim_matches(|c: char| {
+                matches!(c, ',' | '.' | ';' | ':' | '(' | ')' | '[' | ']' | '{' | '}')
+            });
+            if trimmed.starts_with("https://") || trimmed.starts_with("http://") {
+                "<redacted-url>"
+            } else if is_device_code(trimmed) {
+                "<redacted-code>"
+            } else {
+                token
             }
-            continue;
-        }
-        out.push(c);
-    }
-    out
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(600)
+        .collect()
 }
 
-/// Last few non-empty lines of captured output, for surfacing in error text.
-fn device_tail(text: &str) -> String {
-    text.lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .rev()
-        .take(4)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<Vec<_>>()
-        .join(" | ")
+fn parse_device_login_start(result: &Value) -> Result<(String, String, String), String> {
+    let login_id = result
+        .get("loginId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "Codex app-server did not return a login id".to_string())?;
+    let url = result
+        .get("verificationUrl")
+        .and_then(Value::as_str)
+        .filter(|value| value.starts_with("https://auth.openai.com/"))
+        .ok_or_else(|| "Codex app-server did not return a verification URL".to_string())?;
+    let code = result
+        .get("userCode")
+        .and_then(Value::as_str)
+        .filter(|value| is_device_code(value))
+        .ok_or_else(|| "Codex app-server did not return a valid device code".to_string())?;
+    Ok((login_id.to_string(), url.to_string(), code.to_string()))
 }
 
 /// Run `codex login` (ChatGPT browser OAuth by default; `--api-key <key>` when
@@ -2712,12 +2658,25 @@ impl CodexAppServerState {
         // Drop the connection so the next request lazily respawns the app-server
         // with the switched auth.
         self.drop_connection(app, "unified-switch");
-        // Reset every session's thread state (mirrors the legacy switch path). A
-        // codex thread/rollout is bound to the identity that created it, so the
-        // newly selected account cannot resume the previous account's thread
-        // ("thread not found / no rollout found"). Clearing the thread ids makes
-        // the next message start a fresh thread for the new account instead of
-        // trying to resume a stale one.
+        self.reset_sessions_after_account_change(app)?;
+        app_cmd::log_tauri(
+            app,
+            &format!(
+                "[codex-account] unified auth switch -> {id} label={} verified=true shared=[{}]",
+                account.label,
+                Self::auth_debug_summary(&shared)
+            ),
+        );
+        Ok(json!({
+            "success": true,
+            "verified": true,
+            "account": unified_account_info_value(&account, &shared, true),
+        }))
+    }
+
+    /// A Codex thread belongs to the identity that created it. Any successful
+    /// login/switch must force the next turn to start a fresh thread.
+    fn reset_sessions_after_account_change(&self, app: &HostContext) -> Result<(), String> {
         self.inner
             .thread_to_session
             .lock()
@@ -2748,19 +2707,7 @@ impl CodexAppServerState {
         for (session_id, meta) in updates {
             emit(app, "claude:status", &session_id, "meta", meta);
         }
-        app_cmd::log_tauri(
-            app,
-            &format!(
-                "[codex-account] unified auth switch -> {id} label={} verified=true shared=[{}]",
-                account.label,
-                Self::auth_debug_summary(&shared)
-            ),
-        );
-        Ok(json!({
-            "success": true,
-            "verified": true,
-            "account": unified_account_info_value(&account, &shared, true),
-        }))
+        Ok(())
     }
 
     /// Startup hook: recover from an interrupted swap, then auto-migrate legacy
@@ -2824,6 +2771,15 @@ impl CodexAppServerState {
         serde_json::to_value(&report).map_err(|err| err.to_string())
     }
 
+    fn snapshot_account_before_login(&self, app: &HostContext) {
+        if codex_unified_enabled(app) {
+            if let (Some(app_data), Some(shared)) = (app.data_dir_opt(), shared_home(app)) {
+                let _swap = self.inner.unified_swap_lock.lock();
+                codex_account_store::snapshot_active_for_exit(&app_data, &shared);
+            }
+        }
+    }
+
     /// Run an interactive `codex login` (ChatGPT browser OAuth, or API key) for
     /// the active Codex home (the shared `~/.codex` in unified mode). In unified
     /// mode the freshly-authenticated identity is registered as an account and
@@ -2833,25 +2789,45 @@ impl CodexAppServerState {
         app: &HostContext,
         api_key: Option<String>,
     ) -> Result<Value, String> {
-        let unified = codex_unified_enabled(app);
+        let device_login_guard = self
+            .inner
+            .device_login_start_lock
+            .lock()
+            .map_err(|_| "codex device login start lock poisoned".to_string())?;
+        if self
+            .inner
+            .local_login_active
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return Err("auth_in_progress".to_string());
+        }
+        if self.device_login_in_progress() {
+            self.inner.local_login_active.store(false, Ordering::SeqCst);
+            return Err("auth_in_progress".to_string());
+        }
+        drop(device_login_guard);
         // Snapshot the current active identity before login overwrites the home,
         // so the previously-active account keeps its latest tokens.
-        if unified {
-            if let (Some(app_data), Some(shared)) = (app.data_dir_opt(), shared_home(app)) {
-                let _swap = self.inner.unified_swap_lock.lock();
-                codex_account_store::snapshot_active_for_exit(&app_data, &shared);
-            }
-        }
+        self.snapshot_account_before_login(app);
 
         // Clear any stale cancel request, run the (blocking) login, then clear
         // again so a late cancel can't leak into the next attempt.
         self.inner.login_cancel.store(false, Ordering::SeqCst);
         let login_result = run_codex_login(app, api_key.as_deref(), &self.inner.login_cancel);
         self.inner.login_cancel.store(false, Ordering::SeqCst);
-        login_result?;
-
-        self.finalize_codex_login(app);
-        Ok(json!({ "success": true, "account": self.account_info(app) }))
+        let response = match login_result {
+            Ok(()) => {
+                // Keep the auth guard set until account capture and thread reset
+                // finish; otherwise a concurrent switch can overwrite the newly
+                // written credential in the narrow post-process window.
+                self.finalize_codex_login(app);
+                Ok(json!({ "success": true, "account": self.account_info(app) }))
+            }
+            Err(err) => Err(err),
+        };
+        self.inner.local_login_active.store(false, Ordering::SeqCst);
+        response
     }
 
     /// Post-login bookkeeping shared by the browser-OAuth (`account_login`) and
@@ -2876,157 +2852,339 @@ impl CodexAppServerState {
             }
         }
         self.drop_connection(app, "account-login");
+        if let Err(err) = self.reset_sessions_after_account_change(app) {
+            app_cmd::log_tauri(
+                app,
+                &format!("[codex-account] session reset after login failed: {err}"),
+            );
+        }
     }
 
-    /// Start a device-code login on the host: spawn `codex login --device-auth`,
-    /// drain its output off-thread, and return the sign-in URL + one-time code
-    /// once codex prints them. The child keeps running (polling for approval)
-    /// and is reaped by `account_login_device_poll`. Used for remote hosts where
-    /// the local browser flow can't run. Blocking — call from spawn_blocking.
+    /// Start Codex's structured app-server device-code flow. No credential or
+    /// raw CLI output crosses the BAT remote transport.
     pub fn account_login_device_start(&self, app: &HostContext) -> Result<Value, String> {
-        // Drop any prior in-flight device login before starting a new one.
-        self.clear_device_login();
-        self.inner.login_cancel.store(false, Ordering::SeqCst);
-
-        let mut child = build_codex_command_with_args(app, &["login", "--device-auth"], false)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|err| format!("failed to start codex device login: {err}"))?;
-
-        let capture = Arc::new(Mutex::new(DeviceCapture::default()));
-        if let Some(out) = child.stdout.take() {
-            spawn_device_drain(out, capture.clone());
+        let _start = self
+            .inner
+            .device_login_start_lock
+            .lock()
+            .map_err(|_| "codex device login start lock poisoned".to_string())?;
+        if self.inner.local_login_active.load(Ordering::SeqCst) {
+            return Ok(json!({ "ok": false, "error": "auth_in_progress" }));
         }
-        if let Some(err) = child.stderr.take() {
-            spawn_device_drain(err, capture.clone());
-        }
-
-        // Wait for codex to print the sign-in URL + code (or exit early).
-        let deadline = Instant::now() + DEVICE_PROMPT_TIMEOUT;
-        loop {
-            if self.inner.login_cancel.load(Ordering::SeqCst) {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err("codex device login cancelled".to_string());
-            }
-            if let Ok(cap) = capture.lock() {
-                if let (Some(url), Some(code)) = (cap.url.clone(), cap.code.clone()) {
-                    drop(cap);
-                    if let Ok(mut slot) = self.inner.device_login.lock() {
-                        *slot = Some(DeviceLoginSession {
-                            child,
-                            capture: capture.clone(),
-                            started: Instant::now(),
-                        });
-                    }
-                    return Ok(json!({ "ok": true, "url": url, "code": code }));
-                }
-            }
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    let tail = capture
-                        .lock()
-                        .map(|cap| device_tail(&cap.text))
-                        .unwrap_or_default();
-                    return Err(format!(
-                        "codex device login exited before prompting ({status}){}",
-                        if tail.is_empty() {
-                            String::new()
-                        } else {
-                            format!(": {tail}")
-                        }
-                    ));
-                }
-                Ok(None) if Instant::now() >= deadline => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err("codex device login: no sign-in code received".to_string());
-                }
-                Ok(None) => std::thread::sleep(Duration::from_millis(100)),
-                Err(err) => return Err(err.to_string()),
-            }
-        }
-    }
-
-    /// Poll an in-flight device-code login. Returns `{status:"pending"}` while
-    /// the user has not yet approved, `{status:"success", account}` once codex
-    /// exits 0 (auth.json written), or `{status:"error", error}` on failure /
-    /// timeout. Clears the session on a terminal result.
-    pub fn account_login_device_poll(&self, app: &HostContext) -> Result<Value, String> {
-        enum Outcome {
-            Pending,
-            Success,
-            Error(String),
-        }
-        let outcome = {
+        let stale = {
             let mut slot = self
                 .inner
                 .device_login
                 .lock()
                 .map_err(|_| "codex device login lock poisoned".to_string())?;
+            match slot.as_ref() {
+                Some(session)
+                    if matches!(
+                        session.status,
+                        DeviceLoginStatus::Pending
+                            | DeviceLoginStatus::Cancelling
+                            | DeviceLoginStatus::Completing
+                    ) && session.started.elapsed() < CODEX_LOGIN_TIMEOUT =>
+                {
+                    return Ok(json!({
+                        "ok": false,
+                        "error": "auth_in_progress",
+                    }));
+                }
+                Some(_) => slot.take(),
+                None => None,
+            }
+        };
+        if let Some(stale) = stale {
+            if matches!(
+                stale.status,
+                DeviceLoginStatus::Pending
+                    | DeviceLoginStatus::Cancelling
+                    | DeviceLoginStatus::Completing
+            ) {
+                if let Some(connection) = stale.connection {
+                    let _ = connection.request(
+                        "account/login/cancel",
+                        json!({ "loginId": stale.login_id }),
+                        REQUEST_TIMEOUT,
+                    );
+                }
+            }
+        }
+
+        self.snapshot_account_before_login(app);
+        let connection = self.ensure_connection(app)?;
+        let result = connection
+            .request(
+                "account/login/start",
+                json!({ "type": "chatgptDeviceCode" }),
+                REQUEST_TIMEOUT,
+            )
+            .map_err(|err| sanitize_login_error(&err))?;
+        let (login_id, url, code) = match parse_device_login_start(&result) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                if let Some(login_id) = result.get("loginId").and_then(Value::as_str) {
+                    let _ = connection.request(
+                        "account/login/cancel",
+                        json!({ "loginId": login_id }),
+                        REQUEST_TIMEOUT,
+                    );
+                }
+                return Err(err);
+            }
+        };
+        *self
+            .inner
+            .device_login
+            .lock()
+            .map_err(|_| "codex device login lock poisoned".to_string())? =
+            Some(DeviceLoginSession {
+                login_id: login_id.clone(),
+                connection: Some(connection),
+                status: DeviceLoginStatus::Pending,
+                started: Instant::now(),
+            });
+        Ok(json!({
+            "ok": true,
+            "url": url,
+            "code": code,
+            "loginId": login_id,
+            "expiresInSeconds": CODEX_LOGIN_TIMEOUT.as_secs(),
+        }))
+    }
+
+    fn handle_device_login_completed(&self, app: &HostContext, params: &Value) {
+        let Some(login_id) = params
+            .get("loginId")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+        else {
+            return;
+        };
+        {
+            let Ok(mut slot) = self.inner.device_login.lock() else {
+                return;
+            };
             let Some(session) = slot.as_mut() else {
+                return;
+            };
+            if session.login_id != login_id
+                || !matches!(
+                    session.status,
+                    DeviceLoginStatus::Pending | DeviceLoginStatus::Cancelling
+                )
+            {
+                return;
+            }
+            session.status = DeviceLoginStatus::Completing;
+        }
+
+        let success = params
+            .get("success")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let status = if success {
+            self.finalize_codex_login(app);
+            DeviceLoginStatus::Success(self.account_info(app))
+        } else {
+            let error = params
+                .get("error")
+                .and_then(Value::as_str)
+                .map(sanitize_login_error)
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "Codex login was not completed".to_string());
+            DeviceLoginStatus::Error(error)
+        };
+
+        let retained_connection = {
+            let Ok(mut slot) = self.inner.device_login.lock() else {
+                return;
+            };
+            let Some(session) = slot.as_mut() else {
+                return;
+            };
+            if session.login_id != login_id {
+                return;
+            }
+            session.status = status;
+            session.connection.take()
+        };
+        // Successful finalization removes the app-server from `inner`; keep any
+        // final Arc drop off its own stdout reader thread.
+        if success {
+            if let Some(connection) = retained_connection {
+                std::thread::spawn(move || drop(connection));
+            }
+        }
+    }
+
+    fn device_login_in_progress(&self) -> bool {
+        self.inner
+            .device_login
+            .lock()
+            .ok()
+            .and_then(|slot| {
+                slot.as_ref().map(|session| {
+                    matches!(
+                        session.status,
+                        DeviceLoginStatus::Pending
+                            | DeviceLoginStatus::Cancelling
+                            | DeviceLoginStatus::Completing
+                    ) && session.started.elapsed() < CODEX_LOGIN_TIMEOUT
+                })
+            })
+            .unwrap_or(false)
+    }
+
+    fn any_login_in_progress(&self) -> bool {
+        self.inner.local_login_active.load(Ordering::SeqCst) || self.device_login_in_progress()
+    }
+
+    /// Poll an in-flight device-code login. New clients pass the opaque id;
+    /// origin-less legacy calls remain valid while only one login exists.
+    pub fn account_login_device_poll(
+        &self,
+        app: &HostContext,
+        requested_login_id: Option<&str>,
+    ) -> Result<Value, String> {
+        let timed_out = {
+            let slot = self
+                .inner
+                .device_login
+                .lock()
+                .map_err(|_| "codex device login lock poisoned".to_string())?;
+            let Some(session) = slot.as_ref() else {
                 return Ok(json!({ "status": "error", "error": "no codex login in progress" }));
             };
-            match session.child.try_wait() {
-                Ok(Some(status)) => {
-                    let outcome = if status.success() {
-                        Outcome::Success
-                    } else {
-                        let tail = session
-                            .capture
-                            .lock()
-                            .map(|cap| device_tail(&cap.text))
-                            .unwrap_or_default();
-                        Outcome::Error(if tail.is_empty() {
-                            format!("codex login failed ({status})")
-                        } else {
-                            format!("codex login failed: {tail}")
-                        })
-                    };
-                    *slot = None;
-                    outcome
+            if requested_login_id.is_some_and(|id| id != session.login_id) {
+                return Ok(json!({
+                    "status": "error",
+                    "error": "invalid login session",
+                    "terminal": false,
+                }));
+            }
+            matches!(
+                session.status,
+                DeviceLoginStatus::Pending
+                    | DeviceLoginStatus::Cancelling
+                    | DeviceLoginStatus::Completing
+            ) && session.started.elapsed() >= CODEX_LOGIN_TIMEOUT
+        };
+        if timed_out {
+            let _ = self.account_login_device_cancel(app, requested_login_id);
+            return Ok(json!({ "status": "error", "error": "codex login timed out" }));
+        }
+
+        let mut slot = self
+            .inner
+            .device_login
+            .lock()
+            .map_err(|_| "codex device login lock poisoned".to_string())?;
+        let Some(session) = slot.as_ref() else {
+            return Ok(json!({ "status": "error", "error": "no codex login in progress" }));
+        };
+        let response = match &session.status {
+            DeviceLoginStatus::Pending
+            | DeviceLoginStatus::Cancelling
+            | DeviceLoginStatus::Completing => {
+                json!({ "status": "pending", "loginId": session.login_id })
+            }
+            DeviceLoginStatus::Success(account) => json!({
+                "status": "success",
+                "loginId": session.login_id,
+                "account": account,
+            }),
+            DeviceLoginStatus::Error(error) => json!({
+                "status": "error",
+                "loginId": session.login_id,
+                "error": error,
+            }),
+        };
+        if matches!(
+            session.status,
+            DeviceLoginStatus::Success(_) | DeviceLoginStatus::Error(_)
+        ) {
+            *slot = None;
+        }
+        Ok(response)
+    }
+
+    pub fn account_login_device_cancel(
+        &self,
+        _app: &HostContext,
+        requested_login_id: Option<&str>,
+    ) -> Result<Value, String> {
+        let _start = self
+            .inner
+            .device_login_start_lock
+            .lock()
+            .map_err(|_| "codex device login start lock poisoned".to_string())?;
+        let (login_id, connection) = {
+            let mut slot = self
+                .inner
+                .device_login
+                .lock()
+                .map_err(|_| "codex device login lock poisoned".to_string())?;
+            let Some(session) = slot.as_ref() else {
+                return Ok(json!({ "ok": true, "cancelled": false }));
+            };
+            if requested_login_id.is_some_and(|id| id != session.login_id) {
+                return Ok(json!({
+                    "ok": false,
+                    "cancelled": false,
+                    "error": "invalid login session",
+                    "terminal": false,
+                }));
+            }
+            match &session.status {
+                DeviceLoginStatus::Pending => {
+                    let login_id = session.login_id.clone();
+                    let connection = session.connection.clone();
+                    // Retain the session while the cancel RPC is in flight. If a
+                    // completion notification already won the race, its handler
+                    // changes this to Completing and still finalizes the account.
+                    slot.as_mut().expect("device login checked above").status =
+                        DeviceLoginStatus::Cancelling;
+                    (login_id, connection)
                 }
-                Ok(None) if session.started.elapsed() >= CODEX_LOGIN_TIMEOUT => {
-                    let _ = session.child.kill();
-                    let _ = session.child.wait();
-                    *slot = None;
-                    Outcome::Error("codex login timed out".to_string())
+                DeviceLoginStatus::Cancelling | DeviceLoginStatus::Completing => {
+                    return Ok(json!({ "ok": true, "cancelled": false }));
                 }
-                Ok(None) => Outcome::Pending,
-                Err(err) => {
+                DeviceLoginStatus::Success(_) | DeviceLoginStatus::Error(_) => {
                     *slot = None;
-                    Outcome::Error(err.to_string())
+                    return Ok(json!({ "ok": true, "cancelled": false }));
                 }
             }
         };
-        match outcome {
-            Outcome::Pending => Ok(json!({ "status": "pending" })),
-            Outcome::Success => {
-                self.finalize_codex_login(app);
-                Ok(json!({ "status": "success", "account": self.account_info(app) }))
-            }
-            Outcome::Error(error) => Ok(json!({ "status": "error", "error": error })),
+        if let Some(connection) = connection {
+            let _ = connection.request(
+                "account/login/cancel",
+                json!({ "loginId": login_id }),
+                REQUEST_TIMEOUT,
+            );
         }
+        let cancelled = {
+            let mut slot = self
+                .inner
+                .device_login
+                .lock()
+                .map_err(|_| "codex device login lock poisoned".to_string())?;
+            let should_clear = slot.as_ref().is_some_and(|session| {
+                session.login_id == login_id
+                    && matches!(session.status, DeviceLoginStatus::Cancelling)
+            });
+            if should_clear {
+                *slot = None;
+            }
+            should_clear
+        };
+        Ok(json!({ "ok": true, "cancelled": cancelled }))
     }
 
-    /// Kill and clear any in-flight device-code login child. Best-effort.
-    fn clear_device_login(&self) {
-        if let Ok(mut slot) = self.inner.device_login.lock() {
-            if let Some(mut session) = slot.take() {
-                let _ = session.child.kill();
-                let _ = session.child.wait();
-            }
-        }
-    }
-
-    /// Request cancellation of an in-flight `codex login`. Best-effort: sets a
-    /// flag the run_codex_login poll loop checks (within ~50ms) to kill the
-    /// child, and kills any device-code login child. A no-op if none running.
+    /// Request cancellation of the local browser-based `codex login` child.
     pub fn account_login_cancel(&self) -> Value {
         self.inner.login_cancel.store(true, Ordering::SeqCst);
-        self.clear_device_login();
         json!({ "success": true })
     }
 
@@ -3035,6 +3193,14 @@ impl CodexAppServerState {
         app: &HostContext,
         label: Option<String>,
     ) -> Result<Value, String> {
+        let _device_login_guard = self
+            .inner
+            .device_login_start_lock
+            .lock()
+            .map_err(|_| "codex device login start lock poisoned".to_string())?;
+        if self.any_login_in_progress() {
+            return Err("auth_in_progress".to_string());
+        }
         let _swap = self
             .inner
             .unified_swap_lock
@@ -3058,6 +3224,14 @@ impl CodexAppServerState {
         app: &HostContext,
         account_id: String,
     ) -> Result<Value, String> {
+        let _device_login_guard = self
+            .inner
+            .device_login_start_lock
+            .lock()
+            .map_err(|_| "codex device login start lock poisoned".to_string())?;
+        if self.any_login_in_progress() {
+            return Err("auth_in_progress".to_string());
+        }
         let _swap = self
             .inner
             .unified_swap_lock
@@ -3077,6 +3251,14 @@ impl CodexAppServerState {
     }
 
     pub fn switch_account(&self, app: &HostContext, codex_home: String) -> Result<Value, String> {
+        let _device_login_guard = self
+            .inner
+            .device_login_start_lock
+            .lock()
+            .map_err(|_| "codex device login start lock poisoned".to_string())?;
+        if self.any_login_in_progress() {
+            return Err("auth_in_progress".to_string());
+        }
         if codex_unified_enabled(app) {
             return self.switch_unified(app, codex_home);
         }
@@ -5060,23 +5242,20 @@ fn handle_server_message(
     if let Some(id) = message.get("id").and_then(Value::as_u64) {
         if let Some(tx) = pending.take(id) {
             let result = if let Some(error) = message.get("error") {
+                let error_message = error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("codex app-server error");
                 if codex_debug_enabled() {
                     app_cmd::log_tauri(
                         app,
                         &format!(
                             "[codex-app-server] response id={id} error={}",
-                            error
-                                .get("message")
-                                .and_then(Value::as_str)
-                                .unwrap_or("codex app-server error")
+                            sanitize_login_error(error_message)
                         ),
                     );
                 }
-                Err(error
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("codex app-server error")
-                    .to_string())
+                Err(error_message.to_string())
             } else {
                 Ok(message.get("result").cloned().unwrap_or(Value::Null))
             };
@@ -5123,6 +5302,10 @@ fn handle_notification(
 ) {
     // Account-level notifications carry no thread/session id and must be
     // handled BEFORE the session-mapping requirement below drops them.
+    if method == "account/login/completed" {
+        state.handle_device_login_completed(app, &params);
+        return;
+    }
     if method == "account/rateLimits/updated" {
         // Usage telemetry surfaces in the desktop status line only.
         #[cfg(feature = "desktop")]
@@ -5901,26 +6084,23 @@ mod tests {
     use std::env;
 
     #[test]
-    fn device_login_parser_extracts_url_and_code() {
-        // Exact ANSI-coloured lines emitted by `codex login --device-auth`
-        // (captured from codex 0.142.4): blue (94m) URL + code, gray (90m) hints.
-        let lines = [
-            "\u{1b}[90mOpenAI's command-line coding agent\u{1b}[0m",
-            "Follow these steps to sign in with ChatGPT using device code authorization:",
-            "1. Open this link in your browser and sign in to your account",
-            "   \u{1b}[94mhttps://auth.openai.com/codex/device\u{1b}[0m",
-            "2. Enter this one-time code \u{1b}[90m(expires in 15 minutes)\u{1b}[0m",
-            "   \u{1b}[94mG0GT-244PL\u{1b}[0m",
-        ];
-        let mut cap = DeviceCapture::default();
-        for line in lines {
-            ingest_device_line(&mut cap, line);
-        }
-        assert_eq!(
-            cap.url.as_deref(),
-            Some("https://auth.openai.com/codex/device")
-        );
-        assert_eq!(cap.code.as_deref(), Some("G0GT-244PL"));
+    fn device_login_parser_reads_structured_app_server_response() {
+        let parsed = parse_device_login_start(&json!({
+            "type": "chatgptDeviceCode",
+            "loginId": "f54ef60d-6420-47f8-822a-123456789abc",
+            "verificationUrl": "https://auth.openai.com/codex/device",
+            "userCode": "G0GT-244PL",
+        }))
+        .expect("structured device login response");
+        assert_eq!(parsed.0, "f54ef60d-6420-47f8-822a-123456789abc");
+        assert_eq!(parsed.1, "https://auth.openai.com/codex/device");
+        assert_eq!(parsed.2, "G0GT-244PL");
+        assert!(parse_device_login_start(&json!({
+            "loginId": "login-id",
+            "verificationUrl": "https://example.com/codex/device",
+            "userCode": "G0GT-244PL",
+        }))
+        .is_err());
     }
 
     #[test]
@@ -5934,9 +6114,13 @@ mod tests {
     }
 
     #[test]
-    fn strip_ansi_removes_color_codes() {
-        assert_eq!(strip_ansi("\u{1b}[94mhello\u{1b}[0m"), "hello");
-        assert_eq!(strip_ansi("no codes"), "no codes");
+    fn device_login_errors_redact_urls_and_codes() {
+        assert_eq!(
+            sanitize_login_error(
+                "approval failed at https://auth.openai.com/codex/device for G0GT-244PL"
+            ),
+            "approval failed at <redacted-url> for <redacted-code>"
+        );
     }
 
     #[test]
