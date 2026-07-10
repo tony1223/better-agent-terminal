@@ -32,6 +32,7 @@ export const isTauri = (): boolean => getHostKind() === 'tauri'
 let tauriImpl: BatAppAPI | null = null
 let tauriMetricLoggerInstalled = false
 let tauriProcessDebugMode: boolean | null = null
+let tauriPtyInputTraceMode: boolean | null = null
 
 function resolveHost(): BatAppAPI {
   const kind = getHostKind()
@@ -198,6 +199,16 @@ function refreshTauriDebugMode(): void {
   }
 }
 
+function refreshTauriPtyInputTraceMode(): void {
+  try {
+    void getInvoke()<boolean>('debug_is_pty_input_trace')
+      .then(value => { tauriPtyInputTraceMode = value === true })
+      .catch(() => {})
+  } catch {
+    // Best-effort instrumentation only.
+  }
+}
+
 function readTauriDebugMode(): boolean {
   if (tauriProcessDebugMode === true) return true
   const env = (import.meta as unknown as { env?: Record<string, string | boolean | undefined> }).env
@@ -214,6 +225,28 @@ function readTauriDebugMode(): boolean {
   if (debugParam === '1' || debugParam === 'true' || debugParam === 'TRUE') return true
   try {
     const stored = win?.localStorage?.getItem('BAT_DEBUG')
+    return stored === '1' || stored === 'true' || stored === 'TRUE'
+  } catch {
+    return false
+  }
+}
+
+function readTauriPtyInputTraceMode(): boolean {
+  if (tauriPtyInputTraceMode === true) return true
+  const env = (import.meta as unknown as { env?: Record<string, string | boolean | undefined> }).env
+  const envTrace = env?.BAT_TRACE_PTY_INPUT ?? env?.VITE_BAT_TRACE_PTY_INPUT
+  if (envTrace === '1' || envTrace === 'true' || envTrace === 'TRUE' || envTrace === true) return true
+  const win = (globalThis as unknown as {
+    window?: {
+      location?: { search?: string }
+      localStorage?: { getItem: (key: string) => string | null }
+    }
+  }).window ?? null
+  const params = new URLSearchParams(win?.location?.search || '')
+  const traceParam = params.get('BAT_TRACE_PTY_INPUT')
+  if (traceParam === '1' || traceParam === 'true' || traceParam === 'TRUE') return true
+  try {
+    const stored = win?.localStorage?.getItem('BAT_TRACE_PTY_INPUT')
     return stored === '1' || stored === 'true' || stored === 'TRUE'
   } catch {
     return false
@@ -433,6 +466,7 @@ function createTauriHost(): BatAppAPI {
   // Build a partial implementation: only ported namespaces are real; the rest
   // throw via a Proxy so missing coverage fails loudly.
   refreshTauriDebugMode()
+  refreshTauriPtyInputTraceMode()
   const platform = detectPlatform()
   const ported: Record<string, unknown> = {
     platform,
@@ -582,6 +616,9 @@ function createTauriHost(): BatAppAPI {
       openLogsFolder: () => getInvoke()<boolean>('debug_open_logs_folder'),
       // The renderer reads this synchronously during render.
       get isDebugMode() { return readTauriDebugMode() },
+      // High-volume, potentially sensitive key tracing is opt-in and separate
+      // from ordinary BAT_DEBUG diagnostics.
+      get isPtyInputTrace() { return readTauriPtyInputTraceMode() },
     },
     workspace: {
       load: () => getInvoke()<string | null>('workspace_load'),

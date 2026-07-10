@@ -1,5 +1,5 @@
 import { host } from '../host-api'
-import { useEffect, useMemo, useState } from 'react'
+import { memo, useEffect, useMemo, useState } from 'react'
 import {
   cleanPathLinkCandidate,
   extractPathLinkCandidates,
@@ -83,7 +83,7 @@ function applyResolvedPathLinks(html: string, links: Map<string, ResolvedPathLin
   return container.innerHTML
 }
 
-export function ChatMarkdown({ text, cwd, className = 'claude-markdown', resolvePathLinks = true }: ChatMarkdownProps) {
+function ChatMarkdownComponent({ text, cwd, className = 'claude-markdown', resolvePathLinks = true }: ChatMarkdownProps) {
   const [resolvedLinks, setResolvedLinks] = useState<Map<string, ResolvedPathLink>>(new Map())
   const html = useMemo(() => renderChatMarkdown(text, cwd), [text, cwd])
 
@@ -155,3 +155,5 @@ export function ChatMarkdown({ text, cwd, className = 'claude-markdown', resolve
     />
   )
 }
+
+export const ChatMarkdown = memo(ChatMarkdownComponent)

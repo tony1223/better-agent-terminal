@@ -356,6 +356,15 @@ pub fn get_agent_session_snapshot(
     session
 }
 
+pub fn get_agent_session_window(app: &HostContext, session_id: &str) -> Option<String> {
+    let state = app.try_state::<AgentNotificationState>()?;
+    let window = state
+        .lock()
+        .get(session_id)
+        .and_then(|session| session.window_id.clone());
+    window
+}
+
 pub fn add_agent_completion_from_event(app: &HostContext, topic: &str, payload: &Value) {
     if topic != "claude:turn-end" {
         return;

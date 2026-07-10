@@ -27,7 +27,7 @@ use crate::window_registry;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -140,8 +140,9 @@ pub struct PtySession {
     cwd: String,
     kind: String,
     viewport: TerminalViewportState,
-    output_buffer: Vec<String>,
+    output_buffer: VecDeque<String>,
     output_buffer_bytes: usize,
+    owner_window: Option<String>,
 }
 
 #[derive(Clone)]
@@ -229,7 +230,8 @@ pub fn select_shell<F: Fn(&str) -> bool>(
 const TARGET_OS: &str = "unix";
 #[cfg(target_os = "windows")]
 const TARGET_OS: &str = "windows";
-const OUTPUT_FLUSH_MS: u64 = 8;
+const INTERACTIVE_OUTPUT_FLUSH_MS: u64 = 16;
+const WORKER_OUTPUT_FLUSH_MS: u64 = 33;
 // Cap per emit so a fast producer (e.g. `cat hugefile`) cannot push a
 // single multi-megabyte event into the renderer's event queue. The
 // coalescer flushes early once `pending` crosses this threshold instead
@@ -513,16 +515,33 @@ fn resize_session(session: &mut PtySession, cols: u16, rows: u16) -> Result<(), 
     Ok(())
 }
 
-fn emit_viewport_state(app: &HostContext, id: &str, state: &TerminalViewportState) {
-    crate::event_hub::publish_runtime_event(
-        app,
-        "pty:viewport-state",
-        json!({
-            "id": id,
-            "state": state,
-        }),
-        "rust-pty",
-    );
+fn emit_viewport_state(
+    app: &HostContext,
+    sessions: &PtyState,
+    id: &str,
+    state: &TerminalViewportState,
+) {
+    let payload = json!({
+        "id": id,
+        "state": state,
+    });
+    let owner_window = sessions
+        .inner
+        .lock()
+        .ok()
+        .and_then(|map| map.get(id).and_then(|session| session.owner_window.clone()));
+    match owner_window {
+        Some(window) => crate::event_hub::publish_runtime_event_to_window(
+            app,
+            &window,
+            "pty:viewport-state",
+            payload,
+            "rust-pty",
+        ),
+        None => {
+            crate::event_hub::publish_runtime_event(app, "pty:viewport-state", payload, "rust-pty")
+        }
+    }
 }
 
 fn worker_parts_from_pty_id(id: &str) -> Option<(&str, &str)> {
@@ -720,23 +739,23 @@ fn append_pty_output_buffer(
     sessions: &Arc<Mutex<HashMap<String, PtySession>>>,
     id: &str,
     data: &str,
-) {
+) -> Option<Option<String>> {
     let Ok(mut map) = sessions.lock() else {
-        return;
+        return None;
     };
     let Some(session) = map.get_mut(id) else {
-        return;
+        return None;
     };
     session.output_buffer_bytes = session.output_buffer_bytes.saturating_add(data.len());
-    session.output_buffer.push(data.to_string());
+    session.output_buffer.push_back(data.to_string());
     while session.output_buffer_bytes > OUTPUT_REPLAY_MAX_BYTES {
-        let Some(removed) = session.output_buffer.first() else {
+        let Some(removed) = session.output_buffer.pop_front() else {
             session.output_buffer_bytes = 0;
             break;
         };
         session.output_buffer_bytes = session.output_buffer_bytes.saturating_sub(removed.len());
-        session.output_buffer.remove(0);
     }
+    Some(session.owner_window.clone())
 }
 
 fn emit_pty_output(
@@ -746,19 +765,34 @@ fn emit_pty_output(
     id: &str,
     data: String,
 ) {
-    append_pty_output_buffer(sessions, id, &data);
+    let Some(owner_window) = append_pty_output_buffer(sessions, id, &data) else {
+        return;
+    };
     if let Some(worker_buffer) = worker_buffer {
         persist_worker_output(worker_buffer, id, &data);
     }
-    crate::event_hub::publish_runtime_event(
-        app,
-        "pty:output",
-        json!(PtyOutputEvent {
-            id: id.to_string(),
-            data,
-        }),
-        "rust-pty",
-    );
+    let payload = json!(PtyOutputEvent {
+        id: id.to_string(),
+        data,
+    });
+    match owner_window {
+        Some(window) => crate::event_hub::publish_runtime_event_to_window(
+            app,
+            &window,
+            "pty:output",
+            payload,
+            "rust-pty",
+        ),
+        None => crate::event_hub::publish_runtime_event(app, "pty:output", payload, "rust-pty"),
+    }
+}
+
+fn output_flush_interval_ms(id: &str) -> u64 {
+    if worker_parts_from_pty_id(id).is_some() {
+        WORKER_OUTPUT_FLUSH_MS
+    } else {
+        INTERACTIVE_OUTPUT_FLUSH_MS
+    }
 }
 
 fn spawn_output_coalescer(
@@ -770,11 +804,18 @@ fn spawn_output_coalescer(
     let (tx, rx) = mpsc::channel::<String>();
     std::thread::spawn(move || {
         while let Ok(first) = rx.recv() {
-            emit_pty_output(&app, &sessions, worker_buffer.as_ref(), &id, first);
-
-            let mut pending = String::new();
-            let deadline = Instant::now() + Duration::from_millis(OUTPUT_FLUSH_MS);
+            let mut pending = first;
+            let deadline = Instant::now() + Duration::from_millis(output_flush_interval_ms(&id));
             loop {
+                if pending.len() >= OUTPUT_FRAME_MAX_BYTES {
+                    emit_pty_output(
+                        &app,
+                        &sessions,
+                        worker_buffer.as_ref(),
+                        &id,
+                        std::mem::take(&mut pending),
+                    );
+                }
                 let now = Instant::now();
                 if now >= deadline {
                     break;
@@ -859,6 +900,7 @@ pub(crate) fn start_pty_session(
     map_handle: Arc<Mutex<HashMap<String, PtySession>>>,
     worker_buffer_handle: Option<Arc<Mutex<HashMap<String, String>>>>,
     options: CreatePtyOptions,
+    owner_window: Option<String>,
 ) -> Result<String, CommandError> {
     if !is_valid_pty_id(&options.id) {
         return Err(CommandError {
@@ -935,8 +977,9 @@ pub(crate) fn start_pty_session(
                 cwd: options.cwd.clone(),
                 kind: options.r#type.clone(),
                 viewport: desktop_viewport_state(cols, rows),
-                output_buffer: Vec::new(),
+                output_buffer: VecDeque::new(),
                 output_buffer_bytes: 0,
+                owner_window,
             },
         );
     }
@@ -994,21 +1037,32 @@ pub(crate) fn start_pty_session(
                     None => break,
                 };
                 match session.child.try_wait() {
-                    Ok(opt) => opt,
+                    Ok(Some(status)) => Some((status, session.owner_window.clone())),
+                    Ok(None) => None,
                     Err(_) => break,
                 }
             };
-            if let Some(s) = status {
+            if let Some((s, owner_window)) = status {
                 let code = s.exit_code() as i32;
-                crate::event_hub::publish_runtime_event(
-                    &app_for_exit,
-                    "pty:exit",
-                    json!(PtyExitEvent {
-                        id: id_for_exit.clone(),
-                        exit_code: code,
-                    }),
-                    "rust-pty",
-                );
+                let payload = json!(PtyExitEvent {
+                    id: id_for_exit.clone(),
+                    exit_code: code,
+                });
+                match owner_window {
+                    Some(window) => crate::event_hub::publish_runtime_event_to_window(
+                        &app_for_exit,
+                        &window,
+                        "pty:exit",
+                        payload,
+                        "rust-pty",
+                    ),
+                    None => crate::event_hub::publish_runtime_event(
+                        &app_for_exit,
+                        "pty:exit",
+                        payload,
+                        "rust-pty",
+                    ),
+                }
                 if let Ok(mut map) = map_handle.lock() {
                     map.remove(&id_for_exit);
                 }
@@ -1037,12 +1091,14 @@ pub async fn pty_create(
     }
     let handle = state.handle();
     let worker_buffer_handle = worker_buffer.handle();
+    let owner_window = Some(window.label().to_string());
     crate::async_rt::spawn_blocking(move || {
         start_pty_session(
             &crate::host_context::HostContext::from_app(app.clone()),
             handle,
             Some(worker_buffer_handle),
             options,
+            owner_window,
         )
     })
     .await
@@ -1081,6 +1137,7 @@ pub fn pty_write(
             format!("route=local id={id} {}", describe_pty_input(&data)),
         );
     }
+    claim_pty_session(&state, &id, window.label())?;
     let result = write_pty_session(&state, &id, &data);
     if trace_input {
         match &result {
@@ -1112,12 +1169,27 @@ pub(crate) fn write_pty_session(
     })
 }
 
+fn claim_pty_session(state: &PtyState, id: &str, window_label: &str) -> Result<(), CommandError> {
+    state.with_session(id, |session| {
+        session.owner_window = Some(window_label.to_string());
+        Ok(())
+    })
+}
+
+fn pty_output_buffer_text(session: &PtySession) -> String {
+    let mut output = String::with_capacity(session.output_buffer_bytes);
+    for chunk in &session.output_buffer {
+        output.push_str(chunk);
+    }
+    output
+}
+
 pub(crate) fn read_pty_output_buffer(state: &PtyState, id: &str) -> Result<String, CommandError> {
     let map = state.inner.lock().map_err(|e| CommandError {
         message: e.to_string(),
     })?;
     map.get(id)
-        .map(|session| session.output_buffer.concat())
+        .map(pty_output_buffer_text)
         .ok_or_else(|| CommandError {
             message: format!("pty session {id} not found"),
         })
@@ -1136,7 +1208,10 @@ pub fn pty_read_buffer(
     {
         return result;
     }
-    read_pty_output_buffer(&state, &id)
+    state.with_session(&id, |session| {
+        session.owner_window = Some(window.label().to_string());
+        Ok(pty_output_buffer_text(session))
+    })
 }
 
 #[cfg(feature = "desktop")]
@@ -1157,6 +1232,7 @@ pub fn pty_resize(
     ) {
         return result;
     }
+    claim_pty_session(&state, &id, window.label())?;
     resize_pty_session_from_desktop(
         &crate::host_context::HostContext::from_app(app.clone()),
         &state,
@@ -1206,7 +1282,7 @@ fn set_pty_viewport_size_for_source(
         Ok((next, true))
     })?;
     if applied {
-        emit_viewport_state(app, id, &viewport);
+        emit_viewport_state(app, state, id, &viewport);
     }
     Ok((viewport, applied))
 }
@@ -1302,7 +1378,7 @@ pub(crate) fn set_pty_viewport_mode(
             }
         }
     })?;
-    emit_viewport_state(app, id, &next);
+    emit_viewport_state(app, state, id, &next);
     Ok(next)
 }
 
@@ -1334,6 +1410,7 @@ pub fn pty_get_viewport_state(
     ) {
         return result;
     }
+    claim_pty_session(&state, &id, window.label())?;
     get_pty_viewport_state(&state, &id)
 }
 
@@ -1359,6 +1436,7 @@ pub fn pty_set_viewport_mode(
     ) {
         return result;
     }
+    claim_pty_session(&state, &id, window.label())?;
     set_pty_viewport_mode(
         &crate::host_context::HostContext::from_app(app.clone()),
         &state,
@@ -1392,6 +1470,7 @@ pub fn pty_set_viewport_size(
     ) {
         return result;
     }
+    claim_pty_session(&state, &id, window.label())?;
     set_pty_viewport_size(
         &crate::host_context::HostContext::from_app(app.clone()),
         &state,
@@ -1439,17 +1518,24 @@ pub(crate) fn kill_pty_session_with_exit(
     let mut map = state.inner.lock().map_err(|e| CommandError {
         message: e.to_string(),
     })?;
-    if let Some(mut session) = map.remove(id) {
+    let owner_window = if let Some(mut session) = map.remove(id) {
         let _ = session.child.kill();
-        crate::event_hub::publish_runtime_event(
-            app,
-            "pty:exit",
-            json!(PtyExitEvent {
-                id: id.to_string(),
-                exit_code: 0,
-            }),
-            "rust-pty",
-        );
+        Some(session.owner_window)
+    } else {
+        None
+    };
+    drop(map);
+    if let Some(owner_window) = owner_window {
+        let payload = json!(PtyExitEvent {
+            id: id.to_string(),
+            exit_code: 0,
+        });
+        match owner_window {
+            Some(window) => crate::event_hub::publish_runtime_event_to_window(
+                app, &window, "pty:exit", payload, "rust-pty",
+            ),
+            None => crate::event_hub::publish_runtime_event(app, "pty:exit", payload, "rust-pty"),
+        }
     }
     Ok(())
 }
@@ -1510,7 +1596,7 @@ fn pty_restart_impl(
     cwd: String,
     shell: Option<String>,
 ) -> Result<bool, CommandError> {
-    let (kind, viewport) = {
+    let (kind, viewport, owner_window) = {
         let mut map = handle.lock().map_err(|e| CommandError {
             message: e.to_string(),
         })?;
@@ -1519,8 +1605,9 @@ fn pty_restart_impl(
         };
         let kind = session.kind.clone();
         let viewport = session.viewport.clone();
+        let owner_window = session.owner_window.clone();
         let _ = session.child.kill();
-        (kind, viewport)
+        (kind, viewport, owner_window)
     };
 
     start_pty_session(
@@ -1541,6 +1628,7 @@ fn pty_restart_impl(
             per_terminal_history: None,
             history_key: None,
         },
+        owner_window,
     )?;
     {
         let mut map = handle.lock().map_err(|e| CommandError {
@@ -1603,6 +1691,12 @@ mod tests {
         assert_eq!(worker_parts_from_pty_id("terminal-1"), None);
         assert_eq!(worker_parts_from_pty_id("__w__typecheck"), None);
         assert_eq!(worker_parts_from_pty_id("terminal-1__w__"), None);
+    }
+
+    #[test]
+    fn worker_output_batches_more_aggressively_than_interactive_output() {
+        assert_eq!(output_flush_interval_ms("terminal-1"), 16);
+        assert_eq!(output_flush_interval_ms("terminal-1__w__typecheck"), 33);
     }
 
     #[test]

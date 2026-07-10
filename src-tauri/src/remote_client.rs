@@ -1,5 +1,5 @@
 use crate::commands::pty as pty_cmd;
-use crate::event_hub::publish_runtime_event;
+use crate::event_hub::publish_runtime_event_to_windows;
 use crate::host_context::HostContext;
 use crate::remote_core::{
     canonical_remote_channel, decode_remote_binary_frame, decode_remote_text_frame,
@@ -39,6 +39,7 @@ const PENDING_REPLY_GRACE: Duration = Duration::from_secs(5);
 // loop breaks → `connected` flips false → the renderer auto-reconnects).
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(20);
 const CLIENT_DEVICE_ID_FILE: &str = "remote-client-id.json";
+const EVENT_OWNER_LIMIT: usize = 4096;
 
 type RemoteWebSocket = WebSocket<StreamOwned<ClientConnection, TcpStream>>;
 
@@ -105,7 +106,11 @@ struct RunningClient {
     // window_labels currently bound to this connection. The socket is torn down
     // only when the last referrer is released, so sibling windows on the same
     // host keep sharing it.
-    referrers: Mutex<HashSet<String>>,
+    referrers: Arc<Mutex<HashSet<String>>>,
+    // Session/PTY ownership learned from invokes on this shared connection.
+    // Global host events still fan out to every referrer; high-volume
+    // resource events wake only the window that most recently used it.
+    event_owners: Arc<Mutex<HashMap<String, String>>>,
 }
 
 enum ClientCommand {
@@ -244,6 +249,16 @@ impl RustRemoteClientState {
                 let (tx, rx) = mpsc::channel();
                 let connected = Arc::new(AtomicBool::new(true));
                 let connected_for_loop = Arc::clone(&connected);
+                let referrers = Arc::new(Mutex::new(HashSet::new()));
+                if let Some(window_label) = window_id.as_deref() {
+                    referrers
+                        .lock()
+                        .expect("remote client referrers lock")
+                        .insert(window_label.to_string());
+                }
+                let referrers_for_loop = Arc::clone(&referrers);
+                let event_owners = Arc::new(Mutex::new(HashMap::new()));
+                let event_owners_for_loop = Arc::clone(&event_owners);
                 let remote_origin = format!("{host}:{port}");
                 thread::spawn(move || {
                     client_loop(
@@ -253,6 +268,8 @@ impl RustRemoteClientState {
                         connected_for_loop,
                         compression,
                         remote_origin,
+                        referrers_for_loop,
+                        event_owners_for_loop,
                     )
                 });
                 let client = Arc::new(RunningClient {
@@ -264,7 +281,8 @@ impl RustRemoteClientState {
                     capabilities,
                     connected,
                     tx,
-                    referrers: Mutex::new(HashSet::new()),
+                    referrers,
+                    event_owners,
                 });
                 self.pool
                     .lock()
@@ -339,6 +357,11 @@ impl RustRemoteClientState {
             referrers.remove(window_label);
             referrers.is_empty()
         };
+        client
+            .event_owners
+            .lock()
+            .expect("remote client event owners lock")
+            .retain(|_, owner| owner != window_label);
         if now_empty {
             client.connected.store(false, Ordering::SeqCst);
             let _ = client.tx.send(ClientCommand::Disconnect);
@@ -426,6 +449,16 @@ impl RustRemoteClientState {
         };
         if !client.connected.load(Ordering::SeqCst) {
             return Err("remote.invoke: not connected to remote server".to_string());
+        }
+        if let Some(resource) = event_owner_key_for_invoke(channel, &args) {
+            let mut owners = client
+                .event_owners
+                .lock()
+                .expect("remote client event owners lock");
+            if owners.len() >= EVENT_OWNER_LIMIT && !owners.contains_key(&resource) {
+                owners.clear();
+            }
+            owners.insert(resource, window_label.to_string());
         }
         let tx = client.tx.clone();
         let id = self.next_id();
@@ -519,6 +552,55 @@ impl RustRemoteClientState {
     }
 }
 
+fn event_owner_key(kind: &str, id: Option<&str>) -> Option<String> {
+    id.filter(|id| !id.is_empty())
+        .map(|id| format!("{kind}:{id}"))
+}
+
+fn event_owner_key_for_invoke(channel: &str, args: &[Value]) -> Option<String> {
+    let channel = canonical_remote_channel(channel);
+    if channel == "pty:create" {
+        return event_owner_key(
+            "pty",
+            args.first()
+                .and_then(|options| options.get("id"))
+                .and_then(Value::as_str),
+        );
+    }
+    if channel.starts_with("pty:") {
+        return event_owner_key("pty", args.first().and_then(Value::as_str));
+    }
+    if channel.starts_with("claude:")
+        && !matches!(
+            channel.as_str(),
+            "claude:auth-status"
+                | "claude:account-list"
+                | "claude:account-mark-warning-shown"
+                | "claude:auth-login-start"
+                | "claude:auth-login-submit-code"
+                | "claude:auth-login-cancel"
+                | "claude:get-cli-path"
+                | "claude:list-sessions"
+                | "claude:scan-skills"
+                | "claude:check-mcp-json-status"
+                | "claude:enable-all-project-mcp"
+        )
+    {
+        return event_owner_key("agent", args.first().and_then(Value::as_str));
+    }
+    None
+}
+
+fn event_owner_key_for_event(channel: &str, params: &Value) -> Option<String> {
+    if channel.starts_with("pty:") {
+        return event_owner_key("pty", params.get("id").and_then(Value::as_str));
+    }
+    if channel.starts_with("claude:") {
+        return event_owner_key("agent", params.get("sessionId").and_then(Value::as_str));
+    }
+    None
+}
+
 fn client_loop(
     app: HostContext,
     mut ws: RemoteWebSocket,
@@ -526,6 +608,8 @@ fn client_loop(
     connected: Arc<AtomicBool>,
     compression: RemoteCompression,
     remote_origin: String,
+    referrers: Arc<Mutex<HashSet<String>>>,
+    event_owners: Arc<Mutex<HashMap<String, String>>>,
 ) {
     let mut pending: HashMap<String, PendingInvoke> = HashMap::new();
     let mut last_ping = Instant::now();
@@ -583,12 +667,26 @@ fn client_loop(
         match ws.read() {
             Ok(Message::Text(text)) if compression == RemoteCompression::None => {
                 if let Ok(frame) = decode_remote_text_frame(&text) {
-                    handle_frame(&app, &mut pending, frame, &remote_origin);
+                    handle_frame(
+                        &app,
+                        &mut pending,
+                        frame,
+                        &remote_origin,
+                        &referrers,
+                        &event_owners,
+                    );
                 }
             }
             Ok(Message::Binary(bytes)) if compression == RemoteCompression::Gzip => {
                 if let Ok(frame) = decode_remote_binary_frame(&bytes) {
-                    handle_frame(&app, &mut pending, frame, &remote_origin);
+                    handle_frame(
+                        &app,
+                        &mut pending,
+                        frame,
+                        &remote_origin,
+                        &referrers,
+                        &event_owners,
+                    );
                 }
             }
             Ok(Message::Ping(bytes)) => {
@@ -668,6 +766,8 @@ fn handle_frame(
     pending: &mut HashMap<String, PendingInvoke>,
     frame: Value,
     remote_origin: &str,
+    referrers: &Mutex<HashSet<String>>,
+    event_owners: &Mutex<HashMap<String, String>>,
 ) {
     let frame_type = frame.get("type").and_then(Value::as_str).unwrap_or("");
     if matches!(frame_type, "invoke-result" | "invoke-error") {
@@ -709,7 +809,25 @@ fn handle_frame(
         } else if channel == "profile:changed" {
             params = tag_remote_profile_changed(params, remote_origin);
         }
-        publish_runtime_event(app, &channel, params, "rust-remote-client");
+        let all_windows = referrers
+            .lock()
+            .expect("remote client referrers lock")
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let owner = event_owner_key_for_event(&channel, &params).and_then(|resource| {
+            event_owners
+                .lock()
+                .expect("remote client event owners lock")
+                .get(&resource)
+                .cloned()
+        });
+        let mut windows = owner
+            .filter(|owner| all_windows.contains(owner))
+            .map(|owner| vec![owner])
+            .unwrap_or(all_windows);
+        windows.sort();
+        publish_runtime_event_to_windows(app, &windows, &channel, params, "rust-remote-client");
     }
 }
 
@@ -1124,6 +1242,33 @@ mod tests {
     }
 
     #[test]
+    fn resource_events_follow_the_window_that_invoked_them() {
+        assert_eq!(
+            event_owner_key_for_invoke("pty:create", &[json!({ "id": "term-1", "cwd": "." })]),
+            Some("pty:term-1".to_string())
+        );
+        assert_eq!(
+            event_owner_key_for_invoke("agent:send-message", &[json!("session-1")]),
+            Some("agent:session-1".to_string())
+        );
+        assert_eq!(
+            event_owner_key_for_event(
+                "claude:stream",
+                &json!({ "sessionId": "session-1", "data": { "text": "hi" } })
+            ),
+            Some("agent:session-1".to_string())
+        );
+        assert_eq!(
+            event_owner_key_for_event("pty:output", &json!({ "id": "term-1", "data": "hi" })),
+            Some("pty:term-1".to_string())
+        );
+        assert_eq!(
+            event_owner_key_for_event("workspace:reload", &json!({})),
+            None
+        );
+    }
+
+    #[test]
     fn tags_remote_workspace_reload_payloads() {
         // Object payloads gain the origin tag in place.
         let tagged = tag_remote_workspace_reload(
@@ -1180,7 +1325,8 @@ mod tests {
             capabilities: None,
             connected: Arc::new(AtomicBool::new(true)),
             tx,
-            referrers: Mutex::new(HashSet::new()),
+            referrers: Arc::new(Mutex::new(HashSet::new())),
+            event_owners: Arc::new(Mutex::new(HashMap::new())),
         });
         state
             .pool

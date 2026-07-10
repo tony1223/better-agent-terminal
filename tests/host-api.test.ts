@@ -26,7 +26,10 @@ async function loadFreshAdapter() {
 }
 
 function stripBestEffortDebugModeCall<T extends { cmd: string }>(calls: T[]): T[] {
-  return calls.filter(call => call.cmd !== 'debug_is_debug_mode')
+  return calls.filter(call => ![
+    'debug_is_debug_mode',
+    'debug_is_pty_input_trace',
+  ].includes(call.cmd))
 }
 
 async function run() {
@@ -47,6 +50,7 @@ async function run() {
       invokeCalls.push({ cmd, args })
       // Mirror Rust return shapes for the commands we care about.
       if (cmd === 'debug_is_debug_mode') return false as unknown as T
+      if (cmd === 'debug_is_pty_input_trace') return false as unknown as T
       if (cmd === 'settings_load') return null as unknown as T
       if (cmd === 'settings_save') return undefined as unknown as T
       if (cmd === 'shell_open_external') return undefined as unknown as T
@@ -979,6 +983,15 @@ async function run() {
     setWindow({ __TAURI_INTERNALS__: { invoke }, location: { search: '?BAT_DEBUG=1' } })
     const mod = await loadFreshAdapter()
     assert.equal(mod.host.debug.isDebugMode, true)
+    assert.equal(mod.host.debug.isPtyInputTrace, false, 'ordinary debug mode must not log terminal input')
+  }
+
+  // PTY input tracing is a separate, explicit diagnostic switch.
+  {
+    const invoke: TauriInvoke = async () => undefined as unknown as never
+    setWindow({ __TAURI_INTERNALS__: { invoke }, location: { search: '?BAT_TRACE_PTY_INPUT=1' } })
+    const mod = await loadFreshAdapter()
+    assert.equal(mod.host.debug.isPtyInputTrace, true)
   }
 
   // 6) Tauri wins when both markers exist because installTauriShim() itself
@@ -1001,6 +1014,7 @@ async function run() {
     const invoke: TauriInvoke = async <T>(cmd: string) => {
       invokeCalls.push(cmd)
       if (cmd === 'debug_is_debug_mode') return false as unknown as T
+      if (cmd === 'debug_is_pty_input_trace') return false as unknown as T
       return null as unknown as T
     }
     // No batAppAPI yet — the shim should install one.

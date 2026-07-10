@@ -25,7 +25,10 @@ import {
   profileChangeMatchesRemoteOrigin,
   type ProfileEntryLike,
 } from './utils/remote-profile-events'
+import { touchBoundedLru } from './utils/bounded-lru'
 import type { AppState, EnvVariable, TerminalInstance } from './types'
+
+const MAX_MOUNTED_WORKSPACES = 2
 
 // Panel settings interface
 interface PanelSettings {
@@ -46,11 +49,12 @@ const DEFAULT_SNIPPET_WIDTH = 280
 const MIN_SNIPPET_WIDTH = 180
 const MAX_SNIPPET_WIDTH = 500
 
-// Auto-reconnect backoff bounds (ms). The status poll runs every 3s; on a
-// failed re-dial we grow the gate up to the max so a long outage doesn't hammer
-// the host, and reset to the min on success or on resume from sleep.
+// Auto-reconnect backoff bounds (ms). Connected remote windows poll slowly;
+// disconnected windows retry more quickly behind an exponential dial gate.
 const RECONNECT_BACKOFF_MIN = 3000
 const RECONNECT_BACKOFF_MAX = 30000
+const REMOTE_CONNECTED_POLL_MS = 10000
+const REMOTE_DISCONNECTED_POLL_MS = 3000
 const EMPTY_TERMINALS: TerminalInstance[] = []
 
 type ProfileWindowCloseAction = 'temporary' | 'removeFromProfile' | 'cancel'
@@ -167,6 +171,21 @@ export default function App() {
   const [detachedIds, setDetachedIds] = useState<Set<string>>(new Set())
   // Track workspaces that have been visited (for lazy mounting)
   const [mountedWorkspaces, setMountedWorkspaces] = useState<Set<string>>(new Set())
+  const pinnedWorkspaceKey = state.terminals
+    .filter(terminal => (
+      terminal.isAgentRunning
+      || terminal.hasPendingAction
+      || !!terminal.procfilePath
+      || terminal.agentPreset === 'claude-channel'
+      || terminal.agentPreset === 'claude-cli-agent'
+    ))
+    .map(terminal => terminal.workspaceId)
+    .sort()
+    .join('\0')
+  const pinnedWorkspaceIds = useMemo(
+    () => new Set(pinnedWorkspaceKey ? pinnedWorkspaceKey.split('\0') : []),
+    [pinnedWorkspaceKey],
+  )
   const lastRenderSummaryRef = useRef<string>('')
   const [currentWindowId, setCurrentWindowId] = useState<string | null>(null)
   const currentWindowIdRef = useRef<string | null>(null)
@@ -271,12 +290,18 @@ export default function App() {
     host.app.setTitle(title).catch(() => {})
   }, [activeProfileName, windowIndex, activeProfileIsRemote])
 
-  // Lazy mount: only render a workspace's terminals once it has been activated
+  // Keep the active/recent workspace views warm, but release older WebViews'
+  // xterm/message DOM. Live turns and pending prompts stay pinned so their
+  // renderer handlers remain attached until the backend turn settles.
   useEffect(() => {
-    if (state.activeWorkspaceId && !mountedWorkspaces.has(state.activeWorkspaceId)) {
-      setMountedWorkspaces(prev => new Set(prev).add(state.activeWorkspaceId!))
-    }
-  }, [state.activeWorkspaceId, mountedWorkspaces])
+    if (!state.activeWorkspaceId) return
+    setMountedWorkspaces(previous => touchBoundedLru(
+      previous,
+      state.activeWorkspaceId!,
+      MAX_MOUNTED_WORKSPACES,
+      pinnedWorkspaceIds,
+    ))
+  }, [state.activeWorkspaceId, pinnedWorkspaceIds])
 
   // Handle sidebar resize
   const handleSidebarResize = useCallback((delta: number) => {
@@ -736,6 +761,7 @@ export default function App() {
     // status and clear any reconnect backoff so the status poll re-dials right
     // away instead of waiting out a grown gate from before the machine slept.
     const unsubSystemResume = host.system.onResume(() => {
+      if (!activeProfileIsRemoteRef.current) return
       reconnectRef.current.nextAt = 0
       reconnectRef.current.backoff = RECONNECT_BACKOFF_MIN
       host.remote.clientStatus().then(s => setRemoteClientConnected(s.connected))
@@ -772,7 +798,8 @@ export default function App() {
   // the app. On a successful re-dial we reload workspaces to re-attach the
   // host-owned sessions/workspaces (they keep running on the host).
   useEffect(() => {
-    let interval: ReturnType<typeof setInterval> | null = null
+    if (!activeProfileIsRemote) return
+    let timer: ReturnType<typeof setTimeout> | null = null
     let disposed = false
 
     const attemptReconnect = async () => {
@@ -814,22 +841,36 @@ export default function App() {
       }
     }
 
-    const check = () => {
-      host.remote.clientStatus().then(s => {
-        setRemoteClientConnected(s.connected)
-        if (!s.connected) void attemptReconnect()
-      })
+    const scheduleCheck = (delay: number) => {
+      if (disposed) return
+      timer = setTimeout(() => { void check() }, delay)
+    }
+    const check = async () => {
+      if (disposed || !activeProfileIsRemoteRef.current) return
+      let nextDelay = REMOTE_CONNECTED_POLL_MS
+      try {
+        const status = await host.remote.clientStatus()
+        if (disposed) return
+        setRemoteClientConnected(status.connected)
+        if (!status.connected) {
+          nextDelay = REMOTE_DISCONNECTED_POLL_MS
+          await attemptReconnect()
+        }
+      } catch {
+        nextDelay = REMOTE_DISCONNECTED_POLL_MS
+      } finally {
+        scheduleCheck(nextDelay)
+      }
     }
     const cancelStart = scheduleTauriStartupBackgroundWork(() => {
-      check()
-      interval = setInterval(check, 3000)
+      void check()
     })
     return () => {
       disposed = true
       cancelStart()
-      if (interval) clearInterval(interval)
+      if (timer) clearTimeout(timer)
     }
-  }, [])
+  }, [activeProfileIsRemote])
 
   useEffect(() => {
     let disposed = false

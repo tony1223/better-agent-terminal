@@ -40,10 +40,24 @@ const DEFAULT_CODEX_CONTEXT_WINDOW: u64 = 1_000_000;
 const GPT_5_6_CONTEXT_WINDOW_FALLBACK: u64 = 353_400;
 const DEFAULT_CODEX_REASONING_SUMMARY: &str = "auto";
 const COMMAND_OUTPUT_EMIT_INTERVAL: Duration = Duration::from_millis(100);
+const CODEX_CONNECTION_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const CODEX_IDLE_REAPER_INTERVAL: Duration = Duration::from_secs(30);
 const CODEX_ACCOUNT_STATE_FILE: &str = "codex-account-state.json";
 static CODEX_TEMP_IMAGE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 type ReplySender = Sender<Result<Value, String>>;
+
+fn should_reap_codex_connection(
+    idle_for: Duration,
+    session_running: bool,
+    login_in_progress: bool,
+    pending_approval: bool,
+) -> bool {
+    idle_for >= CODEX_CONNECTION_IDLE_TIMEOUT
+        && !session_running
+        && !login_in_progress
+        && !pending_approval
+}
 
 #[derive(Default)]
 struct PendingTable {
@@ -207,6 +221,8 @@ struct PendingApproval {
 #[derive(Default)]
 struct CodexInner {
     connection: Mutex<Option<Arc<CodexConnection>>>,
+    last_connection_activity: Mutex<Option<Instant>>,
+    idle_reaper_running: AtomicBool,
     sessions: Mutex<HashMap<String, CodexSession>>,
     thread_to_session: Mutex<HashMap<String, String>>,
     // Keyed by the synthetic toolUseId surfaced to the renderer
@@ -2548,6 +2564,76 @@ impl CodexAppServerState {
             .unwrap_or(false)
     }
 
+    fn touch_connection_activity(&self) {
+        if let Ok(mut last_activity) = self.inner.last_connection_activity.lock() {
+            *last_activity = Some(Instant::now());
+        }
+    }
+
+    fn ensure_idle_reaper(&self, app: &HostContext) {
+        if self
+            .inner
+            .idle_reaper_running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return;
+        }
+        let state = self.clone();
+        let app = app.clone();
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(CODEX_IDLE_REAPER_INTERVAL);
+                let has_connection = state
+                    .inner
+                    .connection
+                    .lock()
+                    .map(|connection| connection.is_some())
+                    .unwrap_or(false);
+                if !has_connection {
+                    break;
+                }
+                let idle_for = state
+                    .inner
+                    .last_connection_activity
+                    .lock()
+                    .ok()
+                    .and_then(|last| last.as_ref().map(Instant::elapsed))
+                    .unwrap_or_default();
+                let has_pending_approval = state
+                    .inner
+                    .pending_approvals
+                    .lock()
+                    .map(|pending| !pending.is_empty())
+                    .unwrap_or(true);
+                if should_reap_codex_connection(
+                    idle_for,
+                    state.any_session_running(),
+                    state.any_login_in_progress(),
+                    has_pending_approval,
+                ) {
+                    state.drop_connection(&app, "idle-timeout");
+                    break;
+                }
+            }
+            state
+                .inner
+                .idle_reaper_running
+                .store(false, Ordering::SeqCst);
+            // Close the narrow spawn/exit race: a new connection may have been
+            // installed while the old reaper still owned the flag.
+            if state
+                .inner
+                .connection
+                .lock()
+                .map(|connection| connection.is_some())
+                .unwrap_or(false)
+            {
+                state.ensure_idle_reaper(&app);
+            }
+        });
+    }
+
     fn drop_connection(&self, app: &HostContext, reason: &str) {
         let old = match self.inner.connection.lock() {
             Ok(mut guard) => guard.take(),
@@ -3693,6 +3779,8 @@ impl CodexAppServerState {
                         format!("ensure_connection reuse existing pid={}", existing.pid),
                     );
                 }
+                self.touch_connection_activity();
+                self.ensure_idle_reaper(app);
                 return Ok(existing);
             }
         }
@@ -3834,6 +3922,8 @@ impl CodexAppServerState {
             return Err(err);
         }
         log_codex_global(app, format!("initialized notification sent pid={pid}"));
+        self.touch_connection_activity();
+        self.ensure_idle_reaper(app);
         Ok(connection)
     }
 
@@ -5977,6 +6067,7 @@ fn handle_turn_completed(
     session_id: &str,
     params: &Value,
 ) {
+    state.touch_connection_activity();
     state.cancel_pending_approvals(app, session_id);
     let (reason, result, meta, error_message, turn_id, thread_id) = {
         let mut sessions = state.inner.sessions.lock().expect("codex sessions lock");
@@ -6082,6 +6173,21 @@ fn handle_turn_completed(
 mod tests {
     use super::*;
     use std::env;
+
+    #[test]
+    fn idle_connection_reaper_never_interrupts_live_work() {
+        let stale = CODEX_CONNECTION_IDLE_TIMEOUT + Duration::from_secs(1);
+        assert!(should_reap_codex_connection(stale, false, false, false));
+        assert!(!should_reap_codex_connection(stale, true, false, false));
+        assert!(!should_reap_codex_connection(stale, false, true, false));
+        assert!(!should_reap_codex_connection(stale, false, false, true));
+        assert!(!should_reap_codex_connection(
+            CODEX_CONNECTION_IDLE_TIMEOUT - Duration::from_secs(1),
+            false,
+            false,
+            false,
+        ));
+    }
 
     #[test]
     fn device_login_parser_reads_structured_app_server_response() {

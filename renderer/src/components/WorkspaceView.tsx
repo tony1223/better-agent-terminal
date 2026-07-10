@@ -19,6 +19,7 @@ import {
   supportsRemoteLogin,
   type RemoteAuthCapabilities,
 } from '../utils/remote-auth'
+import { touchBoundedLru } from '../utils/bounded-lru'
 
 // Lazy load heavy components (xterm.js, Claude SDK, etc.)
 const MainPanel = lazy(() => import('./MainPanel').then(m => ({ default: m.MainPanel })))
@@ -28,6 +29,7 @@ const GitHubPanel = lazy(() => import('./GitHubPanel').then(m => ({ default: m.G
 
 type WorkspaceTab = 'terminal' | 'files' | 'git' | 'github'
 const TAB_KEY = 'better-terminal-workspace-tab'
+const MAX_MOUNTED_TERMINALS_PER_WORKSPACE = 2
 
 type AccountMenuEntry = {
   id: string          // selector passed to the switch command
@@ -1166,6 +1168,29 @@ export const WorkspaceView = memo(function WorkspaceView({ workspace, terminals,
   // Determine what to show
   // mainTerminal: the currently focused or first available terminal
   const mainTerminal = focusedTerminal || agentTerminal || terminals[0]
+  const mainTerminalId = mainTerminal?.id
+  const [mountedTerminalIds, setMountedTerminalIds] = useState<Set<string>>(new Set())
+  const pinnedTerminalKey = terminals
+    .filter(terminal => (
+      terminal.isAgentRunning
+      || terminal.hasPendingAction
+      || !!terminal.procfilePath
+      || terminal.agentPreset === 'claude-channel'
+      || terminal.agentPreset === 'claude-cli-agent'
+    ))
+    .map(terminal => terminal.id)
+    .sort()
+    .join('\0')
+  useEffect(() => {
+    if (!mainTerminalId) return
+    const pinned = new Set(pinnedTerminalKey ? pinnedTerminalKey.split('\0') : [])
+    setMountedTerminalIds(previous => touchBoundedLru(
+      previous,
+      mainTerminalId,
+      MAX_MOUNTED_TERMINALS_PER_WORKSPACE,
+      pinned,
+    ))
+  }, [mainTerminalId, pinnedTerminalKey])
 
   useEffect(() => {
     if (host.debug.isDebugMode !== true) return
@@ -1363,10 +1388,12 @@ export const WorkspaceView = memo(function WorkspaceView({ workspace, terminals,
         )}
       </div>
 
-      {/* Main content area - terminals always rendered (keep processes alive) */}
+      {/* Backend sessions stay alive when old renderer panels are released. */}
       <Suspense fallback={<div className="loading-panel" />}>
         <div className={`terminals-container ${activeTab !== 'terminal' ? 'hidden' : ''}`}>
-          {terminals.map(terminal => (
+          {terminals.filter(terminal => (
+            terminal.id === mainTerminal?.id || mountedTerminalIds.has(terminal.id)
+          )).map(terminal => (
             <div
               key={terminal.id}
               className={`terminal-wrapper ${terminal.id === mainTerminal?.id ? 'active' : 'hidden'}`}

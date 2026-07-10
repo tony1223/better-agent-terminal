@@ -24,9 +24,21 @@ fn bat_debug_enabled() -> bool {
     )
 }
 
+fn pty_input_trace_enabled() -> bool {
+    matches!(
+        std::env::var("BAT_TRACE_PTY_INPUT").as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE")
+    )
+}
+
 #[tauri::command]
 pub fn debug_is_debug_mode() -> bool {
     bat_debug_enabled()
+}
+
+#[tauri::command]
+pub fn debug_is_pty_input_trace() -> bool {
+    pty_input_trace_enabled()
 }
 
 #[tauri::command]

@@ -76,6 +76,7 @@ export interface TerminalInstance {
   scrollbackBuffer: string[];
   lastActivityTime?: number;
   hasPendingAction?: boolean;
+  isAgentRunning?: boolean;       // Transient: pins a live agent panel in renderer memory
   hasUserInput?: boolean;         // Tracks user input before auto-running agent command
   agentCommandSent?: boolean;     // Prevents duplicate auto-run agent commands
   sdkSessionId?: string;         // Claude SDK session ID for auto-resume

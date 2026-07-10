@@ -41,9 +41,8 @@ interface TerminalPanelProps {
   terminalType?: 'terminal' | 'code-agent'
   agentPreset?: AgentPresetId
   ptyReady?: boolean
-  // When true (remote attach), replay the host's PTY scrollback into this fresh
-  // xterm on mount. Desktop keeps its xterm mounted alongside the PTY and never
-  // needs replay, so it leaves this false.
+  // Retained for renderer-host compatibility. Fresh local and remote xterms
+  // now both hydrate because local panels may be released by the LRU.
   remoteHydrate?: boolean
   onReadySize?: (size: { cols: number, rows: number }) => void
 }
@@ -77,7 +76,6 @@ export const TerminalPanel = memo(function TerminalPanel({
   terminalType,
   agentPreset,
   ptyReady = true,
-  remoteHydrate = false,
   onReadySize,
 }: TerminalPanelProps) {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -170,7 +168,7 @@ export const TerminalPanel = memo(function TerminalPanel({
 
   const pasteAbortRef = useRef<{ cancelled: boolean } | null>(null)
 
-  const shouldTracePtyInput = () => host.debug.isDebugMode === true
+  const shouldTracePtyInput = () => host.debug.isPtyInputTrace === true
 
   const traceTerminalKeyEvent = (event: KeyboardEvent) => {
     if (!shouldTracePtyInput()) return
@@ -844,15 +842,9 @@ export const TerminalPanel = memo(function TerminalPanel({
 
     // Handle terminal output.
     //
-    // Remote attach replays scrollback. A remote client opens a *fresh* xterm
-    // for a PTY that already lives on the host; its prompt and early output were
-    // emitted before this xterm subscribed (the client even fires pty:resize
-    // before pty:create round-trips back — see the "session not found" races in
-    // the server log), so without replay the pane shows no history. Desktop
-    // never hits this: the xterm is created with the PTY and stays mounted, so
-    // it captures every byte live. So only on remote attach, queue live output
-    // and paint the host's output_buffer (via pty:read-buffer) first, then flush
-    // the queued bytes in order.
+    // Remote attaches and locally remounted LRU panels replay scrollback. Queue
+    // live output while reading the backend buffer, then paint exactly one
+    // ordered snapshot before going live.
     const writePtyOutput = (data: string) => {
       if (isClaudeCliTerminal) {
         terminal.write(data, scheduleFullRefresh)
@@ -862,7 +854,7 @@ export const TerminalPanel = memo(function TerminalPanel({
       // Update activity time when there's output
       workspaceStore.updateTerminalActivity(terminalId)
     }
-    let outputHydrated = !remoteHydrate
+    let outputHydrated = false
     const pendingOutput: string[] = []
     const unsubscribeOutput = host.pty.onOutput((id, data) => {
       if (id !== terminalId) return
@@ -872,50 +864,60 @@ export const TerminalPanel = memo(function TerminalPanel({
       }
       writePtyOutput(data)
     })
-    if (remoteHydrate) {
-      // Go live: optionally flush the chunks queued during hydration, then let
-      // subsequent output write straight through.
-      const goLive = (writeQueued: boolean) => {
-        if (writeQueued) {
-          for (const chunk of pendingOutput) writePtyOutput(chunk)
-        }
-        pendingOutput.length = 0
-        outputHydrated = true
+    // Go live: optionally flush the chunks queued during hydration, then let
+    // subsequent output write straight through.
+    const goLive = (queuedStart: number) => {
+      for (let index = queuedStart; index < pendingOutput.length; index++) {
+        writePtyOutput(pendingOutput[index])
       }
-      const hydrateScrollback = async () => {
-        // The PTY may not exist on the host yet (create still in flight over the
-        // wire), so retry briefly on failure before giving up and going live.
-        for (let attempt = 0; attempt < 20 && !outputHydrationCancelled; attempt++) {
-          try {
-            const buffer = await host.pty.readBuffer(terminalId)
-            if (outputHydrationCancelled) return
-            if (buffer) {
-              // The host appends to its output_buffer before emitting
-              // pty:output, so a non-empty snapshot already contains everything
-              // we queued so far — paint it and DROP the queue, otherwise the
-              // scrollback would be duplicated.
-              if (isClaudeCliTerminal) {
-                terminal.write(buffer, scheduleFullRefresh)
-              } else {
-                terminal.write(buffer)
-              }
-              goLive(false)
-            } else {
-              // Empty snapshot — the PTY exists but nothing is buffered yet (we
-              // won the race against the first prompt), so the real early output
-              // is whatever landed in the queue. Flush it.
-              goLive(true)
-            }
-            return
-          } catch {
-            await new Promise(resolve => setTimeout(resolve, 100))
-          }
-        }
-        // Hydration never succeeded (create failed?) — don't strand live output.
-        if (!outputHydrationCancelled) goLive(true)
-      }
-      void hydrateScrollback()
+      pendingOutput.length = 0
+      outputHydrated = true
     }
+    const goLiveAfterSnapshot = (snapshot: string) => {
+      // Output appended before the read may be both in the snapshot and in our
+      // pending event queue. Drop only the longest queued prefix proven to be
+      // the snapshot suffix; keep anything emitted after the snapshot.
+      let includedChunks = 0
+      let queuedPrefix = ''
+      for (let index = 0; index < pendingOutput.length; index++) {
+        queuedPrefix += pendingOutput[index]
+        if (queuedPrefix.length > snapshot.length) break
+        if (snapshot.endsWith(queuedPrefix)) includedChunks = index + 1
+      }
+      goLive(includedChunks)
+    }
+    const hydrateScrollback = async () => {
+      // The PTY may not exist on the host yet (create still in flight over the
+      // wire), so retry briefly on failure before giving up and going live.
+      for (let attempt = 0; attempt < 20 && !outputHydrationCancelled; attempt++) {
+        try {
+          const buffer = await host.pty.readBuffer(terminalId)
+          if (outputHydrationCancelled) return
+          if (buffer) {
+            // Paint the snapshot, then retain only queued chunks that landed
+            // after it so neither scrollback duplication nor output loss wins
+            // the read/event race.
+            if (isClaudeCliTerminal) {
+              terminal.write(buffer, scheduleFullRefresh)
+            } else {
+              terminal.write(buffer)
+            }
+            goLiveAfterSnapshot(buffer)
+          } else {
+            // Empty snapshot — the PTY exists but nothing is buffered yet (we
+            // won the race against the first prompt), so the real early output
+            // is whatever landed in the queue. Flush it.
+            goLive(0)
+          }
+          return
+        } catch {
+          await new Promise(resolve => setTimeout(resolve, 100))
+        }
+      }
+      // Hydration never succeeded (create failed?) — don't strand live output.
+      if (!outputHydrationCancelled) goLive(0)
+    }
+    void hydrateScrollback()
 
     // Handle terminal exit
     const unsubscribeExit = host.pty.onExit((id, exitCode) => {

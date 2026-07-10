@@ -300,8 +300,8 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
     lastAgentEventAtRef.current = Date.now()
   }, [])
   const lastEscRef = useRef(0)
-  const streamingTextStore = useRafBatchedString('')
-  const streamingThinkingStore = useRafBatchedString('')
+  const streamingTextStore = useRafBatchedString('', { activation })
+  const streamingThinkingStore = useRafBatchedString('', { activation })
   const streamingText = streamingTextStore.value
   const streamingThinking = streamingThinkingStore.value
   const setStreamingText = streamingTextStore.reset
@@ -540,12 +540,13 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
     () => runtimeWaitingMessage(t, sessionMeta, isStreaming, runtimeWaitNow),
     [t, sessionMeta, isStreaming, runtimeWaitNow],
   )
-  useEffect(() => {
+  const runRuntimeWaitTicker = useCallback(() => {
     if (!isStreaming || !sessionMeta?.runtimeStatus) return
     setRuntimeWaitNow(Date.now())
     const timer = window.setInterval(() => setRuntimeWaitNow(Date.now()), 1000)
     return () => window.clearInterval(timer)
   }, [isStreaming, sessionMeta?.runtimeStatus, sessionMeta?.runtimeStatusStartedAt])
+  usePanelActiveEffect(activation, runRuntimeWaitTicker)
   // Track turn start + tick once a second while a turn is in flight so the
   // elapsed / quiet-time readouts stay current.
   useEffect(() => {
@@ -553,12 +554,17 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
       setTurnStartedAt(Date.now())
       lastAgentEventAtRef.current = Date.now()
       setTurnNow(Date.now())
-      const timer = window.setInterval(() => setTurnNow(Date.now()), 1000)
-      return () => window.clearInterval(timer)
+      return
     }
     setTurnStartedAt(null)
-    return undefined
   }, [isStreaming])
+  const runTurnTicker = useCallback(() => {
+    if (!isStreaming) return
+    setTurnNow(Date.now())
+    const timer = window.setInterval(() => setTurnNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [isStreaming])
+  usePanelActiveEffect(activation, runTurnTicker)
   const TURN_QUIET_WARN_SEC = 30
   // While a permission prompt or ask-user question is pending, the agent is
   // legitimately blocked waiting on the user — not stalled. Freeze the quiet
@@ -586,10 +592,10 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
   const archivedCountRef = useRef(0)
   const loadedFromArchiveRef = useRef(0)
   const archivingRef = useRef(false)
-  const VISIBLE_LIMIT = 200
-  const ARCHIVE_TRIGGER = 300 // archive when exceeding this
-  const INITIAL_ARCHIVE_LOAD = 200
-  const LOAD_BATCH = 50
+  const VISIBLE_LIMIT = 120
+  const ARCHIVE_TRIGGER = 160 // archive when exceeding this
+  const INITIAL_ARCHIVE_LOAD = 120
+  const LOAD_BATCH = 40
   const historyLoadedRef = useRef(false)
   // A remote host owns the live session and its transcript. Reset this latch
   // whenever the connection/session changes so reconnecting asks the host to
@@ -928,11 +934,12 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
 
   // Tick counter to force re-render for elapsed time display
   const [, setElapsedTick] = useState(0)
-  useEffect(() => {
+  const runAgentTreeTicker = useCallback(() => {
     if (agentTreeSummary.running === 0) return
     const interval = setInterval(() => setElapsedTick(t => t + 1), 1000)
     return () => clearInterval(interval)
   }, [agentTreeSummary.running])
+  usePanelActiveEffect(activation, runAgentTreeTicker)
 
   // A hidden tree resurfaces (as the collapsed bar) when new agents start.
   useEffect(() => {
@@ -1061,6 +1068,10 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
     const hasPending = !!(pendingPermission || pendingQuestion)
     workspaceStore.setTerminalPendingAction(sessionId, hasPending)
   }, [sessionId, pendingPermission, pendingQuestion])
+
+  useEffect(() => {
+    workspaceStore.setTerminalAgentRunning(sessionId, isStreaming)
+  }, [sessionId, isStreaming])
 
   // Keep breathing light active (yellow) while streaming/thinking/executing tools
   useEffect(() => {

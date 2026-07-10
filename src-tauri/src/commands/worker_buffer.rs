@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 #[cfg(feature = "desktop")]
 use std::time::Duration;
 #[cfg(feature = "desktop")]
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, State, WebviewWindow};
 
 const MAX_BYTES_PER_PANEL: usize = 1 << 20; // 1 MiB
 
@@ -242,6 +242,7 @@ pub async fn worker_procfile_load(file_path: String) -> Result<Vec<ProcfileEntry
 #[tauri::command]
 pub async fn worker_procfile_start(
     app: AppHandle,
+    window: WebviewWindow,
     pty_state: State<'_, PtyState>,
     worker_state: State<'_, WorkerBufferState>,
     options: WorkerProcessStartOptions,
@@ -250,6 +251,7 @@ pub async fn worker_procfile_start(
     let launch = build_worker_launch_command(options.shell.as_deref(), &options.command);
     let pty_handle = pty_state.handle();
     let worker_handle = worker_state.handle();
+    let owner_window = Some(window.label().to_string());
     let create_options = CreatePtyOptions {
         id: pty_id.clone(),
         cwd: options.cwd,
@@ -270,6 +272,7 @@ pub async fn worker_procfile_start(
             pty_handle,
             Some(worker_handle),
             create_options,
+            owner_window,
         )
     })
     .await

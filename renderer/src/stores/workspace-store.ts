@@ -8,6 +8,30 @@ import { settingsStore } from './settings-store'
 
 type Listener = () => void
 
+export const TERMINAL_ACTIVITY_MIN_INTERVAL_MS = 500
+
+// PTY events are application-wide under Tauri. Return null for a terminal
+// owned by another window and for bursts that are too recent to affect the
+// activity UI. This keeps the hottest output path allocation-free.
+export function updateTerminalActivityState(
+  state: AppState,
+  id: string,
+  now: number,
+): AppState | null {
+  const index = state.terminals.findIndex(terminal => terminal.id === id)
+  if (index < 0) return null
+  const terminal = state.terminals[index]
+  if (
+    terminal.lastActivityTime !== undefined
+    && now - terminal.lastActivityTime < TERMINAL_ACTIVITY_MIN_INTERVAL_MS
+  ) {
+    return null
+  }
+  const terminals = [...state.terminals]
+  terminals[index] = { ...terminal, lastActivityTime: now }
+  return { ...state, terminals }
+}
+
 function debugLog(...args: unknown[]): void {
   if (host.debug.isDebugMode !== true) return
   void host.debug.log(...args).catch(() => {})
@@ -699,14 +723,11 @@ class WorkspaceStore {
 
   updateTerminalActivity(id: string): void {
     const now = Date.now()
-    this.state = {
-      ...this.state,
-      terminals: this.state.terminals.map(t =>
-        t.id === id ? { ...t, lastActivityTime: now } : t
-      )
-    }
+    const next = updateTerminalActivityState(this.state, id, now)
+    if (!next) return
+    this.state = next
     // Throttle notifications to avoid excessive re-renders (max once per 500ms)
-    if (now - this.lastActivityNotify > 500) {
+    if (now - this.lastActivityNotify >= TERMINAL_ACTIVITY_MIN_INTERVAL_MS) {
       this.lastActivityNotify = now
       this.notify()
     }
@@ -721,6 +742,18 @@ class WorkspaceStore {
     }
     this.notify()
     this.updateDockBadge()
+  }
+
+  setTerminalAgentRunning(id: string, running: boolean): void {
+    const terminal = this.state.terminals.find(t => t.id === id)
+    if (!terminal || terminal.isAgentRunning === running) return
+    this.state = {
+      ...this.state,
+      terminals: this.state.terminals.map(t =>
+        t.id === id ? { ...t, isAgentRunning: running } : t
+      )
+    }
+    this.notify()
   }
 
   private updateDockBadge(): void {

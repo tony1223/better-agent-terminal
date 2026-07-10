@@ -277,6 +277,7 @@ fn app_builder(headless: bool) -> tauri::Builder<tauri::Wry> {
             update_cmd::update_check_native,
             update_cmd::update_install,
             debug_cmd::debug_is_debug_mode,
+            debug_cmd::debug_is_pty_input_trace,
             debug_cmd::debug_log,
             debug_cmd::debug_open_logs_folder,
             git_cmd::git_get_github_url,

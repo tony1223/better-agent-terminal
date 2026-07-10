@@ -2385,6 +2385,7 @@ fn invoke_rust_for_remote(
                                 pty_handle,
                                 Some(worker_buffer_handle),
                                 options,
+                                None,
                             )
                         })
                         .await
