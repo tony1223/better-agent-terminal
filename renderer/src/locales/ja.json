@@ -458,6 +458,7 @@
   },
   "claude": {
     "thinking": "思考中",
+    "reasoningSummary": "推論の要約",
     "turnWorking": "処理中",
     "turnResponding": "応答中",
     "turnQuiet": "{{quiet}}秒間、新しいイベントがありません — エージェントはまだ長い処理の途中かもしれません（合計{{elapsed}}秒）",
@@ -467,6 +468,7 @@
     "filterTool": "ツール",
     "filterThinking": "思考",
     "skippedTools": "{{count}}件のツールをスキップしました",
+    "hiddenTools": "{{count}}件のツールを非表示",
     "skippedUser": "{{count}}件のユーザーメッセージをスキップしました",
     "skippedMessages": "{{count}}件のメッセージをスキップしました",
     "skippedThinking": "{{count}}件の思考ブロックをスキップしました",

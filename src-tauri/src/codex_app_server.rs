@@ -1721,6 +1721,38 @@ fn reasoning_text_from_item(item: &Value) -> String {
     item.get("content").map(text_from_value).unwrap_or_default()
 }
 
+fn completed_reasoning_message(
+    session_id: &str,
+    streaming_thinking: &mut String,
+    item: &Value,
+) -> Option<Value> {
+    let streamed = std::mem::take(streaming_thinking);
+    let completed = reasoning_text_from_item(item);
+    let thinking = if completed.trim().is_empty() {
+        streamed
+    } else {
+        completed
+    };
+    if thinking.trim().is_empty() {
+        return None;
+    }
+
+    let id = item
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("reasoning-{}", now_millis()));
+    Some(json!({
+        "id": id,
+        "sessionId": session_id,
+        "role": "assistant",
+        "content": "",
+        "thinking": thinking,
+        "timestamp": now_millis(),
+    }))
+}
+
 fn turn_error_message_from_value(value: &Value) -> Option<String> {
     value
         .get("message")
@@ -1910,6 +1942,25 @@ fn codex_history_items_from_content(session_id: &str, content: &str) -> Vec<Valu
                 _ => {}
             },
             Some("response_item") => match payload.get("type").and_then(Value::as_str) {
+                Some("reasoning") => {
+                    let thinking = reasoning_text_from_item(payload);
+                    if !thinking.trim().is_empty() {
+                        let id = payload
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .filter(|id| !id.is_empty())
+                            .map(str::to_string)
+                            .unwrap_or_else(|| format!("hist-reasoning-{}", items.len()));
+                        items.push(json!({
+                            "id": id,
+                            "sessionId": session_id,
+                            "role": "assistant",
+                            "content": "",
+                            "thinking": thinking,
+                            "timestamp": timestamp,
+                        }));
+                    }
+                }
                 Some("function_call" | "custom_tool_call") => {
                     if let Some(call_id) = payload.get("call_id").and_then(Value::as_str) {
                         let name = payload
@@ -5329,11 +5380,21 @@ fn append_completed_reasoning_if_missing(
     if delta.trim().is_empty() {
         return;
     }
+    let completed_id = item
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty());
     let should_emit = {
         let sessions = state.inner.sessions.lock().expect("codex sessions lock");
         sessions
             .get(session_id)
-            .map(|session| session.thinking_text.trim().is_empty())
+            .map(|session| {
+                let already_committed = session.messages.iter().rev().take(8).any(|message| {
+                    completed_id
+                        .is_some_and(|id| message.get("id").and_then(Value::as_str) == Some(id))
+                });
+                session.thinking_text.trim().is_empty() && !already_committed
+            })
             .unwrap_or(false)
     };
     if should_emit {
@@ -5564,7 +5625,30 @@ fn handle_item_completed(
     item: &Value,
 ) {
     if item_type(item) == Some("reasoning") {
-        append_completed_reasoning_if_missing(app, state, session_id, item);
+        let message = {
+            let mut sessions = state.inner.sessions.lock().expect("codex sessions lock");
+            let Some(session) = sessions.get_mut(session_id) else {
+                return;
+            };
+            let message = completed_reasoning_message(session_id, &mut session.thinking_text, item);
+            if let Some(message) = message {
+                let duplicate = session.messages.iter().any(|existing| {
+                    existing.get("id").and_then(Value::as_str)
+                        == message.get("id").and_then(Value::as_str)
+                });
+                if duplicate {
+                    None
+                } else {
+                    push_session_item(session, message.clone());
+                    Some(message)
+                }
+            } else {
+                None
+            }
+        };
+        if let Some(message) = message {
+            emit(app, "claude:message", session_id, "message", message);
+        }
         return;
     }
 
@@ -5580,7 +5664,10 @@ fn handle_item_completed(
             } else {
                 text
             };
-            let thinking = session.thinking_text.clone();
+            // A fallback reasoning buffer belongs only to this assistant item.
+            // Taking it prevents later reasoning/tool phases in the same turn
+            // from inheriting and re-emitting an already displayed summary.
+            let thinking = std::mem::take(&mut session.thinking_text);
             if !content.trim().is_empty() {
                 let mut msg = json!({
                     "id": format!("assistant-{}", now_millis()),
@@ -6080,6 +6167,42 @@ mod tests {
     }
 
     #[test]
+    fn codex_completed_reasoning_becomes_a_timeline_message() {
+        let mut streaming = "partial streamed summary".to_string();
+        let message = completed_reasoning_message(
+            "session-1",
+            &mut streaming,
+            &json!({
+                "type": "reasoning",
+                "id": "reasoning-1",
+                "summary": [{ "type": "summary_text", "text": "authoritative summary" }],
+            }),
+        )
+        .expect("reasoning message");
+
+        assert!(streaming.is_empty());
+        assert_eq!(message["id"], "reasoning-1");
+        assert_eq!(message["sessionId"], "session-1");
+        assert_eq!(message["role"], "assistant");
+        assert_eq!(message["content"], "");
+        assert_eq!(message["thinking"], "authoritative summary");
+    }
+
+    #[test]
+    fn codex_completed_reasoning_falls_back_to_streamed_summary() {
+        let mut streaming = "streamed summary".to_string();
+        let message = completed_reasoning_message(
+            "session-1",
+            &mut streaming,
+            &json!({ "type": "reasoning", "id": "reasoning-1", "summary": [] }),
+        )
+        .expect("reasoning message");
+
+        assert!(streaming.is_empty());
+        assert_eq!(message["thinking"], "streamed summary");
+    }
+
+    #[test]
     fn codex_terminal_output_sanitizer_removes_control_codes() {
         let output = sanitize_terminal_output(
             "vite build\u{1b}[2K\rtransforming...\n\u{1b}[32m✓\u{1b}[0m done",
@@ -6424,6 +6547,26 @@ mod tests {
         assert_eq!(items[1]["toolName"], "apply_patch");
         assert_eq!(items[1]["input"]["input"], "*** Begin Patch");
         assert_eq!(items[1]["result"], "Success");
+    }
+
+    #[test]
+    fn codex_history_loader_preserves_reasoning_around_tools() {
+        let content = r#"
+{"timestamp":"2026-05-11T00:00:01Z","type":"response_item","payload":{"type":"reasoning","id":"reasoning-1","summary":[{"type":"summary_text","text":"inspect first"}]}}
+{"timestamp":"2026-05-11T00:00:02Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"git status\"}","call_id":"call-1"}}
+{"timestamp":"2026-05-11T00:00:03Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-1","output":"clean"}}
+{"timestamp":"2026-05-11T00:00:04Z","type":"response_item","payload":{"type":"reasoning","id":"reasoning-2","summary":[{"type":"summary_text","text":"verify next"}]}}
+"#;
+        let items = codex_history_items_from_content("s-1", content);
+
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0]["id"], "reasoning-1");
+        assert_eq!(items[0]["thinking"], "inspect first");
+        assert_eq!(items[1]["id"], "call-1");
+        assert_eq!(items[1]["toolName"], "Bash");
+        assert_eq!(items[1]["status"], "completed");
+        assert_eq!(items[2]["id"], "reasoning-2");
+        assert_eq!(items[2]["thinking"], "verify next");
     }
 
     #[test]

@@ -453,6 +453,7 @@
   },
   "claude": {
     "thinking": "思考中",
+    "reasoningSummary": "推理摘要",
     "turnWorking": "处理中",
     "turnResponding": "回应中",
     "turnQuiet": "已 {{quiet}} 秒没有新事件 — agent 可能仍在执行较长的步骤（共 {{elapsed}} 秒）",
@@ -462,6 +463,7 @@
     "filterTool": "工具",
     "filterThinking": "思考",
     "skippedTools": "已跳过 {{count}} 个工具",
+    "hiddenTools": "已隐藏 {{count}} 个工具",
     "skippedUser": "已跳过 {{count}} 条用户消息",
     "skippedMessages": "已跳过 {{count}} 条消息",
     "skippedThinking": "已跳过 {{count}} 个思考块",

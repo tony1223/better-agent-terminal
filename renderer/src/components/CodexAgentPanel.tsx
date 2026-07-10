@@ -1161,7 +1161,7 @@ export function CodexAgentPanel({ sessionId, cwd, isActive, workspaceId, onClose
               const lastMsg = last as ClaudeMessage
               const merged: ClaudeMessage = {
                 ...lastMsg,
-                content: `${lastMsg.content.trimEnd()}\n\n${finalMsg.content.trimStart()}`,
+                content: [lastMsg.content.trimEnd(), finalMsg.content.trimStart()].filter(Boolean).join('\n\n'),
                 thinking: [lastMsg.thinking, finalMsg.thinking].filter(Boolean).join('\n\n') || undefined,
                 timestamp: finalMsg.timestamp,
               }
@@ -4161,7 +4161,7 @@ export function CodexAgentPanel({ sessionId, cwd, isActive, workspaceId, onClose
                   }}
                 >
                   <span className={`claude-tool-chevron ${isExpanded ? 'expanded' : ''}`}>&#9654;</span>
-                  <span className="claude-thinking-label">{t('claude.thinking')}</span>
+                  <span className="claude-thinking-label">{t('claude.reasoningSummary')}</span>
                 </div>
                 {isExpanded && (
                   <ReasoningSummary text={msg.thinking} cwd={markdownCwd} />
@@ -4323,7 +4323,7 @@ export function CodexAgentPanel({ sessionId, cwd, isActive, workspaceId, onClose
                   onClick={() => setShowThinking(prev => !prev)}
                 >
                   <span className={`claude-tool-chevron ${showThinking ? 'expanded' : ''}`}>&#9654;</span>
-                  <span className="claude-thinking-label">{t('claude.thinking')}{isStreaming && streamingThinking && !streamingText ? '...' : ''}</span>
+                  <span className="claude-thinking-label">{t('claude.reasoningSummary')}{isStreaming && streamingThinking && !streamingText ? '...' : ''}</span>
                 </div>
                 {showThinking && (
                   <ReasoningSummary ref={streamingThinkingRef} text={streamingThinking} cwd={markdownCwd} />

@@ -5,6 +5,7 @@ import { normalizeReasoningSummary } from '../renderer/src/utils/reasoning-summa
 async function main() {
   const source = await readFile('renderer/src/components/CodexAgentPanel.tsx', 'utf8')
   const claudeSource = await readFile('renderer/src/components/ClaudeAgentPanel.tsx', 'utf8')
+  const messageSkipSource = await readFile('renderer/src/components/messageSkip.tsx', 'utf8')
 
   assert.equal(
     source.includes('!isCodexSession && showResumeList'),
@@ -61,6 +62,34 @@ async function main() {
     true,
     'Completed, streaming, and subagent Codex reasoning should share ReasoningSummary rendering',
   )
+  assert.equal(
+    (source.match(/t\('claude\.reasoningSummary'\)/g) || []).length >= 2,
+    true,
+    'Completed and streaming Codex reasoning should be labelled as a summary, not raw thinking',
+  )
+  assert.equal(
+    source.includes("content: [lastMsg.content.trimEnd(), finalMsg.content.trimStart()].filter(Boolean).join('\\n\\n')"),
+    true,
+    'A reasoning-only timeline message should merge with an immediately following answer without leading blank lines',
+  )
+  assert.equal(
+    messageSkipSource.includes("tool: 'claude.hiddenTools'"),
+    true,
+    'Filtered tool rows should say hidden because their calls still executed',
+  )
+  const localeExpectations = {
+    en: '{{count}} tools hidden',
+    'zh-TW': '已隱藏 {{count}} 個工具',
+    'zh-CN': '已隐藏 {{count}} 个工具',
+    ja: '{{count}}件のツールを非表示',
+  } as const
+  for (const [locale, expected] of Object.entries(localeExpectations)) {
+    const translations = JSON.parse(await readFile(`renderer/src/locales/${locale}.json`, 'utf8')) as {
+      claude: { hiddenTools?: string; reasoningSummary?: string }
+    }
+    assert.equal(translations.claude.hiddenTools, expected, `${locale} should clarify that filtered tools are hidden`)
+    assert.ok(translations.claude.reasoningSummary, `${locale} should label Codex reasoning summaries explicitly`)
+  }
   for (const [name, panelSource] of [['Codex', source], ['Claude', claudeSource]] as const) {
     assert.match(
       panelSource,

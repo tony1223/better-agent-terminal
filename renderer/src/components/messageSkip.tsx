@@ -14,7 +14,7 @@ export interface MessageFilterFlags {
 export type HiddenKind = 'tool' | 'you' | 'message' | 'thinking'
 
 const SKIP_LABEL_KEY: Record<HiddenKind, string> = {
-  tool: 'claude.skippedTools',
+  tool: 'claude.hiddenTools',
   you: 'claude.skippedUser',
   message: 'claude.skippedMessages',
   thinking: 'claude.skippedThinking',
@@ -41,7 +41,8 @@ export function classifyHiddenKind(item: StreamItem, f: MessageFilterFlags): Hid
 }
 
 // Muted timeline row standing in for a contiguous run of filtered-out items of
-// a single kind, e.g. "3 tools skipped".
+// a single kind, e.g. "3 tools hidden". The tools still executed; only their
+// timeline rows are hidden by the presentation filter.
 function SkippedRunRow({ kind, count }: { kind: HiddenKind; count: number }) {
   const { t } = useTranslation()
   return (

@@ -477,6 +477,7 @@
 
   "claude": {
     "thinking": "Thinking",
+    "reasoningSummary": "Reasoning summary",
     "turnWorking": "Working",
     "turnResponding": "Responding",
     "turnQuiet": "No new events for {{quiet}}s — the agent may still be on a long step ({{elapsed}}s total)",
@@ -486,6 +487,7 @@
     "filterTool": "Tool",
     "filterThinking": "Thinking",
     "skippedTools": "{{count}} tools skipped",
+    "hiddenTools": "{{count}} tools hidden",
     "skippedUser": "{{count}} user messages skipped",
     "skippedMessages": "{{count}} messages skipped",
     "skippedThinking": "{{count}} thinking blocks skipped",
