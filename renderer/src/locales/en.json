@@ -10,6 +10,7 @@
     "import": "Import",
     "reset": "Reset",
     "create": "Create",
+    "retry": "Retry",
     "loading": "Loading...",
     "preview": "Preview"
   },
@@ -19,6 +20,8 @@
     "workspaceNotFoundDesc": "This detached workspace may have been removed.",
     "welcome": "Welcome to Better Agent Terminal",
     "welcomeHint": "Click \"+ Add Workspace\" to get started",
+    "loadingProfile": "Loading profile…",
+    "remoteConnecting": "Connecting to remote profile…",
     "remoteConnectionFailed": "Remote connection failed: {{error}}",
     "remoteConnectionFailedFallback": "Remote connection failed: {{error}}\nSwitching back to local profile.",
     "remoteMissingInfo": "Remote profile is missing connection info.",

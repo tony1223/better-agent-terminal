@@ -261,6 +261,66 @@
   margin-bottom: 8px;
 }
 
+.profile-startup-state {
+  gap: 10px;
+  padding: 32px;
+  text-align: center;
+}
+
+.profile-startup-state h2,
+.profile-startup-state p {
+  margin: 0;
+}
+
+.profile-startup-target {
+  color: var(--text-primary);
+  font-family: monospace;
+}
+
+.profile-startup-error {
+  max-width: 680px;
+  color: #e5534b;
+  white-space: pre-wrap;
+}
+
+.profile-startup-spinner {
+  width: 24px;
+  height: 24px;
+  border: 2px solid var(--border-color);
+  border-top-color: var(--accent-color);
+  border-radius: 50%;
+  animation: profile-startup-spin 0.8s linear infinite;
+}
+
+.profile-startup-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.profile-startup-button {
+  padding: 7px 16px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.profile-startup-button:hover {
+  background: var(--bg-hover);
+}
+
+.profile-startup-button.primary {
+  border-color: var(--accent-color);
+  background: var(--accent-color);
+  color: #fff;
+}
+
+@keyframes profile-startup-spin {
+  to { transform: rotate(360deg); }
+}
+
 /* Workspace View */
 .workspace-view {
   flex: 1;

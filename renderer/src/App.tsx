@@ -65,6 +65,12 @@ type ProfileWindowCloseRequest = {
   windowCount: number
 }
 
+type ProfileStartupState =
+  | { phase: 'loading' }
+  | { phase: 'connecting'; target: string }
+  | { phase: 'ready' }
+  | { phase: 'error'; target: string; message: string }
+
 // Compute parent of a path, supporting both POSIX and Windows separators.
 // Returns the input unchanged if at filesystem root.
 function parentPath(p: string): string {
@@ -152,6 +158,7 @@ export default function App() {
   // can be scoped to the right host connection.
   const [activeRemoteOrigin, setActiveRemoteOrigin] = useState<string | null>(null)
   const isRemoteConnected = activeProfileIsRemote && remoteClientConnected
+  const [profileStartup, setProfileStartup] = useState<ProfileStartupState>({ phase: 'loading' })
   const [appNotification, setAppNotification] = useState<string | null>(null)
   const [profileWindowCloseRequest, setProfileWindowCloseRequest] = useState<ProfileWindowCloseRequest | null>(null)
   const [envDialogWorkspaceId, setEnvDialogWorkspaceId] = useState<string | null>(null)
@@ -510,6 +517,7 @@ export default function App() {
     dlog(`[startup] App useEffect fired: +${Date.now() - htmlT0}ms from HTML`)
     const initProfile = async () => {
       const t0 = performance.now()
+      let remoteStartupTarget: string | null = null
       try {
         const initWindowId = currentWindowIdRef.current || await host.app.getWindowId().catch(() => null)
         if (initWindowId) {
@@ -601,8 +609,24 @@ export default function App() {
         }
 
         if (active?.type === 'remote' && active.remoteHost && active.remoteToken && active.remoteFingerprint) {
+          const remoteProfileId = active.remoteProfileId || 'default'
+          const remoteOrigin = `${active.remoteHost}:${active.remotePort || 9876}`
+          const remoteDisplayName = (typeof active.remoteProfileName === 'string' && active.remoteProfileName.trim())
+            ? active.remoteProfileName.trim()
+            : active.name
+          remoteStartupTarget = `${remoteDisplayName} (${remoteOrigin} → ${remoteProfileId})`
+          // Mark the intended ownership before dialing. Until this connection is
+          // ready the renderer must not expose workspaceStore's process-local
+          // default snapshot, which makes a stalled remote dial look local.
+          setActiveProfileName(remoteDisplayName)
+          setActiveProfileIsRemote(true)
+          setActiveProfileId(active.id)
+          setActiveRemoteProfileId(remoteProfileId)
+          setActiveRemoteOrigin(remoteOrigin)
+          setProfileStartup({ phase: 'connecting', target: remoteStartupTarget })
           // Try connecting to remote
           const tRemote = performance.now()
+          dlog(`[init] remote.connect start host=${remoteOrigin} profile=${remoteProfileId}`)
           const connectResult = await host.remote.connect(
             active.remoteHost,
             active.remotePort || 9876,
@@ -616,12 +640,13 @@ export default function App() {
             // leaving only an unrelated "not connected" unhandledrejection in
             // the log). Logged for every path, including the local fallback.
             dlog(`[init] remote.connect failed host=${active.remoteHost}:${active.remotePort || 9876} error=${String((connectResult as { error?: unknown }).error)}`)
-            // A remote connection that fails to dial should not silently become a
-            // local window (the "blank bat window" symptom) — surface why, then
-            // close this window. The startup safety-net (above) guarantees a local
-            // window remains, so this never leaves the app with zero windows.
-            setAppNotification(t('app.remoteConnectionFailed', { error: connectResult.error }))
-            setTimeout(() => { try { window.close() } catch { /* window already gone */ } }, 2000)
+            // Keep the reason visible. Closing this window automatically after
+            // two seconds made a failed dial indistinguishable from a routing bug.
+            setProfileStartup({
+              phase: 'error',
+              target: remoteStartupTarget,
+              message: t('app.remoteConnectionFailed', { error: connectResult.error }),
+            })
             return
           } else {
             // Scope host workspace:reload broadcasts to the profile we're viewing.
@@ -635,9 +660,6 @@ export default function App() {
             // the alias at selection time) so the title/sidebar reflect which
             // remote profile this is — not the local alias name, which can collide
             // with an unrelated local profile and read as if it were local.
-            const remoteDisplayName = (typeof active.remoteProfileName === 'string' && active.remoteProfileName.trim())
-              ? active.remoteProfileName.trim()
-              : active.name
             setActiveProfileName(`${remoteDisplayName}:${winIdx}`)
             setActiveProfileIsRemote(true)
             setActiveProfileId(active.id)
@@ -665,11 +687,17 @@ export default function App() {
             reconnectRef.current = { inFlight: false, backoff: RECONNECT_BACKOFF_MIN, nextAt: 0 }
           }
         } else if (active?.type === 'remote') {
-          // Remote profile missing connection info — close this window instead of
-          // silently degrading to local. The startup safety-net keeps a local
-          // window around.
-          setAppNotification(t('app.remoteMissingInfo'))
-          setTimeout(() => { try { window.close() } catch { /* window already gone */ } }, 2000)
+          // Fail closed instead of silently degrading to a local profile. Keep
+          // the error visible so the user can retry or deliberately close it.
+          remoteStartupTarget = active.name
+          setActiveProfileName(active.name)
+          setActiveProfileIsRemote(true)
+          setActiveProfileId(active.id)
+          setProfileStartup({
+            phase: 'error',
+            target: active.name,
+            message: t('app.remoteMissingInfo'),
+          })
           return
         } else if (active) {
           // For local profiles opened in a new window, load the profile snapshot
@@ -744,13 +772,27 @@ export default function App() {
             : ''
           dlog(`[init] workspace state workspaces=${loaded.workspaces.length} terminals=${loaded.terminals.length} activeWs=${loaded.activeWorkspaceId || 'none'} focused=${loaded.focusedTerminalId || 'none'} activeTerm=${loaded.activeTerminalId || 'none'} activeTerms=[${activeTerms}]`)
         }
+        setProfileStartup({ phase: 'ready' })
       } catch (e) {
-        console.error('Failed to initialize profile:', e)
+        const error = e instanceof Error ? e.message : String(e)
+        void host.debug.log('[init] profile initialization failed', {
+          error,
+          remoteTarget: remoteStartupTarget,
+        }).catch(() => {})
+        if (remoteStartupTarget) {
+          setProfileStartup({
+            phase: 'error',
+            target: remoteStartupTarget,
+            message: t('app.remoteConnectionFailed', { error }),
+          })
+          return
+        }
         // Ensure workspaces still load even if profile init fails
         await settingsStore.load()
         const savedLang = settingsStore.getSettings().language || 'en'
         if (i18next.language !== savedLang) i18next.changeLanguage(savedLang)
         await workspaceStore.load()
+        setProfileStartup({ phase: 'ready' })
       }
       dlog(`[init] total initProfile: ${(performance.now() - t0).toFixed(0)}ms`)
       dlog(`[startup] app ready (initProfile done): +${Date.now() - htmlT0}ms from HTML`)
@@ -1068,6 +1110,51 @@ export default function App() {
     lastRenderSummaryRef.current = summary
     void host.debug.log(`[App] render ${summary}`)
   }, [visibleWorkspaces.length, mountedWorkspaces, state.activeWorkspaceId, state.activeTerminalId, state.focusedTerminalId, state.terminals])
+
+  // Never render process-local workspace state while a remote profile is still
+  // dialing. A stalled target named "default" previously exposed the local
+  // default workspace and looked like a profile routing collision.
+  if (profileStartup.phase !== 'ready') {
+    const failed = profileStartup.phase === 'error'
+    const target = profileStartup.phase === 'loading' ? null : profileStartup.target
+    return (
+      <div className="app">
+        <main className="main-content" style={{ width: '100%' }}>
+          <div className="empty-state profile-startup-state" role={failed ? 'alert' : 'status'} aria-live="polite">
+            {!failed && <div className="profile-startup-spinner" aria-hidden="true" />}
+            <h2>
+              {profileStartup.phase === 'loading'
+                ? t('app.loadingProfile')
+                : failed
+                  ? t('profiles.connectionFailed')
+                  : t('app.remoteConnecting')}
+            </h2>
+            {target && <p className="profile-startup-target">{target}</p>}
+            {failed && <p className="profile-startup-error">{profileStartup.message}</p>}
+            {failed && (
+              <div className="profile-startup-actions">
+                <button className="profile-startup-button primary" onClick={() => window.location.reload()}>
+                  {t('common.retry')}
+                </button>
+                <button className="profile-startup-button" onClick={() => window.close()}>
+                  {t('common.close')}
+                </button>
+              </div>
+            )}
+          </div>
+        </main>
+        {profileWindowCloseRequest && (
+          <ProfileWindowCloseDialog
+            request={profileWindowCloseRequest}
+            profileName={activeProfileName.replace(/:\d+$/, '')}
+            onTemporaryClose={() => resolveProfileWindowClose('temporary')}
+            onRemoveFromProfile={() => resolveProfileWindowClose('removeFromProfile')}
+            onCancel={() => resolveProfileWindowClose('cancel')}
+          />
+        )}
+      </div>
+    )
+  }
 
   // Detached window mode — render only that workspace, no sidebar
   if (detachedWorkspaceId) {

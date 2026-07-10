@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::io;
-use std::net::{IpAddr, TcpStream};
+use std::net::{IpAddr, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
@@ -883,6 +883,53 @@ fn load_or_create_client_device_id(app: &HostContext) -> Option<String> {
     Some(id)
 }
 
+fn connect_tcp_with_timeout(host: &str, port: u16, timeout: Duration) -> Result<TcpStream, String> {
+    let addresses = (host, port)
+        .to_socket_addrs()
+        .map_err(|err| format!("remote TCP address resolution failed for {host}:{port}: {err}"))?
+        .collect::<Vec<_>>();
+    if addresses.is_empty() {
+        return Err(format!(
+            "remote TCP address resolution returned no addresses for {host}:{port}"
+        ));
+    }
+
+    // TcpStream::connect delegates timeout policy to the OS. An unreachable LAN
+    // address can therefore leave a newly opened remote-profile window looking
+    // like a local window for tens of seconds. Share one explicit deadline across
+    // all resolved addresses so startup always reaches a useful error state.
+    let started = Instant::now();
+    let mut last_error = None;
+    for address in addresses {
+        let remaining = timeout.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            break;
+        }
+        match TcpStream::connect_timeout(&address, remaining) {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last_error = Some(error),
+        }
+    }
+
+    if started.elapsed() >= timeout
+        || last_error
+            .as_ref()
+            .is_some_and(|error| error.kind() == io::ErrorKind::TimedOut)
+    {
+        return Err(format!(
+            "remote TCP connect timed out after {}s for {host}:{port}",
+            timeout.as_secs()
+        ));
+    }
+
+    Err(format!(
+        "remote TCP connect failed for {host}:{port}: {}",
+        last_error
+            .map(|error| error.to_string())
+            .unwrap_or_else(|| "unknown connection error".to_string())
+    ))
+}
+
 fn connect_socket(
     host: &str,
     port: u16,
@@ -896,8 +943,7 @@ fn connect_socket(
     if pinned_fingerprint.is_empty() {
         return Err("fingerprint is required for TLS pinning".to_string());
     }
-    let tcp = TcpStream::connect((host, port))
-        .map_err(|err| format!("remote TCP connect failed: {err}"))?;
+    let tcp = connect_tcp_with_timeout(host, port, AUTH_TIMEOUT)?;
     tcp.set_read_timeout(Some(AUTH_TIMEOUT))
         .map_err(|err| format!("remote TCP timeout failed: {err}"))?;
     tcp.set_write_timeout(Some(AUTH_TIMEOUT))
@@ -1222,6 +1268,28 @@ mod tests {
         assert!(validate_connection_fields("localhost", 0, "token", "AA").is_err());
         assert!(validate_connection_fields("localhost", 9876, "", "AA").is_err());
         assert!(validate_connection_fields("localhost", 9876, "token", "").is_err());
+    }
+
+    #[test]
+    fn tcp_connect_with_timeout_reaches_available_listener() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let stream = connect_tcp_with_timeout("127.0.0.1", port, Duration::from_secs(1))
+            .expect("local listener should accept a bounded TCP dial");
+
+        assert_eq!(stream.peer_addr().unwrap().port(), port);
+    }
+
+    #[test]
+    fn tcp_connect_with_timeout_rejects_expired_deadline() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let error = connect_tcp_with_timeout("127.0.0.1", port, Duration::ZERO)
+            .expect_err("an expired deadline must not fall back to an unbounded OS connect");
+
+        assert!(error.contains("timed out after 0s"), "got: {error}");
     }
 
     #[test]

@@ -10,6 +10,7 @@
     "import": "匯入",
     "reset": "重設",
     "create": "建立",
+    "retry": "重試",
     "loading": "載入中...",
     "preview": "預覽"
   },
@@ -19,6 +20,8 @@
     "workspaceNotFoundDesc": "此分離的工作區可能已被移除。",
     "welcome": "歡迎使用 Better Agent Terminal",
     "welcomeHint": "點擊「+ 新增工作區」開始使用",
+    "loadingProfile": "正在載入設定檔…",
+    "remoteConnecting": "正在連線至遠端設定檔…",
     "remoteConnectionFailed": "遠端連線失敗：{{error}}",
     "remoteConnectionFailedFallback": "遠端連線失敗：{{error}}\n正在切換回本機設定檔。",
     "remoteMissingInfo": "遠端設定檔缺少連線資訊。",
