@@ -127,9 +127,13 @@ assert.ok(
   'minimal sidecar node_modules should not contain Codex JS packages',
 )
 
-const codexRuntimeBinary = new URL(`../codex-runtime/${process.platform === 'win32' ? 'codex.exe' : 'codex'}`, import.meta.url)
+const codexExe = process.platform === 'win32' ? 'codex.exe' : 'codex'
+const codexRuntimeBinary = new URL(`../codex-runtime/bin/${codexExe}`, import.meta.url)
 const codexRuntimeInfo = await stat(codexRuntimeBinary)
 assert.ok(codexRuntimeInfo.size > 1024 * 1024, 'Codex app-server runtime should be packaged outside sidecar node_modules')
+const codexCodeModeHost = new URL(`../codex-runtime/bin/${process.platform === 'win32' ? 'codex-code-mode-host.exe' : 'codex-code-mode-host'}`, import.meta.url)
+const codexCodeModeHostInfo = await stat(codexCodeModeHost)
+assert.ok(codexCodeModeHostInfo.size > 0, 'Codex code-mode host must ship next to the codex binary')
 
 const server = join(root, 'node-sidecar', 'dist', 'server.mjs')
 const serverInfo = await stat(server)

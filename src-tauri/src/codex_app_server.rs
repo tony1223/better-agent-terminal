@@ -79,6 +79,10 @@ struct CodexConnection {
     child: Mutex<Child>,
     pid: u32,
     auth_account_id: Option<String>,
+    /// CodexBinary::identity() of the binary this app-server was spawned
+    /// with; ensure_connection recycles the connection when a different
+    /// binary resolves (managed runtime installed after a fallback spawn).
+    binary_identity: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -478,6 +482,19 @@ enum CodexBinary {
     Wrapper(String),
 }
 
+impl CodexBinary {
+    /// Stable identity of a resolution result, recorded on the connection at
+    /// spawn time so ensure_connection can tell when a *different* binary
+    /// would resolve today (e.g. the managed runtime finished installing
+    /// after this app-server was spawned from a PATH/npm fallback).
+    fn identity(&self) -> String {
+        match self {
+            CodexBinary::Native(path) => format!("native:{}", path.display()),
+            CodexBinary::Wrapper(command_name) => format!("wrapper:{command_name}"),
+        }
+    }
+}
+
 fn codex_exe_name() -> &'static str {
     if cfg!(windows) {
         "codex.exe"
@@ -523,11 +540,17 @@ fn codex_runtime_key() -> Option<&'static str> {
 }
 
 fn managed_codex_candidate(app: &HostContext) -> Option<PathBuf> {
+    // Managed installs mirror the npm package layout (bin/ + codex-package.json
+    // + codex-resources/ + codex-path/). Legacy flat installs (codex at the key
+    // root) are deliberately not resolved: they lack the code-mode-host and
+    // sandbox helper binaries, and skipping them lets the auto-installer
+    // replace them with a complete layout.
     let path = app.data_dir_opt()?
         .join("runtimes")
         .join("codex")
         .join(crate::runtime_catalog::codex_version())
         .join(codex_runtime_key()?)
+        .join("bin")
         .join(codex_exe_name());
     path.is_file().then_some(path)
 }
@@ -563,13 +586,20 @@ fn bundled_codex_candidate(base: &Path) -> Option<PathBuf> {
             .join("vendor")
             .join(triple),
     ];
-    std::iter::once(base.join("codex-runtime").join(exe))
-        .chain(
-            vendor_roots
-                .iter()
-                .flat_map(|root| [root.join("bin").join(exe), root.join("codex").join(exe)]),
-        )
-        .find(|path| path.is_file())
+    // codex-runtime/bin/<exe> is the package layout current bundles ship;
+    // codex-runtime/<exe> is the legacy flat layout of older bundles (kept so
+    // an already-deployed bat-server bundle keeps resolving after an update).
+    [
+        base.join("codex-runtime").join("bin").join(exe),
+        base.join("codex-runtime").join(exe),
+    ]
+    .into_iter()
+    .chain(
+        vendor_roots
+            .iter()
+            .flat_map(|root| [root.join("bin").join(exe), root.join("codex").join(exe)]),
+    )
+    .find(|path| path.is_file())
 }
 
 fn find_codex_on_path() -> Option<PathBuf> {
@@ -1135,9 +1165,13 @@ fn run_codex_login(
 }
 
 fn codex_path_dir_for_binary(binary: &Path) -> Option<PathBuf> {
+    // Package layout keeps the exe in bin/ with codex-path/ as a sibling of
+    // bin/ (i.e. under the grandparent). "path" is the legacy flat-layout
+    // name; npm vendor trees also use codex-path/ next to the exe dir.
     let parent = binary.parent()?;
-    let mut candidates = vec![parent.join("path")];
+    let mut candidates = vec![parent.join("codex-path"), parent.join("path")];
     if let Some(grandparent) = parent.parent() {
+        candidates.push(grandparent.join("codex-path"));
         candidates.push(grandparent.join("path"));
     }
     for candidate in candidates {
@@ -3382,6 +3416,7 @@ impl CodexAppServerState {
             .map_err(|_| "codex connection lock poisoned")?
             .clone()
         {
+            let resolved_identity = resolve_codex_binary(app).identity();
             if codex_unified_enabled(app) && existing.auth_account_id != current_auth_id {
                 log_codex_global(
                     app,
@@ -3393,11 +3428,38 @@ impl CodexAppServerState {
                     ),
                 );
                 self.drop_connection(app, "connection-auth-mismatch");
-            } else {
+            } else if existing.binary_identity != resolved_identity
+                && !self.any_session_running()
+            {
+                // A different codex binary resolves now — typically the managed
+                // runtime finished installing after this app-server was spawned
+                // from a PATH/npm fallback (which can be releases old and reject
+                // newer models). Recycle while no turn is in flight so the next
+                // request spawns the catalog-pinned CLI instead of staying on
+                // the stale binary until an app restart.
                 log_codex_global(
                     app,
-                    format!("ensure_connection reuse existing pid={}", existing.pid),
+                    format!(
+                        "ensure_connection dropping pid={} binary changed [{}] -> [{}]",
+                        existing.pid, existing.binary_identity, resolved_identity
+                    ),
                 );
+                self.drop_connection(app, "binary-changed");
+            } else {
+                if existing.binary_identity != resolved_identity {
+                    log_codex_global(
+                        app,
+                        format!(
+                            "ensure_connection reuse pid={} with stale binary [{}] (now resolves [{}]); turn in flight, recycling deferred",
+                            existing.pid, existing.binary_identity, resolved_identity
+                        ),
+                    );
+                } else {
+                    log_codex_global(
+                        app,
+                        format!("ensure_connection reuse existing pid={}", existing.pid),
+                    );
+                }
                 return Ok(existing);
             }
         }
@@ -3422,6 +3484,7 @@ impl CodexAppServerState {
                 spawn_auth_summary.as_deref().unwrap_or("non-unified")
             ),
         );
+        let binary_identity = resolve_codex_binary(app).identity();
         let mut child = build_codex_command(app)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -3429,7 +3492,10 @@ impl CodexAppServerState {
             .spawn()
             .map_err(|err| format!("failed to start codex app-server: {err}"))?;
         let pid = child.id();
-        log_codex_global(app, format!("codex app-server spawned pid={pid}"));
+        log_codex_global(
+            app,
+            format!("codex app-server spawned pid={pid} binary=[{binary_identity}]"),
+        );
         let stdin = child
             .stdin
             .take()
@@ -3446,6 +3512,7 @@ impl CodexAppServerState {
             child: Mutex::new(child),
             pid,
             auth_account_id: spawn_auth_id,
+            binary_identity,
         });
 
         let app_for_reader = app.clone();
@@ -6020,6 +6087,28 @@ mod tests {
         let path_dir = runtime.join("path");
         fs::create_dir_all(&path_dir).expect("create codex path dir");
         let binary = runtime.join(codex_exe_name());
+        fs::write(&binary, "").expect("write fake codex binary");
+
+        assert_eq!(
+            codex_path_dir_for_binary(&binary).as_deref(),
+            Some(path_dir.as_path())
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn codex_path_dir_detects_package_layout_runtime_tools() {
+        let root = env::temp_dir().join(format!(
+            "bat-codex-package-layout-path-{}-{}",
+            std::process::id(),
+            now_millis()
+        ));
+        let runtime = root.join("codex-runtime");
+        let bin_dir = runtime.join("bin");
+        let path_dir = runtime.join("codex-path");
+        fs::create_dir_all(&bin_dir).expect("create codex bin dir");
+        fs::create_dir_all(&path_dir).expect("create codex-path dir");
+        let binary = bin_dir.join(codex_exe_name());
         fs::write(&binary, "").expect("write fake codex binary");
 
         assert_eq!(

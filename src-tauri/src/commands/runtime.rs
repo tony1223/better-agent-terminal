@@ -340,11 +340,28 @@ fn first_ready(paths: Vec<PathBuf>, version_args: &[&str]) -> Option<PathBuf> {
         .find(|path| candidate_is_ready(path, version_args))
 }
 
+/// Numeric sort key for a version directory name ("0.144.0" -> [0, 144, 0]).
+/// Non-digit runs just split segments, so odd suffixes still order
+/// deterministically instead of falling back to filesystem order.
+fn version_dir_sort_key(name: &str) -> Vec<u64> {
+    name.split(|c: char| !c.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .map(|part| part.parse::<u64>().unwrap_or(0))
+        .collect()
+}
+
+/// `layers` lists the subdirectories (relative to `<version>/<key>/`) probed
+/// for the executable; `""` means directly inside the key dir. Codex passes
+/// only `["bin"]` on purpose: legacy flat installs (codex.exe at the key root)
+/// are missing the code-mode-host / sandbox helper binaries, and hiding them
+/// here flips the status to `missing` so the auto-installer replaces them with
+/// the full package layout.
 fn scan_managed_runtime(
     app: &AppHandle,
     family: &str,
+    pinned_version: &str,
     exe_names: &[String],
-    extra_layers: &[&str],
+    layers: &[&str],
     version_args: &[&str],
 ) -> Option<PathBuf> {
     let root = runtimes_dir(app).ok()?.join(family);
@@ -356,21 +373,35 @@ fn scan_managed_runtime(
     } else {
         vec![runtime_key.to_string()]
     };
-    let versions = fs::read_dir(root).ok()?;
-    for version in versions.flatten() {
-        let version_path = version.path();
-        if !version_path.is_dir() {
-            continue;
-        }
+    // Catalog-pinned version first, then newest-to-oldest. read_dir order is
+    // filesystem-dependent (lexicographic on NTFS), which made this report
+    // the OLDEST leftover install (e.g. codex 0.135.0) after every upgrade.
+    let mut version_dirs: Vec<(String, PathBuf)> = fs::read_dir(root)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let name = path.file_name()?.to_str()?.to_string();
+            path.is_dir().then_some((name, path))
+        })
+        .collect();
+    version_dirs.sort_by(|a, b| {
+        let a_pinned = a.0 == pinned_version;
+        let b_pinned = b.0 == pinned_version;
+        b_pinned
+            .cmp(&a_pinned)
+            .then_with(|| version_dir_sort_key(&b.0).cmp(&version_dir_sort_key(&a.0)))
+    });
+    for (_, version_path) in version_dirs {
         for key in &alt_keys {
             for name in exe_names {
                 let base = version_path.join(key);
-                let direct = base.join(name);
-                if candidate_is_ready(&direct, version_args) {
-                    return Some(direct);
-                }
-                for layer in extra_layers {
-                    let candidate = base.join(layer).join(name);
+                for layer in layers {
+                    let candidate = if layer.is_empty() {
+                        base.join(name)
+                    } else {
+                        base.join(layer).join(name)
+                    };
                     if candidate_is_ready(&candidate, version_args) {
                         return Some(candidate);
                     }
@@ -385,7 +416,14 @@ fn resolve_node_status(app: &AppHandle) -> Result<RuntimeItemStatus, String> {
     let exe = exe_name("node");
     let exe_names = vec![exe.clone()];
     let can_install = node_catalog_entry().is_some();
-    if let Some(path) = scan_managed_runtime(app, "node", &exe_names, &["bin"], &["--version"]) {
+    if let Some(path) = scan_managed_runtime(
+        app,
+        "node",
+        runtime_catalog::node_version(),
+        &exe_names,
+        &["", "bin"],
+        &["--version"],
+    ) {
         return Ok(ready_status(
             "node",
             "managed",
@@ -453,7 +491,14 @@ fn resolve_codex_status(app: &AppHandle) -> Result<RuntimeItemStatus, String> {
     let exe = exe_name("codex");
     let exe_names = vec![exe.clone()];
     let can_install = codex_catalog_entry().is_some();
-    if let Some(path) = scan_managed_runtime(app, "codex", &exe_names, &[], &["--version"]) {
+    if let Some(path) = scan_managed_runtime(
+        app,
+        "codex",
+        runtime_catalog::codex_version(),
+        &exe_names,
+        &["bin"],
+        &["--version"],
+    ) {
         return Ok(ready_status(
             "codex",
             "managed",
@@ -520,40 +565,44 @@ fn bundled_codex_candidate_in_base(base: &Path) -> Option<PathBuf> {
     let triple = codex_target_triple()?;
     let platform_pkg = codex_platform_package()?;
     let exe = exe_name("codex");
-    let candidates = [
-        base.join("codex-runtime").join(&exe),
+    let vendor_roots = [
         base.join("node-sidecar")
             .join("node_modules")
             .join("@openai")
             .join(platform_pkg)
             .join("vendor")
-            .join(triple)
-            .join("codex")
-            .join(&exe),
+            .join(triple),
         base.join("node-sidecar")
             .join("node_modules")
             .join("@openai")
             .join("codex")
             .join("vendor")
-            .join(triple)
-            .join("codex")
-            .join(&exe),
+            .join(triple),
         base.join("node_modules")
             .join("@openai")
             .join(platform_pkg)
             .join("vendor")
-            .join(triple)
-            .join("codex")
-            .join(&exe),
+            .join(triple),
         base.join("node_modules")
             .join("@openai")
             .join("codex")
             .join("vendor")
-            .join(triple)
-            .join("codex")
-            .join(&exe),
+            .join(triple),
     ];
-    first_ready(candidates.into_iter().collect(), &["--version"])
+    // codex-runtime/bin/<exe> is the package layout current bundles ship;
+    // codex-runtime/<exe> is the legacy flat layout of older bundles.
+    let candidates: Vec<PathBuf> = [
+        base.join("codex-runtime").join("bin").join(&exe),
+        base.join("codex-runtime").join(&exe),
+    ]
+    .into_iter()
+    .chain(
+        vendor_roots
+            .iter()
+            .flat_map(|root| [root.join("bin").join(&exe), root.join("codex").join(&exe)]),
+    )
+    .collect();
+    first_ready(candidates, &["--version"])
 }
 
 fn resolve_claude_status(app: &AppHandle) -> Result<RuntimeItemStatus, String> {
@@ -742,25 +791,15 @@ fn install_managed_node(app: &AppHandle) -> Result<PathBuf, String> {
     replace_runtime_dir(&tmp_final, &final_dir)?;
     let _ = fs::remove_dir_all(&tmp_root);
     write_runtime_manifest(app, "node", runtime_catalog::node_version(), &url)?;
+    crate::runtime_install::prune_stale_runtime_versions(
+        &runtimes_dir(app)?.join("node"),
+        runtime_catalog::node_version(),
+    );
     Ok(final_path)
 }
 
 fn codex_catalog_entry() -> Option<&'static runtime_catalog::CodexPlatform> {
     runtime_catalog::codex_platform(runtime_key()?)
-}
-
-fn managed_codex_runtime_dir(app: &AppHandle) -> Option<PathBuf> {
-    Some(
-        runtimes_dir(app)
-            .ok()?
-            .join("codex")
-            .join(runtime_catalog::codex_version())
-            .join(runtime_key()?),
-    )
-}
-
-fn managed_codex_cli_path(app: &AppHandle) -> Option<PathBuf> {
-    Some(managed_codex_runtime_dir(app)?.join(exe_name("codex")))
 }
 
 fn install_managed_codex(app: &AppHandle) -> Result<PathBuf, String> {
@@ -771,65 +810,15 @@ fn install_managed_codex(app: &AppHandle) -> Result<PathBuf, String> {
             std::env::consts::ARCH
         )
     })?;
-    let final_dir = managed_codex_runtime_dir(app)
-        .ok_or_else(|| "could not resolve Codex runtime dir".to_string())?;
-    let final_path = managed_codex_cli_path(app)
-        .ok_or_else(|| "could not resolve Codex runtime path".to_string())?;
-    if candidate_is_ready(&final_path, &["--version"]) {
-        return Ok(final_path);
-    }
-
+    // Download / verify / extract / place lives in the tauri-free core so the
+    // desktop installer and the headless bat-server can never drift apart
+    // again (both used to extract only codex + rg and miss the code-mode-host
+    // and sandbox helper binaries the 0.144+ packages ship).
+    let final_path = crate::runtime_install::install_codex(&runtimes_dir(app)?)?;
     let url = format!(
         "https://registry.npmjs.org/@openai/codex/-/codex-{}.tgz",
         entry.npm_version
     );
-    let archive = download_runtime_archive(&url)?;
-    verify_sri_sha512(&archive, &entry.integrity)?;
-    let tar = gunzip(&archive)?;
-    let triple =
-        codex_target_triple().ok_or_else(|| "could not resolve Codex target triple".to_string())?;
-    let exe = exe_name("codex");
-    let rg = exe_name("rg");
-    let binary = read_first_tar_entry(
-        &tar,
-        &[
-            format!("package/vendor/{triple}/bin/{exe}"),
-            format!("package/vendor/{triple}/codex/{exe}"),
-        ],
-    )
-    .ok_or_else(|| format!("Codex native package missing vendor/{triple}/{exe}"))?;
-    let ripgrep = read_first_tar_entry(
-        &tar,
-        &[
-            format!("package/vendor/{triple}/codex-path/{rg}"),
-            format!("package/vendor/{triple}/path/{rg}"),
-        ],
-    )
-    .ok_or_else(|| format!("Codex native package missing vendor/{triple}/{rg}"))?;
-
-    let tmp_root = runtimes_dir(app)?
-        .join(".tmp")
-        .join(format!("codex-{}", install_nonce()));
-    let tmp_final = tmp_root.join("final");
-    let tmp_path = tmp_final.join(&exe);
-    let tmp_rg = tmp_final.join("path").join(&rg);
-    let _ = fs::remove_dir_all(&tmp_root);
-    fs::create_dir_all(
-        tmp_rg
-            .parent()
-            .ok_or_else(|| "invalid Codex rg path".to_string())?,
-    )
-    .map_err(|err| err.to_string())?;
-    fs::write(&tmp_path, binary).map_err(|err| err.to_string())?;
-    fs::write(&tmp_rg, ripgrep).map_err(|err| err.to_string())?;
-    make_executable(&tmp_path)?;
-    make_executable(&tmp_rg)?;
-    if !candidate_is_ready(&tmp_path, &["--version"]) {
-        let _ = fs::remove_dir_all(&tmp_root);
-        return Err("installed Codex binary failed --version check".into());
-    }
-    replace_runtime_dir(&tmp_final, &final_dir)?;
-    let _ = fs::remove_dir_all(&tmp_root);
     write_runtime_manifest(app, "codex", runtime_catalog::codex_version(), &url)?;
     Ok(final_path)
 }
@@ -888,6 +877,10 @@ fn install_managed_claude_cli(app: &AppHandle) -> Result<PathBuf, String> {
 
     replace_runtime_dir(&tmp_dir, &final_dir)?;
     write_runtime_manifest(app, "claude", runtime_catalog::claude_version(), &url)?;
+    crate::runtime_install::prune_stale_runtime_versions(
+        &runtimes_dir(app)?.join("claude-agent-sdk"),
+        runtime_catalog::claude_version(),
+    );
     Ok(final_path)
 }
 
@@ -1070,12 +1063,6 @@ fn read_tar_entry(tar: &[u8], wanted_name: &str) -> Option<Vec<u8>> {
         offset += size.div_ceil(512) * 512;
     }
     None
-}
-
-fn read_first_tar_entry(tar: &[u8], wanted_names: &[String]) -> Option<Vec<u8>> {
-    wanted_names
-        .iter()
-        .find_map(|wanted_name| read_tar_entry(tar, wanted_name))
 }
 
 fn tar_string(bytes: &[u8]) -> String {

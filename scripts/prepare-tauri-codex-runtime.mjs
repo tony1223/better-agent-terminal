@@ -1,8 +1,24 @@
 #!/usr/bin/env node
-// Prepare the Codex app-server executable as a Rust-owned Tauri resource.
+// Prepare the Codex app-server runtime as a Rust-owned Tauri resource.
 // The Node sidecar no longer carries @openai/codex-* native packages.
+//
+// codex-runtime/ mirrors the platform package's vendor/<triple>/ tree:
+//
+//   codex-runtime/
+//   ├── codex-package.json          (package-layout marker codex looks for)
+//   ├── bin/codex[.exe]
+//   ├── bin/codex-code-mode-host[.exe]
+//   ├── codex-path/rg[.exe]
+//   └── codex-resources/…           (sandbox helpers etc., platform-dependent)
+//
+// Codex only recognizes its package layout — and therefore only finds the
+// code-mode host, bundled ripgrep and sandbox helper binaries — when the
+// executable sits in a bin/ directory whose parent carries codex-package.json.
+// The previous flat layout (codex-runtime/codex[.exe] + path/rg) broke all of
+// those lookups, e.g. code-mode file reads failed with a missing
+// codex-code-mode-host executable.
 
-import { chmod, copyFile, mkdir, realpath, rm, stat } from 'node:fs/promises'
+import { chmod, cp, mkdir, readdir, realpath, rm, stat } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -34,28 +50,39 @@ function platformKey(platform = process.platform, arch = process.arch) {
   return `${platform}-${arch}`
 }
 
-export function codexRuntimeLayoutCandidates(codexSource, codexTriple, exeName, rgName) {
-  const vendorRoot = join(codexSource, 'vendor', codexTriple)
-  return {
-    binary: [
-      join(vendorRoot, 'bin', exeName),
-      join(vendorRoot, 'codex', exeName),
-    ],
-    ripgrep: [
-      join(vendorRoot, 'codex-path', rgName),
-      join(vendorRoot, 'path', rgName),
-    ],
+// Files the prepared runtime must contain, relative to codex-runtime/.
+export function codexRuntimeRequiredFiles(platform = process.platform) {
+  const suffix = platform === 'win32' ? '.exe' : ''
+  return [
+    join('bin', `codex${suffix}`),
+    join('bin', `codex-code-mode-host${suffix}`),
+    join('codex-path', `rg${suffix}`),
+    'codex-package.json',
+  ]
+}
+
+async function fileExists(path) {
+  try {
+    return (await stat(path)).isFile()
+  } catch {
+    return false
   }
 }
 
-async function firstExistingDirectory(candidates, label) {
+async function firstValidCodexSource(candidates, codexTriple, exeName) {
+  // A candidate is only usable when it carries the current package layout
+  // (vendor/<triple>/bin/<exe>). Stale packages from older installs can shadow
+  // the real one (e.g. a leftover root node_modules/@openai/codex-win32-x64
+  // with the pre-0.144 vendor/<triple>/codex/<exe> layout) — skip those.
   for (const candidate of candidates) {
-    try {
-      const info = await stat(candidate)
-      if (info.isDirectory()) return candidate
-    } catch { /* try next candidate */ }
+    if (await fileExists(join(candidate, 'vendor', codexTriple, 'bin', exeName))) {
+      return candidate
+    }
   }
-  throw new Error(`${label} missing; tried:\n${candidates.map(path => `  - ${path}`).join('\n')}`)
+  throw new Error(
+    `@openai Codex native package with vendor/${codexTriple}/bin/${exeName} not found; tried:\n`
+    + candidates.map(path => `  - ${path}`).join('\n'),
+  )
 }
 
 async function assertFile(path, label) {
@@ -70,14 +97,18 @@ async function assertFile(path, label) {
   }
 }
 
-async function firstExistingFile(candidates, label) {
-  for (const candidate of candidates) {
-    try {
-      const info = await stat(candidate)
-      if (info.isFile()) return candidate
-    } catch { /* try next candidate */ }
+async function chmodFilesIn(dir, mode) {
+  let entries
+  try {
+    entries = await readdir(dir, { withFileTypes: true })
+  } catch {
+    return
   }
-  throw new Error(`${label} missing; tried:\n${candidates.map(path => `  - ${path}`).join('\n')}`)
+  for (const entry of entries) {
+    if (entry.isFile()) {
+      await chmod(join(dir, entry.name), mode)
+    }
+  }
 }
 
 export async function prepareTauriCodexRuntime(options = {}) {
@@ -90,41 +121,44 @@ export async function prepareTauriCodexRuntime(options = {}) {
     throw new Error(`unsupported platform/arch for Codex runtime: ${key}`)
   }
 
-  const codexSourceCandidates = [
-    join(repoRoot, 'node_modules', '@openai', codexPackage),
-    join(repoRoot, 'node_modules', '.pnpm', 'node_modules', '@openai', codexPackage),
-  ]
+  // Prefer the platform package that sits next to the RESOLVED @openai/codex
+  // meta package — that one is version-locked to it by pnpm. The bare
+  // node_modules paths are fallbacks and may be stale.
+  const codexSourceCandidates = []
   try {
     const codexMetaPackage = dirname(rootRequire.resolve('@openai/codex/package.json'))
     const codexMetaRealPath = await realpath(codexMetaPackage)
     codexSourceCandidates.push(join(dirname(codexMetaRealPath), codexPackage))
   } catch { /* @openai/codex is not installed as a direct resolver target */ }
+  codexSourceCandidates.push(
+    join(repoRoot, 'node_modules', '.pnpm', 'node_modules', '@openai', codexPackage),
+    join(repoRoot, 'node_modules', '@openai', codexPackage),
+  )
 
-  const codexSource = await realpath(await firstExistingDirectory(codexSourceCandidates, '@openai Codex native package'))
   const exeName = platform === 'win32' ? 'codex.exe' : 'codex'
-  const rgName = platform === 'win32' ? 'rg.exe' : 'rg'
-  const sourceFiles = codexRuntimeLayoutCandidates(codexSource, codexTriple, exeName, rgName)
-  const sourceBinary = await firstExistingFile(sourceFiles.binary, '@openai Codex native binary')
-  await assertFile(sourceBinary, '@openai Codex native binary')
-  const sourceRipgrep = await firstExistingFile(sourceFiles.ripgrep, '@openai Codex vendored ripgrep')
+  const codexSource = await realpath(
+    await firstValidCodexSource(codexSourceCandidates, codexTriple, exeName),
+  )
+  const vendorRoot = join(codexSource, 'vendor', codexTriple)
 
   await rm(outputRoot, { recursive: true, force: true })
   await mkdir(outputRoot, { recursive: true })
-  const targetBinary = join(outputRoot, exeName)
-  await copyFile(sourceBinary, targetBinary)
-  const targetPathDir = join(outputRoot, 'path')
-  await mkdir(targetPathDir, { recursive: true })
-  const targetRipgrep = join(targetPathDir, rgName)
-  await copyFile(sourceRipgrep, targetRipgrep)
+  await cp(vendorRoot, outputRoot, { recursive: true })
+
+  const requiredFiles = codexRuntimeRequiredFiles(platform)
+  for (const relativePath of requiredFiles) {
+    await assertFile(join(outputRoot, relativePath), `Codex runtime file ${relativePath}`)
+  }
   if (platform !== 'win32') {
-    await chmod(targetBinary, 0o755)
-    await chmod(targetRipgrep, 0o755)
+    await chmodFilesIn(join(outputRoot, 'bin'), 0o755)
+    await chmodFilesIn(join(outputRoot, 'codex-path'), 0o755)
   }
 
   return {
     outputRoot,
-    binary: targetBinary,
-    ripgrep: targetRipgrep,
+    binary: join(outputRoot, requiredFiles[0]),
+    ripgrep: join(outputRoot, requiredFiles[2]),
+    files: requiredFiles,
     sourcePackage: `@openai/${codexPackage}`,
   }
 }

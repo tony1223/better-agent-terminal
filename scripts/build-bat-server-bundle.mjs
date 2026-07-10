@@ -10,7 +10,7 @@
 //   node-sidecar/package.json
 //   node-sidecar/node_modules/@anthropic-ai/…   (native SDK + bundled claude)
 //   node-runtime/<target>/bin/node              (find_bundled_node)
-//   codex-runtime/…                             (optional)
+//   codex-runtime/bin/codex, codex-runtime/…    (optional; npm package layout)
 //   AppRun                                       (AppImage launcher)
 //   install.sh                                   (tarball installer -> systemd)
 //

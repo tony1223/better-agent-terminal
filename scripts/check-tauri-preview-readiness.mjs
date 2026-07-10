@@ -141,14 +141,23 @@ export async function collectTauriPreviewReadiness(options = {}) {
     }
     const codexRuntimeRoot = join(root, 'codex-runtime')
     add('codex-runtime:root', await dirExists(codexRuntimeRoot), codexRuntimeRoot)
+    // Package layout (vendor/<triple>/ mirror): codex only finds its helper
+    // binaries when the executable sits in bin/ next to codex-package.json.
     const codexExeName = platform === 'win32' ? 'codex.exe' : 'codex'
-    const codexBinary = join(codexRuntimeRoot, codexExeName)
+    const codexBinary = join(codexRuntimeRoot, 'bin', codexExeName)
     const codexBinaryBytes = await fileSize(codexBinary)
     add(`codex-runtime:binary:${key}`, codexBinaryBytes > 0, `${codexBinary} (${codexBinaryBytes} bytes)`)
+    const codeModeHostName = platform === 'win32' ? 'codex-code-mode-host.exe' : 'codex-code-mode-host'
+    const codexCodeModeHost = join(codexRuntimeRoot, 'bin', codeModeHostName)
+    const codexCodeModeHostBytes = await fileSize(codexCodeModeHost)
+    add(`codex-runtime:code-mode-host:${key}`, codexCodeModeHostBytes > 0, `${codexCodeModeHost} (${codexCodeModeHostBytes} bytes)`)
     const rgName = platform === 'win32' ? 'rg.exe' : 'rg'
-    const codexRipgrep = join(codexRuntimeRoot, 'path', rgName)
+    const codexRipgrep = join(codexRuntimeRoot, 'codex-path', rgName)
     const codexRipgrepBytes = await fileSize(codexRipgrep)
     add(`codex-runtime:ripgrep:${key}`, codexRipgrepBytes > 0, `${codexRipgrep} (${codexRipgrepBytes} bytes)`)
+    const codexPackageMarker = join(codexRuntimeRoot, 'codex-package.json')
+    const codexPackageMarkerBytes = await fileSize(codexPackageMarker)
+    add(`codex-runtime:package-marker:${key}`, codexPackageMarkerBytes > 0, `${codexPackageMarker} (${codexPackageMarkerBytes} bytes)`)
 
     const runtimeRoot = join(sidecarRoot, 'runtime')
     add('runtime:root', await dirExists(runtimeRoot), runtimeRoot)

@@ -27,10 +27,9 @@ mod remote_client;
 pub mod remote_core;
 mod remote_server;
 mod runtime_catalog;
-// Headless-only: the desktop Setup UI provisions managed runtimes through
-// commands/runtime.rs (AppHandle-bound). The bat-server has no Setup UI, so it
-// self-provisions codex from this tauri-free installer on startup.
-#[cfg(not(feature = "desktop"))]
+// Tauri-free managed-runtime install core, shared by the desktop installer
+// (commands/runtime.rs delegates the codex download/extract/place to it) and
+// the headless bat-server, which self-provisions codex from it on startup.
 mod runtime_install;
 mod sidecar;
 mod subprocess;
