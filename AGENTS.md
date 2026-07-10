@@ -16,7 +16,7 @@ Follow the project guidance in `CLAUDE.md`. The most important operational notes
 - Run `pnpm exec tsc --noEmit --pretty false` for type checking.
 - Run `pnpm run compile` for the standard build check.
 - Run `pnpm run test:sidecar` when touching Node sidecar resolution or runtime startup.
-- Run `pnpm run check:tauri-rust` when touching Rust/Tauri runtime code. This uses `cargo check`; `cargo test` is not a standard gate because local Windows builds can fail before assertions with loader error `0xc0000139`.
+- Run `pnpm run check:tauri-rust` when touching Rust/Tauri runtime code. Run `pnpm run test:tauri-rust` when touching Rust behavior covered by unit tests; the Windows test harness includes the required Common Controls v6 activation manifest.
 - For local packaging verification without macOS signing/notarization, run:
   - `pnpm run tauri:build:debug`
 

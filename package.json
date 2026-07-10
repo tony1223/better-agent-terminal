@@ -53,6 +53,7 @@
     "test:tauri-compile-cache": "node tests/tauri-compile-cache.test.mjs",
     "test:bat-server-token-security": "node tests/bat-server-token-security.test.mjs",
     "check:tauri-rust": "cd src-tauri && cargo check --quiet",
+    "test:tauri-rust": "cargo test --manifest-path src-tauri/Cargo.toml --lib",
     "test:sidecar": "node node-sidecar/tests/server.test.mjs && node node-sidecar/tests/claude-channel-runtime.test.mjs && node node-sidecar/tests/claude-cli.test.mjs && node node-sidecar/tests/claude-cli-runtime.test.mjs",
     "test:tauri-bundle-prune": "node tests/prune-node-sidecar-modules.test.mjs",
     "test:tauri-resources": "node tests/check-tauri-resources.test.mjs",

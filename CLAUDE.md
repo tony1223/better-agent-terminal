@@ -20,7 +20,7 @@
   - `pnpm run compile`
   - `pnpm run test:sidecar`
   - `pnpm run check:tauri-rust`
-  - `cargo test` is intentionally not part of the standard gate because local Windows builds can fail before assertions with loader error `0xc0000139`.
+  - `pnpm run test:tauri-rust`
   - For local packaging verification without macOS signing/notarization: `pnpm run tauri:build:debug`
 
 ## Logging
