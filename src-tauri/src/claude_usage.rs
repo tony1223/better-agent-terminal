@@ -98,7 +98,10 @@ fn normalize_window(bucket: Option<&Value>) -> Option<Value> {
     let obj = bucket?.as_object()?;
     // Endpoint reports utilization as 0-100; the SDK's rate_limit_event uses
     // 0-1. Normalize to 0-1 so both sources feed the same renderer state.
-    let utilization = obj.get("utilization").and_then(Value::as_f64).map(|u| u / 100.0);
+    let utilization = obj
+        .get("utilization")
+        .and_then(Value::as_f64)
+        .map(|u| u / 100.0);
     // resets_at stays an ISO string — the renderer parses it (Date.parse),
     // which spares us a Rust datetime dependency.
     let resets_at = obj.get("resets_at").and_then(Value::as_str);
@@ -119,14 +122,17 @@ pub fn normalize_usage_response(data: &Value) -> Option<Value> {
     if five_hour.is_none() && seven_day.is_none() {
         return None;
     }
-    let extra = data.get("extra_usage").and_then(Value::as_object).map(|extra| {
-        json!({
-            "isEnabled": extra.get("is_enabled").and_then(Value::as_bool).unwrap_or(false),
-            "monthlyLimit": extra.get("monthly_limit").and_then(Value::as_f64),
-            "usedCredits": extra.get("used_credits").and_then(Value::as_f64),
-            "currency": extra.get("currency").and_then(Value::as_str),
-        })
-    });
+    let extra = data
+        .get("extra_usage")
+        .and_then(Value::as_object)
+        .map(|extra| {
+            json!({
+                "isEnabled": extra.get("is_enabled").and_then(Value::as_bool).unwrap_or(false),
+                "monthlyLimit": extra.get("monthly_limit").and_then(Value::as_f64),
+                "usedCredits": extra.get("used_credits").and_then(Value::as_f64),
+                "currency": extra.get("currency").and_then(Value::as_str),
+            })
+        });
     Some(json!({
         "fiveHour": five_hour,
         "sevenDay": seven_day,
@@ -165,7 +171,10 @@ fn poll_once(app: &AppHandle, client: &reqwest::blocking::Client) -> Duration {
         .timeout(FETCH_TIMEOUT)
         .send();
 
-    let data: Value = match response.and_then(|r| r.error_for_status()).and_then(|r| r.json()) {
+    let data: Value = match response
+        .and_then(|r| r.error_for_status())
+        .and_then(|r| r.json())
+    {
         Ok(data) => data,
         Err(err) => {
             // 401 self-heals: the CLI refreshes credentials and the next tick
@@ -184,7 +193,9 @@ fn poll_once(app: &AppHandle, client: &reqwest::blocking::Client) -> Duration {
         obj.insert("provider".into(), json!("claude"));
         obj.insert(
             "accountEmail".into(),
-            active_account_email(app).map(Value::String).unwrap_or(Value::Null),
+            active_account_email(app)
+                .map(Value::String)
+                .unwrap_or(Value::Null),
         );
         obj.insert("fetchedAt".into(), json!(now_ms()));
     }
@@ -214,7 +225,9 @@ fn store_and_publish(app: &AppHandle, provider: &str, snapshot: Value) {
         let Ok(mut store) = snapshot_store().lock() else {
             return;
         };
-        store.insert(provider.to_string(), snapshot.clone()).is_none()
+        store
+            .insert(provider.to_string(), snapshot.clone())
+            .is_none()
     };
     if first {
         // One success line per provider per app run, so logs can distinguish
@@ -276,7 +289,10 @@ pub async fn agent_usage_peek(account_id: String) -> Value {
             .header("anthropic-beta", "oauth-2025-04-20")
             .timeout(Duration::from_secs(10))
             .send();
-        let data: Value = match response.and_then(|r| r.error_for_status()).and_then(|r| r.json()) {
+        let data: Value = match response
+            .and_then(|r| r.error_for_status())
+            .and_then(|r| r.json())
+        {
             Ok(data) => data,
             Err(_) => return Value::Null, // expired token / network — best effort
         };
@@ -321,10 +337,7 @@ fn epoch_to_ms(value: f64) -> u64 {
 fn normalize_codex_window(window: Option<&Value>) -> Option<Value> {
     let obj = window?.as_object()?;
     let used_percent = obj.get("usedPercent").and_then(Value::as_f64)?;
-    let resets_at = obj
-        .get("resetsAt")
-        .and_then(Value::as_f64)
-        .map(epoch_to_ms);
+    let resets_at = obj.get("resetsAt").and_then(Value::as_f64).map(epoch_to_ms);
     Some(json!({
         "utilization": used_percent / 100.0,
         "resetsAt": resets_at,
@@ -366,7 +379,8 @@ pub fn publish_codex_usage(app: &AppHandle, raw: &Value) {
 // an app-server just to read usage.
 fn poll_codex_once(app: &AppHandle) -> Duration {
     let state = app.state::<crate::codex_app_server::CodexAppServerState>();
-    match state.fetch_account_rate_limits(&crate::host_context::HostContext::from_app(app.clone())) {
+    match state.fetch_account_rate_limits(&crate::host_context::HostContext::from_app(app.clone()))
+    {
         Some(raw) => publish_codex_usage(app, &raw),
         None => {}
     }
@@ -447,7 +461,9 @@ mod tests {
     fn schema_drift_degrades_to_none() {
         assert!(normalize_usage_response(&json!(null)).is_none());
         assert!(normalize_usage_response(&json!({})).is_none());
-        assert!(normalize_usage_response(&json!({ "five_hour": "weird", "seven_day": 42 })).is_none());
+        assert!(
+            normalize_usage_response(&json!({ "five_hour": "weird", "seven_day": 42 })).is_none()
+        );
     }
 
     #[test]
@@ -465,7 +481,10 @@ mod tests {
         assert_eq!(out["provider"].as_str(), Some("codex"));
         assert_eq!(out["fiveHour"]["utilization"].as_f64(), Some(0.325));
         // epoch seconds -> ms
-        assert_eq!(out["fiveHour"]["resetsAt"].as_u64(), Some(1_781_300_000_000));
+        assert_eq!(
+            out["fiveHour"]["resetsAt"].as_u64(),
+            Some(1_781_300_000_000)
+        );
         assert_eq!(out["sevenDay"]["utilization"].as_f64(), Some(0.08));
         assert_eq!(out["planType"].as_str(), Some("plus"));
     }
@@ -478,7 +497,10 @@ mod tests {
         }))
         .expect("wrapped snapshot");
         // already-ms resetsAt passes through untouched
-        assert_eq!(wrapped["fiveHour"]["resetsAt"].as_u64(), Some(1_781_300_000_000));
+        assert_eq!(
+            wrapped["fiveHour"]["resetsAt"].as_u64(),
+            Some(1_781_300_000_000)
+        );
 
         let bare = normalize_codex_rate_limits(&json!({
             "primary": { "usedPercent": 10.0 }
@@ -492,6 +514,8 @@ mod tests {
     fn codex_schema_drift_degrades_to_none() {
         assert!(normalize_codex_rate_limits(&json!({})).is_none());
         assert!(normalize_codex_rate_limits(&json!({ "rateLimits": {} })).is_none());
-        assert!(normalize_codex_rate_limits(&json!({ "rateLimits": { "primary": "weird" } })).is_none());
+        assert!(
+            normalize_codex_rate_limits(&json!({ "rateLimits": { "primary": "weird" } })).is_none()
+        );
     }
 }

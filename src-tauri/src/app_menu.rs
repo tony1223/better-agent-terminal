@@ -152,7 +152,10 @@ pub(crate) fn handle_event(app: &AppHandle, event: MenuEvent) {
             let app = app.clone();
             crate::async_rt::spawn(async move {
                 if let Err(error) = debug_cmd::debug_open_logs_folder(app.clone()).await {
-                    app_cmd::log_tauri(&crate::host_context::HostContext::from_app(app.clone()), &format!("[menu] open-logs-failed error={error}"));
+                    app_cmd::log_tauri(
+                        &crate::host_context::HostContext::from_app(app.clone()),
+                        &format!("[menu] open-logs-failed error={error}"),
+                    );
                 }
             });
         }

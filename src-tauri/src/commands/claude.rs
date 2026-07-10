@@ -2207,7 +2207,9 @@ fn is_codex_worktree_options(options: &Option<Value>) -> bool {
 /// mis-routing diagnosable. See issue #115. Called AFTER the remote-forward
 /// branch returns None, so remote sessions still launch normally on the host.
 fn validate_local_session_cwd(options: Option<&Value>) -> Result<(), BridgeError> {
-    let Some(options) = options else { return Ok(()) };
+    let Some(options) = options else {
+        return Ok(());
+    };
     let Some(cwd) = options.get("cwd").and_then(Value::as_str) else {
         return Ok(());
     };
@@ -2330,7 +2332,6 @@ impl ClaudeRuntimeRouter {
             codex,
         }
     }
-
 
     async fn sidecar_call(
         &self,
@@ -2700,7 +2701,9 @@ impl ClaudeRuntimeRouter {
         options: Option<Value>,
     ) -> Result<Value, BridgeError> {
         if should_handle_codex(&options) || self.codex.is_owned(&session_id) {
-            return self.resume_session(session_id, sdk_session_id, options).await;
+            return self
+                .resume_session(session_id, sdk_session_id, options)
+                .await;
         }
         self.sidecar_call(
             "claude.clientResume",
@@ -3064,7 +3067,12 @@ pub fn claude_ping(
     state: State<'_, SidecarState>,
     payload: Option<Value>,
 ) -> Result<Value, BridgeError> {
-    call(&HostContext::from_app(app.clone()), &state, "ping", payload.unwrap_or(Value::Null))
+    call(
+        &HostContext::from_app(app.clone()),
+        &state,
+        "ping",
+        payload.unwrap_or(Value::Null),
+    )
 }
 
 #[cfg(feature = "desktop")]
@@ -3086,11 +3094,13 @@ pub async fn claude_auth_status(
     {
         return result;
     }
-    let value = crate::async_rt::spawn_blocking(move || fetch_auth_status_native(&HostContext::from_app(app.clone())))
-        .await
-        .map_err(|err| BridgeError {
-            message: format!("claude.authStatus worker failed: {err}"),
-        })?;
+    let value = crate::async_rt::spawn_blocking(move || {
+        fetch_auth_status_native(&HostContext::from_app(app.clone()))
+    })
+    .await
+    .map_err(|err| BridgeError {
+        message: format!("claude.authStatus worker failed: {err}"),
+    })?;
     Ok(value)
 }
 
@@ -3174,7 +3184,11 @@ pub async fn claude_send_message(
     display_prompt: Option<String>,
     suppress_user_echo: Option<bool>,
 ) -> Result<Value, BridgeError> {
-    notification_cmd::set_agent_session_resting(&HostContext::from_app(app.clone()), &session_id, false);
+    notification_cmd::set_agent_session_resting(
+        &HostContext::from_app(app.clone()),
+        &session_id,
+        false,
+    );
     claude_debug_log(
         &HostContext::from_app(app.clone()),
         &format!(
@@ -3393,7 +3407,14 @@ pub async fn claude_auth_login_start(
     {
         return result;
     }
-    call_with_timeout_blocking(app, state, "claude.authLoginStart", Value::Null, AUTH_LOGIN_TIMEOUT).await
+    call_with_timeout_blocking(
+        app,
+        state,
+        "claude.authLoginStart",
+        Value::Null,
+        AUTH_LOGIN_TIMEOUT,
+    )
+    .await
 }
 
 #[cfg(feature = "desktop")]
@@ -3445,7 +3466,14 @@ pub async fn claude_auth_login_cancel(
     {
         return result;
     }
-    call_with_timeout_blocking(app, state, "claude.authLoginCancel", Value::Null, DEFAULT_TIMEOUT).await
+    call_with_timeout_blocking(
+        app,
+        state,
+        "claude.authLoginCancel",
+        Value::Null,
+        DEFAULT_TIMEOUT,
+    )
+    .await
 }
 
 #[cfg(feature = "desktop")]
@@ -3456,12 +3484,13 @@ pub async fn claude_account_import_current(
 ) -> Result<Value, BridgeError> {
     let app_data_dir = app_data_dir(&HostContext::from_app(app.clone()))?;
     let status_app = app.clone();
-    let status_value =
-        crate::async_rt::spawn_blocking(move || fetch_auth_status_native(&HostContext::from_app(status_app.clone())))
-            .await
-            .map_err(|err| BridgeError {
-                message: format!("claude.accountImportCurrent authStatus worker failed: {err}"),
-            })?;
+    let status_value = crate::async_rt::spawn_blocking(move || {
+        fetch_auth_status_native(&HostContext::from_app(status_app.clone()))
+    })
+    .await
+    .map_err(|err| BridgeError {
+        message: format!("claude.accountImportCurrent authStatus worker failed: {err}"),
+    })?;
     let Some(status) = account_store::auth_status_from_value(&status_value) else {
         return Ok(Value::Null);
     };
@@ -3484,21 +3513,24 @@ pub async fn claude_account_login_new(
     let active_account_id = index.active_account_id.clone();
     let backup_credential = account_store::read_cli_credentials();
     let login_app = app.clone();
-    let login_result = crate::async_rt::spawn_blocking(move || auth_login_native(&HostContext::from_app(login_app.clone())))
-        .await
-        .map_err(|err| BridgeError {
-            message: format!("claude.accountLoginNew authLogin worker failed: {err}"),
-        })?;
+    let login_result = crate::async_rt::spawn_blocking(move || {
+        auth_login_native(&HostContext::from_app(login_app.clone()))
+    })
+    .await
+    .map_err(|err| BridgeError {
+        message: format!("claude.accountLoginNew authLogin worker failed: {err}"),
+    })?;
     if !login_success(&login_result) {
         return Ok(login_result);
     }
     let status_app = app.clone();
-    let status_value =
-        crate::async_rt::spawn_blocking(move || fetch_auth_status_native(&HostContext::from_app(status_app.clone())))
-            .await
-            .map_err(|err| BridgeError {
-                message: format!("claude.accountLoginNew authStatus worker failed: {err}"),
-            })?;
+    let status_value = crate::async_rt::spawn_blocking(move || {
+        fetch_auth_status_native(&HostContext::from_app(status_app.clone()))
+    })
+    .await
+    .map_err(|err| BridgeError {
+        message: format!("claude.accountLoginNew authStatus worker failed: {err}"),
+    })?;
     let Some(status) = account_store::auth_status_from_value(&status_value) else {
         if let Some(backup) = backup_credential {
             let _ = account_store::write_cli_credentials(&backup);
@@ -3717,12 +3749,14 @@ pub async fn codex_account_login(
     // codex login is interactive (browser OAuth) and can take a while — run it
     // off the async runtime so it doesn't stall other commands.
     let codex = codex.inner().clone();
-    crate::async_rt::spawn_blocking(move || codex.account_login(&HostContext::from_app(app.clone()), api_key))
-        .await
-        .map_err(|err| BridgeError {
-            message: format!("codex login worker failed: {err}"),
-        })?
-        .map_err(|message| BridgeError { message })
+    crate::async_rt::spawn_blocking(move || {
+        codex.account_login(&HostContext::from_app(app.clone()), api_key)
+    })
+    .await
+    .map_err(|err| BridgeError {
+        message: format!("codex login worker failed: {err}"),
+    })?
+    .map_err(|message| BridgeError { message })
 }
 
 #[cfg(feature = "desktop")]
@@ -3846,7 +3880,9 @@ pub async fn claude_get_cli_path(
     {
         return result;
     }
-    Ok(Value::String(resolve_claude_cli_path(&HostContext::from_app(app.clone()))))
+    Ok(Value::String(resolve_claude_cli_path(
+        &HostContext::from_app(app.clone()),
+    )))
 }
 
 #[cfg(feature = "desktop")]
@@ -4198,7 +4234,10 @@ pub async fn claude_get_worktree_status(
     {
         return result;
     }
-    if let Some(session) = notification_cmd::get_agent_session_snapshot(&HostContext::from_app(app.clone()), &session_id) {
+    if let Some(session) = notification_cmd::get_agent_session_snapshot(
+        &HostContext::from_app(app.clone()),
+        &session_id,
+    ) {
         let status = crate::async_rt::spawn_blocking(move || {
             worktree_status_from_notification_snapshot(&session)
         })
@@ -4264,7 +4303,10 @@ pub async fn claude_cleanup_worktree(
     {
         return result;
     }
-    if let Some(session) = notification_cmd::get_agent_session_snapshot(&HostContext::from_app(app.clone()), &session_id) {
+    if let Some(session) = notification_cmd::get_agent_session_snapshot(
+        &HostContext::from_app(app.clone()),
+        &session_id,
+    ) {
         if session.worktree_path.is_some() {
             let native_session = session.clone();
             let cleaned = crate::async_rt::spawn_blocking(move || {
@@ -4275,10 +4317,14 @@ pub async fn claude_cleanup_worktree(
                 message: format!("claude.cleanupWorktree native worker failed: {err}"),
             })?;
             if cleaned {
-                notification_cmd::clear_agent_session_worktree(&HostContext::from_app(app.clone()), &session_id);
-                if let Some(updated) =
-                    notification_cmd::get_agent_session_snapshot(&HostContext::from_app(app.clone()), &session_id)
-                {
+                notification_cmd::clear_agent_session_worktree(
+                    &HostContext::from_app(app.clone()),
+                    &session_id,
+                );
+                if let Some(updated) = notification_cmd::get_agent_session_snapshot(
+                    &HostContext::from_app(app.clone()),
+                    &session_id,
+                ) {
                     publish_runtime_event(
                         &HostContext::from_app(app.clone()),
                         "claude:status",
@@ -4310,7 +4356,10 @@ pub async fn claude_cleanup_worktree(
     )
     .await?;
     if result.as_bool().unwrap_or(false) {
-        notification_cmd::clear_agent_session_worktree(&HostContext::from_app(app.clone()), &session_id);
+        notification_cmd::clear_agent_session_worktree(
+            &HostContext::from_app(app.clone()),
+            &session_id,
+        );
     }
     Ok(result)
 }
@@ -4478,7 +4527,11 @@ pub async fn claude_set_model(
     {
         return result;
     }
-    if let Some(value) = codex_state.set_model(&HostContext::from_app(app.clone()), &session_id, model.clone()) {
+    if let Some(value) = codex_state.set_model(
+        &HostContext::from_app(app.clone()),
+        &session_id,
+        model.clone(),
+    ) {
         return Ok(value);
     }
     let result = call_blocking(
@@ -4523,7 +4576,11 @@ pub async fn claude_set_effort(
     {
         return result;
     }
-    if let Some(value) = codex_state.set_effort(&HostContext::from_app(app.clone()), &session_id, effort.clone()) {
+    if let Some(value) = codex_state.set_effort(
+        &HostContext::from_app(app.clone()),
+        &session_id,
+        effort.clone(),
+    ) {
         return Ok(value);
     }
     let result = call_blocking(
@@ -4536,7 +4593,11 @@ pub async fn claude_set_effort(
     )
     .await?;
     if result.as_bool().unwrap_or(false) {
-        notification_cmd::update_agent_session_effort(&HostContext::from_app(app.clone()), &session_id, &effort);
+        notification_cmd::update_agent_session_effort(
+            &HostContext::from_app(app.clone()),
+            &session_id,
+            &effort,
+        );
     }
     Ok(result)
 }
@@ -4697,7 +4758,8 @@ pub async fn claude_rest_session(
     {
         return result;
     }
-    if let Some(value) = codex_state.rest_session(&HostContext::from_app(app.clone()), &session_id) {
+    if let Some(value) = codex_state.rest_session(&HostContext::from_app(app.clone()), &session_id)
+    {
         return Ok(value);
     }
     let result = call_blocking(
@@ -4708,7 +4770,11 @@ pub async fn claude_rest_session(
     )
     .await?;
     if result.as_bool().unwrap_or(false) {
-        notification_cmd::set_agent_session_resting(&HostContext::from_app(app.clone()), &session_id, true);
+        notification_cmd::set_agent_session_resting(
+            &HostContext::from_app(app.clone()),
+            &session_id,
+            true,
+        );
     }
     Ok(result)
 }
@@ -4745,7 +4811,11 @@ pub async fn claude_wake_session(
     )
     .await?;
     if result.as_bool().unwrap_or(false) {
-        notification_cmd::set_agent_session_resting(&HostContext::from_app(app.clone()), &session_id, false);
+        notification_cmd::set_agent_session_resting(
+            &HostContext::from_app(app.clone()),
+            &session_id,
+            false,
+        );
     }
     Ok(result)
 }
@@ -4774,7 +4844,10 @@ pub async fn claude_is_resting(
     if let Some(value) = codex_state.is_resting(&session_id) {
         return Ok(value);
     }
-    if let Some(session) = notification_cmd::get_agent_session_snapshot(&HostContext::from_app(app.clone()), &session_id) {
+    if let Some(session) = notification_cmd::get_agent_session_snapshot(
+        &HostContext::from_app(app.clone()),
+        &session_id,
+    ) {
         return Ok(json!(session.is_resting));
     }
     call_blocking(
@@ -5099,7 +5172,9 @@ mod tests {
         let err = validate_local_session_cwd(Some(&options))
             .expect_err("a path that doesn't exist must be refused");
         assert!(err.message.contains("not a directory"));
-        assert!(err.message.contains("/home/definitely-not-on-this-machine-115"));
+        assert!(err
+            .message
+            .contains("/home/definitely-not-on-this-machine-115"));
         assert!(err.message.contains("#115"));
     }
 

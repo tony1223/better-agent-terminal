@@ -1357,13 +1357,11 @@ pub async fn worktree_merge_local(
     session_id: String,
     strategy: String,
 ) -> Result<Value, BridgeError> {
-    crate::async_rt::spawn_blocking(move || {
-        merge_worktree_native(&state, session_id, strategy)
-    })
-    .await
-    .map_err(|err| BridgeError {
-        message: format!("worktree.merge worker failed: {err}"),
-    })
+    crate::async_rt::spawn_blocking(move || merge_worktree_native(&state, session_id, strategy))
+        .await
+        .map_err(|err| BridgeError {
+            message: format!("worktree.merge worker failed: {err}"),
+        })
 }
 
 #[cfg(feature = "desktop")]
@@ -1432,7 +1430,14 @@ pub async fn worktree_rehydrate(
     {
         return result;
     }
-    worktree_rehydrate_local((*state).clone(), session_id, cwd, worktree_path, branch_name).await
+    worktree_rehydrate_local(
+        (*state).clone(),
+        session_id,
+        cwd,
+        worktree_path,
+        branch_name,
+    )
+    .await
 }
 
 #[cfg(test)]

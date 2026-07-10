@@ -38,7 +38,10 @@ fn bat_debug_enabled() -> bool {
 
 fn debug_workspace_log(app: &tauri::AppHandle, message: impl AsRef<str>) {
     if bat_debug_enabled() {
-        log_tauri(&crate::host_context::HostContext::from_app(app.clone()), &format!("[workspace] {}", message.as_ref()));
+        log_tauri(
+            &crate::host_context::HostContext::from_app(app.clone()),
+            &format!("[workspace] {}", message.as_ref()),
+        );
     }
 }
 
@@ -157,7 +160,12 @@ async fn remote_workspace_invoke(
     invoke_args.push(json!(target_profile_id));
     invoke_args.extend(args);
     let result = crate::async_rt::spawn_blocking(move || {
-        remote_client.invoke(&routing_label, channel, invoke_args, Duration::from_secs(30))
+        remote_client.invoke(
+            &routing_label,
+            channel,
+            invoke_args,
+            Duration::from_secs(30),
+        )
     })
     .await
     .map_err(|err| CommandError {
@@ -352,18 +360,24 @@ pub async fn workspace_move_to_window(
             target_json.len()
         ),
     );
-    let mut source_payload =
-        json!({ "windowId": emit_source_window_id, "data": source_json });
+    let mut source_payload = json!({ "windowId": emit_source_window_id, "data": source_json });
     if let Some(profile_id) = window_registry::profile_id_for_window(&app, &emit_source_window_id) {
         source_payload["profileId"] = json!(profile_id);
     }
-    let mut target_payload =
-        json!({ "windowId": emit_target_window_id, "data": target_json });
+    let mut target_payload = json!({ "windowId": emit_target_window_id, "data": target_json });
     if let Some(profile_id) = window_registry::profile_id_for_window(&app, &emit_target_window_id) {
         target_payload["profileId"] = json!(profile_id);
     }
-    let _ = app.emit_to(&emit_source_window_id, "workspace:reload", source_payload.clone());
-    let _ = app.emit_to(&emit_target_window_id, "workspace:reload", target_payload.clone());
+    let _ = app.emit_to(
+        &emit_source_window_id,
+        "workspace:reload",
+        source_payload.clone(),
+    );
+    let _ = app.emit_to(
+        &emit_target_window_id,
+        "workspace:reload",
+        target_payload.clone(),
+    );
     // Like workspace_save, this desktop-driven move never reaches the remote
     // server, so broadcast both windows' reloads to remote clients. Each payload
     // carries its profileId so a phone applies only the one for the profile it
@@ -413,7 +427,9 @@ pub fn workspace_detach(
         encode_query_component(&workspace_id)
     );
     let entry_id = entry.id.clone();
-    log_tauri(&crate::host_context::HostContext::from_app(app.clone()), &format!("[window] detach-queue-build label={entry_id} url=app:{url}"),
+    log_tauri(
+        &crate::host_context::HostContext::from_app(app.clone()),
+        &format!("[window] detach-queue-build label={entry_id} url=app:{url}"),
     );
     let build_app = app.clone();
     let build_parent_window_id = parent_window_id.clone();
@@ -423,7 +439,9 @@ pub fn workspace_detach(
         let schedule_app = build_app.clone();
         let schedule_entry_id = entry_id.clone();
         if let Err(err) = build_app.run_on_main_thread(move || {
-            log_tauri(&crate::host_context::HostContext::from_app(schedule_app.clone()), &format!("[window] detach-create label={schedule_entry_id} url=app:{url}"),
+            log_tauri(
+                &crate::host_context::HostContext::from_app(schedule_app.clone()),
+                &format!("[window] detach-create label={schedule_entry_id} url=app:{url}"),
             );
             let nav_app = schedule_app.clone();
             let nav_label = schedule_entry_id.clone();
@@ -437,7 +455,9 @@ pub fn workspace_detach(
             .inner_size(900.0, 700.0)
             .min_inner_size(600.0, 400.0)
             .on_navigation(move |url| {
-                log_tauri(&crate::host_context::HostContext::from_app(nav_app.clone()), &format!("[window] navigation label={nav_label} url={url}"),
+                log_tauri(
+                    &crate::host_context::HostContext::from_app(nav_app.clone()),
+                    &format!("[window] navigation label={nav_label} url={url}"),
                 );
                 true
             })
@@ -457,7 +477,9 @@ pub fn workspace_detach(
                 Err(err) => {
                     let _ =
                         window_registry::remove_detached_entry(&schedule_app, &build_workspace_id);
-                    log_tauri(&crate::host_context::HostContext::from_app(schedule_app.clone()), &format!(
+                    log_tauri(
+                        &crate::host_context::HostContext::from_app(schedule_app.clone()),
+                        &format!(
                             "[window] detach-build-failed label={schedule_entry_id} error={err}"
                         ),
                     );
@@ -476,7 +498,9 @@ pub fn workspace_detach(
                 }
             });
 
-            log_tauri(&crate::host_context::HostContext::from_app(schedule_app.clone()), &format!("[window] detach-created label={schedule_entry_id}"),
+            log_tauri(
+                &crate::host_context::HostContext::from_app(schedule_app.clone()),
+                &format!("[window] detach-created label={schedule_entry_id}"),
             );
             let _ = schedule_app.emit_to(
                 &build_parent_window_id,
@@ -484,7 +508,9 @@ pub fn workspace_detach(
                 json!({ "windowId": build_parent_window_id, "workspaceId": build_workspace_id }),
             );
         }) {
-            log_tauri(&crate::host_context::HostContext::from_app(build_app.clone()), &format!("[window] detach-schedule-failed label={entry_id} error={err}"),
+            log_tauri(
+                &crate::host_context::HostContext::from_app(build_app.clone()),
+                &format!("[window] detach-schedule-failed label={entry_id} error={err}"),
             );
         }
     });

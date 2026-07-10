@@ -545,7 +545,8 @@ fn managed_codex_candidate(app: &HostContext) -> Option<PathBuf> {
     // root) are deliberately not resolved: they lack the code-mode-host and
     // sandbox helper binaries, and skipping them lets the auto-installer
     // replace them with a complete layout.
-    let path = app.data_dir_opt()?
+    let path = app
+        .data_dir_opt()?
         .join("runtimes")
         .join("codex")
         .join(crate::runtime_catalog::codex_version())
@@ -686,7 +687,8 @@ fn default_codex_home(app: &HostContext) -> Option<PathBuf> {
 }
 
 fn codex_account_state_path(app: &HostContext) -> Option<PathBuf> {
-    app.data_dir_opt().map(|dir| dir.join(CODEX_ACCOUNT_STATE_FILE))
+    app.data_dir_opt()
+        .map(|dir| dir.join(CODEX_ACCOUNT_STATE_FILE))
 }
 
 fn read_codex_account_state(app: &HostContext) -> CodexAccountState {
@@ -2371,8 +2373,7 @@ impl CodexAppServerState {
         if !codex_unified_enabled(app) {
             return;
         }
-        let (Some(app_data), Some(shared)) = (app.data_dir_opt(), shared_home(app))
-        else {
+        let (Some(app_data), Some(shared)) = (app.data_dir_opt(), shared_home(app)) else {
             return;
         };
         match codex_account_store::mark_shared_auth_valid(&app_data, &shared) {
@@ -2397,8 +2398,7 @@ impl CodexAppServerState {
         if !codex_unified_enabled(app) {
             return;
         }
-        let (Some(app_data), Some(shared)) = (app.data_dir_opt(), shared_home(app))
-        else {
+        let (Some(app_data), Some(shared)) = (app.data_dir_opt(), shared_home(app)) else {
             return;
         };
         match codex_account_store::mark_shared_auth_needs_login(&app_data, &shared, reason) {
@@ -2440,7 +2440,8 @@ impl CodexAppServerState {
             auth_path.exists(),
             account_id.as_deref().unwrap_or("none"),
             email.as_deref().unwrap_or("none"),
-            size.map(|v| v.to_string()).unwrap_or_else(|| "none".to_string()),
+            size.map(|v| v.to_string())
+                .unwrap_or_else(|| "none".to_string()),
             modified_ms
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| "none".to_string()),
@@ -2461,7 +2462,8 @@ impl CodexAppServerState {
             .unified_swap_lock
             .lock()
             .map_err(|_| "codex swap lock poisoned".to_string())?;
-        let app_data = app.data_dir_opt()
+        let app_data = app
+            .data_dir_opt()
             .ok_or_else(|| "could not resolve app data dir".to_string())?;
         let shared =
             shared_home(app).ok_or_else(|| "could not resolve shared Codex home".to_string())?;
@@ -2576,7 +2578,8 @@ impl CodexAppServerState {
             .unified_swap_lock
             .lock()
             .map_err(|_| "codex swap lock poisoned".to_string())?;
-        let app_data = app.data_dir_opt()
+        let app_data = app
+            .data_dir_opt()
             .ok_or_else(|| "could not resolve app data dir".to_string())?;
         let shared =
             shared_home(app).ok_or_else(|| "could not resolve shared Codex home".to_string())?;
@@ -2716,8 +2719,7 @@ impl CodexAppServerState {
         if !codex_unified_enabled(app) {
             return;
         }
-        let (Some(app_data), Some(shared)) = (app.data_dir_opt(), shared_home(app))
-        else {
+        let (Some(app_data), Some(shared)) = (app.data_dir_opt(), shared_home(app)) else {
             return;
         };
         codex_account_store::recover_shared_home(&app_data, &shared);
@@ -2734,7 +2736,8 @@ impl CodexAppServerState {
 
     pub fn unified_status(&self, app: &HostContext) -> Value {
         let enabled = codex_unified_enabled(app);
-        let index = app.data_dir_opt()
+        let index = app
+            .data_dir_opt()
             .map(|dir| codex_account_store::read_index(&dir))
             .unwrap_or_default();
         json!({
@@ -2751,7 +2754,8 @@ impl CodexAppServerState {
             .unified_swap_lock
             .lock()
             .map_err(|_| "codex swap lock poisoned".to_string())?;
-        let app_data = app.data_dir_opt()
+        let app_data = app
+            .data_dir_opt()
             .ok_or_else(|| "could not resolve app data dir".to_string())?;
         let shared =
             shared_home(app).ok_or_else(|| "could not resolve shared Codex home".to_string())?;
@@ -2773,14 +2777,16 @@ impl CodexAppServerState {
     /// the active Codex home (the shared `~/.codex` in unified mode). In unified
     /// mode the freshly-authenticated identity is registered as an account and
     /// made active. Blocking — call from `spawn_blocking`.
-    pub fn account_login(&self, app: &HostContext, api_key: Option<String>) -> Result<Value, String> {
+    pub fn account_login(
+        &self,
+        app: &HostContext,
+        api_key: Option<String>,
+    ) -> Result<Value, String> {
         let unified = codex_unified_enabled(app);
         // Snapshot the current active identity before login overwrites the home,
         // so the previously-active account keeps its latest tokens.
         if unified {
-            if let (Some(app_data), Some(shared)) =
-                (app.data_dir_opt(), shared_home(app))
-            {
+            if let (Some(app_data), Some(shared)) = (app.data_dir_opt(), shared_home(app)) {
                 let _swap = self.inner.unified_swap_lock.lock();
                 codex_account_store::snapshot_active_for_exit(&app_data, &shared);
             }
@@ -2983,7 +2989,8 @@ impl CodexAppServerState {
             .unified_swap_lock
             .lock()
             .map_err(|_| "codex swap lock poisoned".to_string())?;
-        let app_data = app.data_dir_opt()
+        let app_data = app
+            .data_dir_opt()
             .ok_or_else(|| "could not resolve app data dir".to_string())?;
         let shared =
             shared_home(app).ok_or_else(|| "could not resolve shared Codex home".to_string())?;
@@ -3005,7 +3012,8 @@ impl CodexAppServerState {
             .unified_swap_lock
             .lock()
             .map_err(|_| "codex swap lock poisoned".to_string())?;
-        let app_data = app.data_dir_opt()
+        let app_data = app
+            .data_dir_opt()
             .ok_or_else(|| "could not resolve app data dir".to_string())?;
         let shared =
             shared_home(app).ok_or_else(|| "could not resolve shared Codex home".to_string())?;
@@ -3370,13 +3378,7 @@ impl CodexAppServerState {
     // poll covers every session/window). Returns None when codex isn't in use:
     // we never spawn an app-server just to read usage.
     pub fn fetch_account_rate_limits(&self, app: &HostContext) -> Option<Value> {
-        let connection = self
-            .inner
-            .connection
-            .lock()
-            .ok()?
-            .as_ref()
-            .cloned()?;
+        let connection = self.inner.connection.lock().ok()?.as_ref().cloned()?;
         connection
             .request_logged(
                 app,
@@ -3428,9 +3430,7 @@ impl CodexAppServerState {
                     ),
                 );
                 self.drop_connection(app, "connection-auth-mismatch");
-            } else if existing.binary_identity != resolved_identity
-                && !self.any_session_running()
-            {
+            } else if existing.binary_identity != resolved_identity && !self.any_session_running() {
                 // A different codex binary resolves now — typically the managed
                 // runtime finished installing after this app-server was spawned
                 // from a PATH/npm fallback (which can be releases old and reject
@@ -4323,7 +4323,11 @@ impl CodexAppServerState {
         );
     }
 
-    pub fn abort_session(&self, app: &HostContext, session_id: String) -> Result<Value, BridgeError> {
+    pub fn abort_session(
+        &self,
+        app: &HostContext,
+        session_id: String,
+    ) -> Result<Value, BridgeError> {
         log_codex(app, &session_id, "abort_session requested");
         // Answer any approval prompt with "cancel" first so a pending approval
         // cannot keep the turn (and the interrupt below) blocked.
@@ -4409,7 +4413,11 @@ impl CodexAppServerState {
         }
     }
 
-    pub fn reset_session(&self, app: &HostContext, session_id: String) -> Result<Value, BridgeError> {
+    pub fn reset_session(
+        &self,
+        app: &HostContext,
+        session_id: String,
+    ) -> Result<Value, BridgeError> {
         let (model, cwd, approval_policy, sandbox_mode, thread_id) = {
             let sessions = self.inner.sessions.lock().expect("codex sessions lock");
             let session = sessions
@@ -5056,7 +5064,12 @@ fn handle_server_request(
     }
 }
 
-fn handle_notification(app: &HostContext, state: &CodexAppServerState, method: &str, params: Value) {
+fn handle_notification(
+    app: &HostContext,
+    state: &CodexAppServerState,
+    method: &str,
+    params: Value,
+) {
     // Account-level notifications carry no thread/session id and must be
     // handled BEFORE the session-mapping requirement below drops them.
     if method == "account/rateLimits/updated" {
@@ -5664,11 +5677,8 @@ fn update_session_usage(session: &mut CodexSession, params: &Value) {
     ) {
         session.cache_read_tokens = v;
     }
-    if let Some(v) = read_usage_u64(
-        usage,
-        &["modelContextWindow", "model_context_window"],
-    )
-    .filter(|value| *value > 0)
+    if let Some(v) = read_usage_u64(usage, &["modelContextWindow", "model_context_window"])
+        .filter(|value| *value > 0)
     {
         session.context_window = v;
     }
@@ -5819,7 +5829,10 @@ mod tests {
         for line in lines {
             ingest_device_line(&mut cap, line);
         }
-        assert_eq!(cap.url.as_deref(), Some("https://auth.openai.com/codex/device"));
+        assert_eq!(
+            cap.url.as_deref(),
+            Some("https://auth.openai.com/codex/device")
+        );
         assert_eq!(cap.code.as_deref(), Some("G0GT-244PL"));
     }
 
@@ -5954,9 +5967,7 @@ mod tests {
 
     #[test]
     fn codex_effort_normalization_preserves_all_supported_tiers() {
-        for effort in [
-            "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
-        ] {
+        for effort in ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"] {
             assert_eq!(normalize_effort(Some(effort)), effort);
         }
         assert_eq!(normalize_effort(None), "high");

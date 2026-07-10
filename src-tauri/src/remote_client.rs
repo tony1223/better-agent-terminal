@@ -1,5 +1,6 @@
 use crate::commands::pty as pty_cmd;
 use crate::event_hub::publish_runtime_event;
+use crate::host_context::HostContext;
 use crate::remote_core::{
     canonical_remote_channel, decode_remote_binary_frame, decode_remote_text_frame,
     encode_remote_frame, is_proxied_remote_event, legacy_v1_event_args_to_params,
@@ -18,7 +19,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use crate::host_context::HostContext;
 use tungstenite::client::IntoClientRequest;
 use tungstenite::protocol::WebSocket;
 use tungstenite::Message;
@@ -326,7 +326,10 @@ impl RustRemoteClientState {
             return true;
         };
         let now_empty = {
-            let mut referrers = client.referrers.lock().expect("remote client referrers lock");
+            let mut referrers = client
+                .referrers
+                .lock()
+                .expect("remote client referrers lock");
             referrers.remove(window_label);
             referrers.is_empty()
         };
@@ -1105,7 +1108,12 @@ mod tests {
     fn invoke_without_binding_fails_closed() {
         let state = RustRemoteClientState::default();
         let err = state
-            .invoke("win-A", "pty:read-buffer", Vec::new(), Duration::from_secs(1))
+            .invoke(
+                "win-A",
+                "pty:read-buffer",
+                Vec::new(),
+                Duration::from_secs(1),
+            )
             .expect_err("an unbound window must not reach any connection");
         assert!(err.contains("not connected"));
     }
@@ -1131,7 +1139,11 @@ mod tests {
             .unwrap()
             .insert(key.clone(), Arc::clone(&client));
         for window in windows {
-            client.referrers.lock().unwrap().insert((*window).to_string());
+            client
+                .referrers
+                .lock()
+                .unwrap()
+                .insert((*window).to_string());
             state
                 .bindings
                 .lock()

@@ -5,10 +5,10 @@
 // index.json and uses the old keyring item only as a migration fallback; this
 // avoids repeated macOS Keychain prompts during normal profile reads/writes.
 
+use crate::app_data;
 use crate::electron_safe_storage::decrypt_electron_safe_storage_data;
 use crate::event_hub::publish_runtime_event;
 use crate::host_context::HostContext;
-use crate::app_data;
 #[cfg(feature = "desktop")]
 use crate::window_registry;
 #[cfg(not(test))]

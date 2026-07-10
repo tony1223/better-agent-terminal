@@ -799,17 +799,23 @@ pub fn resolve_spawn_config_headless(
         .ok()
         .and_then(|p| p.parent().map(Path::to_path_buf));
     let bundled = exe_dir.as_deref().and_then(find_bundled_node);
-    let cwd_bundled = std::env::current_dir().ok().and_then(|cwd| find_bundled_node(&cwd));
-    let node_path = choose_node_path(None, bundled, cwd_bundled, which_node()).ok_or_else(|| {
-        BridgeError {
+    let cwd_bundled = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| find_bundled_node(&cwd));
+    let node_path =
+        choose_node_path(None, bundled, cwd_bundled, which_node()).ok_or_else(|| BridgeError {
             message: "bat-server: could not find `node` (no bundled runtime, no PATH node)".into(),
-        }
-    })?;
+        })?;
 
     if let Ok(env_script) = std::env::var("BAT_SIDECAR_SCRIPT") {
         let p = PathBuf::from(env_script);
         if p.is_file() {
-            return Ok(SpawnConfig { node_path, script_path: p, data_dir, extra_env: Vec::new() });
+            return Ok(SpawnConfig {
+                node_path,
+                script_path: p,
+                data_dir,
+                extra_env: Vec::new(),
+            });
         }
     }
 
@@ -819,12 +825,18 @@ pub fn resolve_spawn_config_headless(
         .collect();
     for base in &bases {
         if let Some(script) = find_sidecar_script(base, true) {
-            return Ok(SpawnConfig { node_path, script_path: script, data_dir, extra_env: Vec::new() });
+            return Ok(SpawnConfig {
+                node_path,
+                script_path: script,
+                data_dir,
+                extra_env: Vec::new(),
+            });
         }
     }
 
     Err(BridgeError {
-        message: "bat-server: could not locate node-sidecar dist/server.mjs or src/server.mjs".into(),
+        message: "bat-server: could not locate node-sidecar dist/server.mjs or src/server.mjs"
+            .into(),
     })
 }
 

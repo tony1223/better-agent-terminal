@@ -217,9 +217,8 @@ mod tests {
             let mut f = fs::File::create(&path).unwrap();
             f.write_all(&bytes).unwrap();
         }
-        let url =
-            crate::async_rt::block_on(image_read_as_data_url(path.to_string_lossy().into()))
-                .unwrap();
+        let url = crate::async_rt::block_on(image_read_as_data_url(path.to_string_lossy().into()))
+            .unwrap();
         assert!(url.starts_with("data:image/png;base64,"));
         // Round-trip check: payload after the prefix should decode back to
         // the source bytes.
@@ -279,10 +278,9 @@ mod tests {
             }
             f.write_all(&[0u8]).unwrap();
         }
-        let err =
-            crate::async_rt::block_on(image_read_as_data_url(path.to_string_lossy().into()))
-                .err()
-                .unwrap();
+        let err = crate::async_rt::block_on(image_read_as_data_url(path.to_string_lossy().into()))
+            .err()
+            .unwrap();
         assert!(err.message.starts_with("Image too large"));
         let _ = fs::remove_file(path);
     }

@@ -1,17 +1,18 @@
 use crate::account_store;
 use crate::app_data;
 use crate::codex_app_server::{should_handle_codex, CodexAppServerState};
+#[cfg(feature = "desktop")]
+use crate::commands::update as update_cmd;
 use crate::commands::{
     agent as agent_cmd, app as app_cmd, claude as claude_cmd, fs as fs_cmd, git as git_cmd,
     github as github_cmd, image as image_cmd, notification as notification_cmd,
     profile as profile_cmd, pty as pty_cmd, settings as settings_cmd, snippet as snippet_cmd,
     worker_buffer::WorkerBufferState, worktree as worktree_cmd,
 };
-#[cfg(feature = "desktop")]
-use crate::commands::update as update_cmd;
 use crate::electron_safe_storage::{
     read_secret_json, read_secret_string, write_secret_json, write_secret_string, SecretJsonRead,
 };
+use crate::host_context::HostContext;
 use crate::network_addresses;
 use crate::remote_core::{
     canonical_remote_channel, decode_remote_binary_frame, decode_remote_text_frame,
@@ -20,7 +21,6 @@ use crate::remote_core::{
     RemoteCompression, RemoteFramePayload, RemoteProtocol, REMOTE_PROTOCOL_LEGACY_V1,
     REMOTE_PROTOCOL_V2,
 };
-use crate::host_context::HostContext;
 use crate::sidecar::SidecarState;
 #[cfg(feature = "desktop")]
 use crate::window_registry;
@@ -212,7 +212,8 @@ impl RustRemoteServerState {
         let log_bind_interface = bind_interface.clone();
         let log_fingerprint = fingerprint.clone();
         let handle = thread::spawn(move || {
-            remote_debug_log(&thread_ctx,
+            remote_debug_log(
+                &thread_ctx,
                 format!(
                     "server started host={} port={} iface={} fingerprint={}",
                     log_bound_host,
@@ -969,7 +970,8 @@ fn handle_client(
         if frame_type == "auth" {
             let current_token = token.lock().map(|token| token.clone()).unwrap_or_default();
             if frame.get("token").and_then(Value::as_str) != Some(current_token.as_str()) {
-                remote_debug_log(&ctx,
+                remote_debug_log(
+                    &ctx,
                     format!("auth failed peer={peer} reason=invalid-token"),
                 );
                 send_frame(
@@ -997,7 +999,8 @@ fn handle_client(
                 })
                 .unwrap_or_default();
             let Some(protocol) = negotiate_remote_protocol(&offered) else {
-                remote_debug_log(&ctx,
+                remote_debug_log(
+                    &ctx,
                     format!(
                         "auth failed peer={peer} reason=unsupported-protocol offered={offered:?}"
                     ),
@@ -1084,7 +1087,8 @@ fn handle_client(
                 ),
             );
             if already_known {
-                remote_debug_log(&ctx,
+                remote_debug_log(
+                    &ctx,
                     format!("known client reconnected; notification skipped label={client_label}"),
                 );
             } else {
@@ -1582,11 +1586,8 @@ fn invoke_rust_for_remote(
         "app:check-update" => {
             let update_channel =
                 optional_string_param(params, "channel").unwrap_or_else(|| "stable".to_string());
-            crate::async_rt::block_on(update_cmd::update_check_native(
-                app.clone(),
-                update_channel,
-            ))
-            .map_err(bridge_error_message)
+            crate::async_rt::block_on(update_cmd::update_check_native(app.clone(), update_channel))
+                .map_err(bridge_error_message)
         }
         #[cfg(feature = "desktop")]
         "app:install-update" => {
@@ -1936,7 +1937,8 @@ fn invoke_rust_for_remote(
                         string_param(params, "agentPreset", channel).and_then(|agent_preset| {
                             let current_session_id =
                                 optional_string_param(params, "currentSessionId");
-                            claude_cmd::prepare_cli_session_native(&ctx,
+                            claude_cmd::prepare_cli_session_native(
+                                &ctx,
                                 terminal_id,
                                 workspace_id,
                                 cwd,
@@ -2105,7 +2107,8 @@ fn invoke_rust_for_remote(
                 };
                 // Headless has no live windows; persist straight to the snapshot.
                 #[cfg(not(feature = "desktop"))]
-                let saved = profile_cmd::profile_save_workspace_for_remote(&ctx, &profile_id, &data);
+                let saved =
+                    profile_cmd::profile_save_workspace_for_remote(&ctx, &profile_id, &data);
                 if saved {
                     let payload = if let Some(window_id) = window_id.as_deref() {
                         let payload =
@@ -2333,11 +2336,7 @@ fn invoke_rust_for_remote(
                 .get("totalBytes")
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
-            fs_cmd::fs_upload_begin_impl(
-                &ctx.state::<fs_cmd::FsUploadState>(),
-                name,
-                total_bytes,
-            )
+            fs_cmd::fs_upload_begin_impl(&ctx.state::<fs_cmd::FsUploadState>(), name, total_bytes)
         }),
         "fs:upload-begin-dir" => string_param(params, "dir", channel).and_then(|dir| {
             string_param(params, "name", channel).and_then(|name| {
@@ -2403,10 +2402,8 @@ fn invoke_rust_for_remote(
         }),
         "git:diff-files" => string_param(params, "cwd", channel).and_then(|cwd| {
             let commit_hash = optional_string_param(params, "commitHash");
-            let value = crate::async_rt::block_on(git_cmd::git_get_diff_files_native(
-                cwd,
-                commit_hash,
-            ));
+            let value =
+                crate::async_rt::block_on(git_cmd::git_get_diff_files_native(cwd, commit_hash));
             to_json_value(channel, value)
         }),
         "git:getRoot" => string_param(params, "cwd", channel).and_then(|cwd| {

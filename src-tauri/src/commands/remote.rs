@@ -154,7 +154,9 @@ pub async fn remote_rotate_token(
     app: AppHandle,
     remote_state: State<'_, RustRemoteServerState>,
 ) -> Result<Value, BridgeError> {
-    remote_state.rotate_token(&crate::host_context::HostContext::from_app(app.clone())).map_err(BridgeError::from)
+    remote_state
+        .rotate_token(&crate::host_context::HostContext::from_app(app.clone()))
+        .map_err(BridgeError::from)
 }
 
 #[tauri::command]
@@ -172,7 +174,15 @@ pub async fn remote_connect(
     let window_id = Some(window.label().to_string());
     crate::async_rt::spawn_blocking(move || {
         Ok(state
-            .connect(crate::host_context::HostContext::from_app(app.clone()), host, port, token, fingerprint, label, window_id)
+            .connect(
+                crate::host_context::HostContext::from_app(app.clone()),
+                host,
+                port,
+                token,
+                fingerprint,
+                label,
+                window_id,
+            )
             .unwrap_or_else(|error| json!({ "connected": false, "error": error })))
     })
     .await

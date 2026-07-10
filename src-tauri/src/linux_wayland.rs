@@ -185,7 +185,10 @@ pub fn preload_system_libwayland() {
 
 #[cfg(target_os = "linux")]
 fn run_ldconfig() -> Option<String> {
-    let output = std::process::Command::new("ldconfig").arg("-p").output().ok()?;
+    let output = std::process::Command::new("ldconfig")
+        .arg("-p")
+        .output()
+        .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -236,7 +239,10 @@ mod tests {
         let output =
             "\tlibwayland-client.so.0 (libc6,x86-64) => /lib/x86_64-linux-gnu/libwayland-client.so.0\n";
         let picked = pick_system_libwayland(Some("/tmp/.mount_x"), Some(output), |_| true);
-        assert_eq!(picked.as_deref(), Some("/lib/x86_64-linux-gnu/libwayland-client.so.0"));
+        assert_eq!(
+            picked.as_deref(),
+            Some("/lib/x86_64-linux-gnu/libwayland-client.so.0")
+        );
     }
 
     #[test]
@@ -272,8 +278,14 @@ mod tests {
 
     #[test]
     fn compose_prepends_when_absent() {
-        assert_eq!(compose_ld_preload("/sys/libwayland-client.so.0", None).as_deref(), Some("/sys/libwayland-client.so.0"));
-        assert_eq!(compose_ld_preload("/sys/wl.so", Some("")).as_deref(), Some("/sys/wl.so"));
+        assert_eq!(
+            compose_ld_preload("/sys/libwayland-client.so.0", None).as_deref(),
+            Some("/sys/libwayland-client.so.0")
+        );
+        assert_eq!(
+            compose_ld_preload("/sys/wl.so", Some("")).as_deref(),
+            Some("/sys/wl.so")
+        );
         assert_eq!(
             compose_ld_preload("/sys/wl.so", Some("/other/lib.so")).as_deref(),
             Some("/sys/wl.so:/other/lib.so")

@@ -139,7 +139,9 @@ pub fn install_codex(runtimes: &Path) -> Result<PathBuf, String> {
         ));
     }
 
-    let tmp_root = runtimes.join(".tmp").join(format!("codex-{}", install_nonce()));
+    let tmp_root = runtimes
+        .join(".tmp")
+        .join(format!("codex-{}", install_nonce()));
     let tmp_final = tmp_root.join("final");
     let _ = fs::remove_dir_all(&tmp_root);
     for entry in &entries {
@@ -342,7 +344,8 @@ fn tar_string(bytes: &[u8]) -> String {
 fn make_executable(path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|err| err.to_string())?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            .map_err(|err| err.to_string())?;
     }
     Ok(())
 }

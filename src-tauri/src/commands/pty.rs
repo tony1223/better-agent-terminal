@@ -19,9 +19,9 @@ use crate::app_data;
 use crate::commands::profile as profile_cmd;
 use crate::commands::settings::resolve_shell_path;
 use crate::commands::worker_buffer::{append_worker_log_lines, WorkerBufferState};
+use crate::host_context::HostContext;
 use crate::log_file::append_line;
 use crate::remote_client::RustRemoteClientState;
-use crate::host_context::HostContext;
 #[cfg(feature = "desktop")]
 use crate::window_registry;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
@@ -367,7 +367,9 @@ pub(crate) fn pty_input_debug_log(app: &HostContext, message: impl AsRef<str>) {
     }
     let message = format!("[pty-input] {}", message.as_ref());
     eprintln!("{message}");
-    let Some(path) = app.data_dir_opt().map(|dir| dir.join("logs").join("debug.log"))
+    let Some(path) = app
+        .data_dir_opt()
+        .map(|dir| dir.join("logs").join("debug.log"))
     else {
         return;
     };
@@ -381,7 +383,9 @@ fn pty_output_debug_log(app: &HostContext, message: impl AsRef<str>) {
     }
     let message = format!("[pty-output] {}", message.as_ref());
     eprintln!("{message}");
-    let Some(path) = app.data_dir_opt().map(|dir| dir.join("logs").join("debug.log"))
+    let Some(path) = app
+        .data_dir_opt()
+        .map(|dir| dir.join("logs").join("debug.log"))
     else {
         return;
     };
@@ -396,7 +400,9 @@ fn pty_termios_debug_log(app: &HostContext, message: impl AsRef<str>) {
     }
     let message = format!("[pty-termios] {}", message.as_ref());
     eprintln!("{message}");
-    let Some(path) = app.data_dir_opt().map(|dir| dir.join("logs").join("debug.log"))
+    let Some(path) = app
+        .data_dir_opt()
+        .map(|dir| dir.join("logs").join("debug.log"))
     else {
         return;
     };
@@ -1032,7 +1038,12 @@ pub async fn pty_create(
     let handle = state.handle();
     let worker_buffer_handle = worker_buffer.handle();
     crate::async_rt::spawn_blocking(move || {
-        start_pty_session(&crate::host_context::HostContext::from_app(app.clone()), handle, Some(worker_buffer_handle), options)
+        start_pty_session(
+            &crate::host_context::HostContext::from_app(app.clone()),
+            handle,
+            Some(worker_buffer_handle),
+            options,
+        )
     })
     .await
     .map_err(|e| CommandError {
@@ -1073,7 +1084,10 @@ pub fn pty_write(
     let result = write_pty_session(&state, &id, &data);
     if trace_input {
         match &result {
-            Ok(()) => pty_input_debug_log(&crate::host_context::HostContext::from_app(app.clone()), format!("route=local id={id} enqueue=ok")),
+            Ok(()) => pty_input_debug_log(
+                &crate::host_context::HostContext::from_app(app.clone()),
+                format!("route=local id={id} enqueue=ok"),
+            ),
             Err(err) => pty_input_debug_log(
                 &crate::host_context::HostContext::from_app(app.clone()),
                 format!("route=local id={id} enqueue=error {}", err.message),
@@ -1143,7 +1157,14 @@ pub fn pty_resize(
     ) {
         return result;
     }
-    resize_pty_session_from_desktop(&crate::host_context::HostContext::from_app(app.clone()), &state, &id, cols, rows).map(|_| ())
+    resize_pty_session_from_desktop(
+        &crate::host_context::HostContext::from_app(app.clone()),
+        &state,
+        &id,
+        cols,
+        rows,
+    )
+    .map(|_| ())
 }
 
 pub(crate) fn get_pty_viewport_state(
@@ -1338,7 +1359,13 @@ pub fn pty_set_viewport_mode(
     ) {
         return result;
     }
-    set_pty_viewport_mode(&crate::host_context::HostContext::from_app(app.clone()), &state, &id, mode, options)
+    set_pty_viewport_mode(
+        &crate::host_context::HostContext::from_app(app.clone()),
+        &state,
+        &id,
+        mode,
+        options,
+    )
 }
 
 #[cfg(feature = "desktop")]
@@ -1365,7 +1392,14 @@ pub fn pty_set_viewport_size(
     ) {
         return result;
     }
-    set_pty_viewport_size(&crate::host_context::HostContext::from_app(app.clone()), &state, &id, cols, rows, source)
+    set_pty_viewport_size(
+        &crate::host_context::HostContext::from_app(app.clone()),
+        &state,
+        &id,
+        cols,
+        rows,
+        source,
+    )
 }
 
 #[cfg(feature = "desktop")]
@@ -1380,7 +1414,11 @@ pub fn pty_kill(
     {
         return result;
     }
-    kill_pty_session_with_exit(&crate::host_context::HostContext::from_app(app.clone()), &state, &id)
+    kill_pty_session_with_exit(
+        &crate::host_context::HostContext::from_app(app.clone()),
+        &state,
+        &id,
+    )
 }
 
 pub(crate) fn kill_pty_session(state: &PtyState, id: &str) -> Result<(), CommandError> {
@@ -1435,11 +1473,19 @@ pub async fn pty_restart(
         return result;
     }
     let handle = state.handle();
-    crate::async_rt::spawn_blocking(move || pty_restart_impl(crate::host_context::HostContext::from_app(app), handle, id, cwd, shell))
-        .await
-        .map_err(|e| CommandError {
-            message: format!("pty.restart worker failed: {e}"),
-        })?
+    crate::async_rt::spawn_blocking(move || {
+        pty_restart_impl(
+            crate::host_context::HostContext::from_app(app),
+            handle,
+            id,
+            cwd,
+            shell,
+        )
+    })
+    .await
+    .map_err(|e| CommandError {
+        message: format!("pty.restart worker failed: {e}"),
+    })?
 }
 
 pub(crate) async fn pty_restart_native(

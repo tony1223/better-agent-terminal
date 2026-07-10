@@ -122,7 +122,9 @@ fn clear_terminal_history_dir(history_dir: &Path) -> bool {
 }
 
 fn settings_clear_terminal_history_impl(data_dir: &Path) -> Result<bool, CommandError> {
-    Ok(clear_terminal_history_dir(&data_dir.join("terminal-history")))
+    Ok(clear_terminal_history_dir(
+        &data_dir.join("terminal-history"),
+    ))
 }
 
 #[cfg(feature = "desktop")]

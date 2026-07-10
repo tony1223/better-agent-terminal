@@ -12,9 +12,9 @@
 
 use crate::commands::profile as profile_cmd;
 use crate::event_hub::publish_runtime_event;
+use crate::host_context::HostContext;
 use crate::path_guard::is_sensitive_path;
 use crate::remote_client::RustRemoteClientState;
-use crate::host_context::HostContext;
 #[cfg(feature = "desktop")]
 use crate::window_registry;
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
@@ -391,7 +391,8 @@ pub async fn fs_list_dirs(
                 ..Default::default()
             });
     }
-    let home = home_string(&crate::host_context::HostContext::from_app(app.clone())).unwrap_or_else(|| PathBuf::from("/"));
+    let home = home_string(&crate::host_context::HostContext::from_app(app.clone()))
+        .unwrap_or_else(|| PathBuf::from("/"));
     crate::async_rt::spawn_blocking(move || fs_list_dirs_impl(home, dir_path, include_hidden))
         .await
         .unwrap_or_else(|e| ListDirsResult {
@@ -984,7 +985,11 @@ pub fn fs_watch(
     {
         return result.and_then(from_remote_value).unwrap_or(false);
     }
-    fs_watch_native(crate::host_context::HostContext::from_app(app), &state, dir_path)
+    fs_watch_native(
+        crate::host_context::HostContext::from_app(app),
+        &state,
+        dir_path,
+    )
 }
 
 pub(crate) fn fs_watch_native(app: HostContext, state: &FsWatcherState, dir_path: String) -> bool {
@@ -1129,7 +1134,11 @@ fn sanitize_upload_name(name: &str) -> (String, String) {
         Some(idx) if idx > 0 => (cleaned[..idx].to_string(), cleaned[idx..].to_string()),
         _ => (cleaned, String::new()),
     };
-    let stem = if stem.is_empty() { "upload".into() } else { stem };
+    let stem = if stem.is_empty() {
+        "upload".into()
+    } else {
+        stem
+    };
     // Cap the stem so the final path stays comfortably under OS limits.
     let stem = stem.chars().take(80).collect::<String>();
     let ext = ext.chars().take(16).collect::<String>();
@@ -1232,7 +1241,10 @@ pub(crate) fn fs_upload_chunk_impl(
     Ok(json!({ "received": entry.received }))
 }
 
-pub(crate) fn fs_upload_end_impl(state: &FsUploadState, upload_id: String) -> Result<Value, String> {
+pub(crate) fn fs_upload_end_impl(
+    state: &FsUploadState,
+    upload_id: String,
+) -> Result<Value, String> {
     let mut entries = state
         .entries
         .lock()
@@ -1667,7 +1679,10 @@ fn stream_host_file_to_local(
             Ok(value) => value,
             Err(err) => return fail(out, err),
         };
-        let data = chunk.get("dataBase64").and_then(Value::as_str).unwrap_or("");
+        let data = chunk
+            .get("dataBase64")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         let bytes = match base64::engine::general_purpose::STANDARD.decode(data.as_bytes()) {
             Ok(bytes) => bytes,
             Err(err) => return fail(out, format!("download: bad base64: {err}")),
@@ -1731,7 +1746,11 @@ mod tests {
             .and_then(Value::as_str)
             .unwrap()
             .to_string();
-        let p2 = begin.get("path").and_then(Value::as_str).unwrap().to_string();
+        let p2 = begin
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap()
+            .to_string();
         assert!(fs_upload_end_impl(&state, id2).is_err());
         assert!(!Path::new(&p2).exists());
     }
@@ -1762,7 +1781,10 @@ mod tests {
             fs_upload_chunk_impl(&state, id.clone(), b64).unwrap();
             let end = fs_upload_end_impl(&state, id).unwrap();
             let path = end.get("path").and_then(Value::as_str).unwrap().to_string();
-            assert!(path.ends_with(expected), "{path} should end with {expected}");
+            assert!(
+                path.ends_with(expected),
+                "{path} should end with {expected}"
+            );
             assert_eq!(fs::read(&path).unwrap(), b"hello");
             paths.push(path);
         }
@@ -1820,16 +1842,12 @@ mod tests {
         let src = base.join("data.txt");
         fs::write(&src, b"payload").unwrap();
 
-        let first = fs_copy_into_dir_impl(
-            src.to_string_lossy().into(),
-            dest.to_string_lossy().into(),
-        )
-        .unwrap();
-        let second = fs_copy_into_dir_impl(
-            src.to_string_lossy().into(),
-            dest.to_string_lossy().into(),
-        )
-        .unwrap();
+        let first =
+            fs_copy_into_dir_impl(src.to_string_lossy().into(), dest.to_string_lossy().into())
+                .unwrap();
+        let second =
+            fs_copy_into_dir_impl(src.to_string_lossy().into(), dest.to_string_lossy().into())
+                .unwrap();
         assert!(first.ends_with("data.txt"));
         assert!(second.ends_with("data-1.txt"));
         assert_eq!(fs::read(&first).unwrap(), b"payload");

@@ -42,7 +42,7 @@ pub fn app_data_dir_opt(app: &AppHandle) -> Option<PathBuf> {
 #[cfg(not(feature = "desktop"))]
 pub fn app_data_dir() -> Result<PathBuf, String> {
     resolve_app_data_dir(Err(
-        "headless: app data dir not configured (set BAT_DATA_DIR)".into()
+        "headless: app data dir not configured (set BAT_DATA_DIR)".into(),
     ))
 }
 

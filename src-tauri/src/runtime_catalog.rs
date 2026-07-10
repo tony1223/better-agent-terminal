@@ -10,8 +10,10 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-const RUNTIME_CATALOG_JSON: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../runtime-catalog.json"));
+const RUNTIME_CATALOG_JSON: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../runtime-catalog.json"
+));
 
 #[derive(Debug, Deserialize)]
 pub struct RuntimeCatalog {
@@ -119,6 +121,9 @@ mod tests {
 
         // Codex platform versions carry the platform suffix.
         let codex = codex_platform("darwin-arm64").unwrap();
-        assert_eq!(codex.npm_version, format!("{}-darwin-arm64", codex_version()));
+        assert_eq!(
+            codex.npm_version,
+            format!("{}-darwin-arm64", codex_version())
+        );
     }
 }

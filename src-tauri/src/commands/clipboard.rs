@@ -63,35 +63,46 @@ fn load_rgba_image(path: &Path) -> Result<Image<'static>, CommandError> {
 pub async fn clipboard_save_image(app: tauri::AppHandle) -> Result<Option<String>, CommandError> {
     let app_clone = app.clone();
     let app_for_log = app.clone();
-    let result: Result<Option<String>, CommandError> =
-        crate::async_rt::spawn_blocking(move || {
-            let image = match app_clone.clipboard().read_image() {
-                Ok(image) => image,
-                Err(err) => {
-                    log_tauri(&crate::host_context::HostContext::from_app(app_clone.clone()), &format!("[clipboard] save_image: read_image error: {err}"),
-                    );
-                    return Ok(None);
-                }
-            };
-            let width = image.width();
-            let height = image.height();
-            let path = clipboard_temp_png_path();
-            log_tauri(&crate::host_context::HostContext::from_app(app_clone.clone()), &format!(
-                    "[clipboard] save_image: read_image ok {width}x{height} → {}",
-                    path.display()
-                ),
-            );
-            write_rgba_png(&path, image.rgba(), width, height)?;
-            Ok(Some(path.to_string_lossy().to_string()))
-        })
-        .await
-        .map_err(|e| CommandError {
-            message: e.to_string(),
-        })?;
+    let result: Result<Option<String>, CommandError> = crate::async_rt::spawn_blocking(move || {
+        let image = match app_clone.clipboard().read_image() {
+            Ok(image) => image,
+            Err(err) => {
+                log_tauri(
+                    &crate::host_context::HostContext::from_app(app_clone.clone()),
+                    &format!("[clipboard] save_image: read_image error: {err}"),
+                );
+                return Ok(None);
+            }
+        };
+        let width = image.width();
+        let height = image.height();
+        let path = clipboard_temp_png_path();
+        log_tauri(
+            &crate::host_context::HostContext::from_app(app_clone.clone()),
+            &format!(
+                "[clipboard] save_image: read_image ok {width}x{height} → {}",
+                path.display()
+            ),
+        );
+        write_rgba_png(&path, image.rgba(), width, height)?;
+        Ok(Some(path.to_string_lossy().to_string()))
+    })
+    .await
+    .map_err(|e| CommandError {
+        message: e.to_string(),
+    })?;
     match &result {
-        Ok(Some(p)) => log_tauri(&crate::host_context::HostContext::from_app(app_for_log.clone()), &format!("[clipboard] save_image → {p}")),
-        Ok(None) => log_tauri(&crate::host_context::HostContext::from_app(app_for_log.clone()), "[clipboard] save_image → None"),
-        Err(e) => log_tauri(&crate::host_context::HostContext::from_app(app_for_log.clone()), &format!("[clipboard] save_image error: {}", e.message),
+        Ok(Some(p)) => log_tauri(
+            &crate::host_context::HostContext::from_app(app_for_log.clone()),
+            &format!("[clipboard] save_image → {p}"),
+        ),
+        Ok(None) => log_tauri(
+            &crate::host_context::HostContext::from_app(app_for_log.clone()),
+            "[clipboard] save_image → None",
+        ),
+        Err(e) => log_tauri(
+            &crate::host_context::HostContext::from_app(app_for_log.clone()),
+            &format!("[clipboard] save_image error: {}", e.message),
         ),
     }
     result
@@ -105,7 +116,9 @@ pub fn clipboard_write_image(
     let image = match load_rgba_image(Path::new(&file_path)) {
         Ok(img) => img,
         Err(err) => {
-            log_tauri(&crate::host_context::HostContext::from_app(app.clone()), &format!(
+            log_tauri(
+                &crate::host_context::HostContext::from_app(app.clone()),
+                &format!(
                     "[clipboard] write_image load_rgba_image failed: {} (path={})",
                     err.message, file_path
                 ),
@@ -117,12 +130,16 @@ pub fn clipboard_write_image(
     let height = image.height();
     match app.clipboard().write_image(&image) {
         Ok(()) => {
-            log_tauri(&crate::host_context::HostContext::from_app(app.clone()), &format!("[clipboard] write_image ok {width}x{height} path={file_path}"),
+            log_tauri(
+                &crate::host_context::HostContext::from_app(app.clone()),
+                &format!("[clipboard] write_image ok {width}x{height} path={file_path}"),
             );
             Ok(true)
         }
         Err(err) => {
-            log_tauri(&crate::host_context::HostContext::from_app(app.clone()), &format!("[clipboard] write_image plugin error: {err} (path={file_path})"),
+            log_tauri(
+                &crate::host_context::HostContext::from_app(app.clone()),
+                &format!("[clipboard] write_image plugin error: {err} (path={file_path})"),
             );
             Ok(false)
         }

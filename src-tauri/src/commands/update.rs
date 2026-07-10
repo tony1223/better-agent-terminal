@@ -134,10 +134,7 @@ pub async fn update_check_native(
 /// next launch; the UI prompts the user to restart.
 #[cfg(feature = "desktop")]
 #[tauri::command]
-pub async fn update_install(
-    app: tauri::AppHandle,
-    channel: String,
-) -> Result<Value, BridgeError> {
+pub async fn update_install(app: tauri::AppHandle, channel: String) -> Result<Value, BridgeError> {
     let updater = build_updater(&app, &channel)?;
     let Some(update) = updater.check().await.map_err(|err| BridgeError {
         message: format!("update check failed: {err}"),
@@ -295,28 +292,33 @@ mod tests {
 
     #[test]
     fn packaged_node_runtime_marks_all_in_one_bundle() {
-        let root = std::env::temp_dir().join(format!(
-            "bat-update-bundle-mode-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("bat-update-bundle-mode-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("node-runtime")).unwrap();
-        assert_eq!(bundle_mode_from_resource_dir(Some(&root), false), "all-in-one");
+        assert_eq!(
+            bundle_mode_from_resource_dir(Some(&root), false),
+            "all-in-one"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn packaged_marker_takes_priority_over_leftover_runtime_files() {
-        let root = std::env::temp_dir().join(format!(
-            "bat-update-bundle-marker-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("bat-update-bundle-marker-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("node-runtime")).unwrap();
         std::fs::write(root.join("bundle-mode.txt"), "lightweight\n").unwrap();
-        assert_eq!(bundle_mode_from_resource_dir(Some(&root), false), "lightweight");
+        assert_eq!(
+            bundle_mode_from_resource_dir(Some(&root), false),
+            "lightweight"
+        );
         std::fs::write(root.join("bundle-mode.txt"), "all-in-one\n").unwrap();
-        assert_eq!(bundle_mode_from_resource_dir(Some(&root), false), "all-in-one");
+        assert_eq!(
+            bundle_mode_from_resource_dir(Some(&root), false),
+            "all-in-one"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -328,17 +330,23 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        assert_eq!(bundle_mode_from_resource_dir(Some(&root), false), "lightweight");
-        assert_eq!(bundle_mode_from_resource_dir(Some(&root), true), "all-in-one");
+        assert_eq!(
+            bundle_mode_from_resource_dir(Some(&root), false),
+            "lightweight"
+        );
+        assert_eq!(
+            bundle_mode_from_resource_dir(Some(&root), true),
+            "all-in-one"
+        );
         assert_eq!(bundle_mode_from_resource_dir(None, false), "all-in-one");
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn updater_manifest_keeps_channel_and_bundle_mode_separate() {
-        assert!(manifest_endpoint("stable", "all-in-one")
-            .ends_with("/latest-stable-all-in-one.json"));
-        assert!(manifest_endpoint("pre", "lightweight")
-            .ends_with("/latest-pre-lightweight.json"));
+        assert!(
+            manifest_endpoint("stable", "all-in-one").ends_with("/latest-stable-all-in-one.json")
+        );
+        assert!(manifest_endpoint("pre", "lightweight").ends_with("/latest-pre-lightweight.json"));
     }
 }
