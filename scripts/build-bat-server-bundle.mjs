@@ -109,16 +109,17 @@ Terminal=true
 Comment=Better Agent Terminal headless server
 `
 
-function installScript(target) {
+export function installScript(target) {
   return `#!/usr/bin/env bash
 # Install the self-contained bat-server bundle as a systemd service.
-# Re-runnable: regenerates the unit (keeps an existing token unless BAT_TOKEN set).
+# Re-runnable: regenerates the unit and preserves an existing credential.
 set -euo pipefail
 
 PREFIX="\${PREFIX:-/opt/bat-server}"
 DATA_DIR="\${BAT_DATA_DIR:-/root/.bat-server}"
 PORT="\${BAT_PORT:-9876}"
 BIND="\${BAT_BIND:-localhost}"
+TOKEN_FILE="\${BAT_TOKEN_FILE:-/etc/bat-server/credentials/token}"
 # systemd does not export HOME for system services, but the Rust host resolves
 # the Codex/Claude home (~/.codex, ~/.claude) from \$HOME. Without it, Codex
 # fails with "could not resolve shared Codex home". Default to the installing
@@ -128,11 +129,42 @@ UNIT=/etc/systemd/system/bat-server.service
 
 SRC="$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
 
-# Reuse the token already baked into a previous unit unless one is supplied.
-if [ -z "\${BAT_TOKEN:-}" ] && [ -f "$UNIT" ]; then
-  BAT_TOKEN="$(grep -oE -- '--token [0-9a-f]+' "$UNIT" | awk '{print $2}' | head -n1 || true)"
+# BAT_TOKEN remains supported for existing automation, but new installs keep
+# the value in an owner-only credential file. Existing units are migrated
+# without rotating the token so connected clients remain compatible.
+if [ -n "\${BAT_TOKEN:-}" ]; then
+  echo >&2 "[bat-server] warning: BAT_TOKEN is supported for compatibility; prefer BAT_TOKEN_FILE or the managed systemd credential"
+  TOKEN="$BAT_TOKEN"
+elif [ -s "$TOKEN_FILE" ]; then
+  TOKEN="$(head -n1 "$TOKEN_FILE")"
+elif [ -f "$UNIT" ]; then
+  TOKEN="$(sed -nE 's/.*--token(=|[[:space:]]+)([^[:space:]]+).*/\\2/p' "$UNIT" | head -n1 || true)"
+  if [ -n "$TOKEN" ]; then
+    echo >&2 "[bat-server] warning: migrating the legacy inline token to an owner-only credential file"
+  fi
+else
+  TOKEN=""
 fi
-TOKEN="\${BAT_TOKEN:-$(head -c32 /dev/urandom | od -An -tx1 | tr -d ' \\n')}"
+[ -n "$TOKEN" ] || TOKEN="$(head -c32 /dev/urandom | od -An -tx1 | tr -d ' \\n')"
+
+TOKEN_DIR="$(dirname "$TOKEN_FILE")"
+install -d -m 0700 "$TOKEN_DIR"
+TOKEN_TMP="$(mktemp "$TOKEN_DIR/.token.XXXXXX")"
+trap 'rm -f "$TOKEN_TMP"' EXIT
+printf '%s\\n' "$TOKEN" > "$TOKEN_TMP"
+chmod 0600 "$TOKEN_TMP"
+mv -f "$TOKEN_TMP" "$TOKEN_FILE"
+trap - EXIT
+
+# LoadCredential is preferred on systemd 247+. Older distributions retain a
+# safe, compatible fallback that passes only the owner-only file path.
+SYSTEMD_VERSION="$(systemctl --version 2>/dev/null | awk 'NR == 1 { print $2 }')"
+TOKEN_SOURCE_DIRECTIVE="Environment=BAT_TOKEN_FILE=$TOKEN_FILE"
+if [[ "$SYSTEMD_VERSION" =~ ^[0-9]+$ ]] && [ "$SYSTEMD_VERSION" -ge 247 ]; then
+  TOKEN_SOURCE_DIRECTIVE="LoadCredential=bat-server-token:$TOKEN_FILE"
+else
+  echo >&2 "[bat-server] warning: systemd credentials are unavailable; using the owner-only token file fallback"
+fi
 
 echo "[bat-server] installing to $PREFIX"
 mkdir -p "$PREFIX" "$DATA_DIR"
@@ -157,7 +189,9 @@ Type=simple
 WorkingDirectory=$PREFIX
 Environment=IS_SANDBOX=1
 Environment=HOME=$HOME_DIR
-ExecStart=$PREFIX/bat-server --bind=$BIND --port=$PORT --token=$TOKEN --data-dir=$DATA_DIR
+$TOKEN_SOURCE_DIRECTIVE
+UMask=0077
+ExecStart=$PREFIX/bat-server --bind=$BIND --port=$PORT --data-dir=$DATA_DIR
 Restart=on-failure
 RestartSec=2
 
@@ -174,6 +208,7 @@ echo
 echo "  bind:  $BIND"
 echo "  port:  $PORT"
 echo "  token: $TOKEN"
+echo "  token-file: $TOKEN_FILE"
 echo "  data:  $DATA_DIR"
 echo
 echo "If bound to localhost, tunnel from your client:"
@@ -192,11 +227,19 @@ node/claude/pnpm required.
 
     sudo ./install.sh
 
-Env overrides: PREFIX, BAT_PORT, BAT_BIND, BAT_TOKEN, BAT_DATA_DIR.
+The installer keeps the token in /etc/bat-server/credentials/token with mode
+0600 and uses a systemd credential when supported. Set BAT_TOKEN_FILE to choose
+another owner-restricted path. PREFIX, BAT_PORT, BAT_BIND, BAT_DATA_DIR, and
+BAT_HOME remain available as install-time overrides.
+
+BAT_TOKEN is retained for compatibility and is migrated into the credential
+file; using it prints a warning.
 
 ## Or run directly
 
-    cd "$(dirname "$0")" && IS_SANDBOX=1 ./bat-server --bind=localhost --port=9876 --token=<hex> --data-dir=~/.bat-server
+    mkdir -p ~/.config/better-agent-terminal
+    (umask 077; head -c32 /dev/urandom | od -An -tx1 | tr -d ' \\n' > ~/.config/better-agent-terminal/bat-server-token)
+    cd "$(dirname "$0")" && IS_SANDBOX=1 ./bat-server --bind=localhost --port=9876 --token-file=~/.config/better-agent-terminal/bat-server-token --data-dir=~/.bat-server
 
 The working directory must be this bundle root so the bundled claude/node/sidecar
 resolve exe-relative.
@@ -205,6 +248,8 @@ resolve exe-relative.
 - IS_SANDBOX=1 lets Claude Code's bypassPermissions run as root on this
   single-purpose box (the SDK's documented container/CI escape hatch).
 - Claude/Codex still need credentials (logged-in CLI or API key) on first use.
+- --token and BAT_TOKEN remain supported for older automation but emit a
+  warning; prefer --token-file, BAT_TOKEN_FILE, or the systemd installer.
 `
 
 async function buildAppImage(appDir, outFile, appImageArch) {
@@ -306,7 +351,9 @@ async function main() {
   console.log(`  codex:    ${haveCodex ? 'included' : 'NOT included (Claude-only)'}`)
 }
 
-main().catch((err) => {
-  console.error(`[bat-server] ${err.message}`)
-  process.exit(1)
-})
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((err) => {
+    console.error(`[bat-server] ${err.message}`)
+    process.exit(1)
+  })
+}

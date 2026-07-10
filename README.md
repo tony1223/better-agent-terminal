@@ -475,10 +475,22 @@ Options:
 | `--port=N` | TCP port to listen on (default: `9876`) |
 | `--bind=localhost\|tailscale\|all` | Bind only localhost, the first Tailscale `100.x.x.x` address, or all interfaces |
 | `--data-dir=PATH` | Override the persistent state directory |
-| `--token=HEX` | Use a fixed connection token instead of the persisted/random token |
+| `--token-file=PATH` | Read a fixed connection token from an owner-restricted file (recommended) |
+| `--token=HEX` | Backward-compatible fixed token override; emits a warning recommending `--token-file` |
 | `--debug` | Enable debug logging |
 
-Environment variables mirror the flags: `BAT_DATA_DIR`, `BAT_TAURI_DATA_DIR`, `BAT_PORT`, `BAT_BIND`, `BAT_TOKEN`, and `BAT_DEBUG`.
+Environment variables mirror the flags: `BAT_DATA_DIR`, `BAT_TAURI_DATA_DIR`, `BAT_PORT`, `BAT_BIND`, `BAT_TOKEN_FILE`, `BAT_TOKEN`, and `BAT_DEBUG`. `BAT_TOKEN` remains supported for existing automation and emits the same compatibility warning.
+
+For direct launches, keep a fixed token in an owner-restricted file:
+
+```bash
+mkdir -p ~/.config/better-agent-terminal
+(umask 077; head -c32 /dev/urandom | od -An -tx1 | tr -d ' \n' > ~/.config/better-agent-terminal/bat-server-token)
+bat-server --bind=localhost --port=9876 \
+  --token-file=~/.config/better-agent-terminal/bat-server-token
+```
+
+If neither a token flag nor token environment variable is supplied, BAT continues to use its persisted/random token behavior for backward compatibility.
 
 On startup, the server prints the `wss://` URL, token, certificate fingerprint, data directory, and a one-shot `connect` URL that can be pasted into a Remote Profile.
 
@@ -494,6 +506,16 @@ sudo ./bat-server-linux-aarch64/install.sh    # writes a systemd unit + generate
 # …or the single-file AppImage (same flags as the binary)
 chmod +x bat-server-aarch64.AppImage
 ./bat-server-aarch64.AppImage --port=9876 --bind=localhost
+```
+
+The systemd installer stores the token at `/etc/bat-server/credentials/token` with mode `0600`. On systemd 247 or newer it supplies that file through `LoadCredential=`; older systemd versions use the same owner-restricted file through `BAT_TOKEN_FILE`. Existing inline-token units and `BAT_TOKEN` install overrides remain compatible, are migrated to the credential file, and print a warning recommending the safer source.
+
+To rotate the installed service token, replace the credential atomically and restart the service, then update saved Remote Profiles:
+
+```bash
+sudo sh -c 'umask 077; token=$(mktemp /etc/bat-server/credentials/.token.XXXXXX) && head -c32 /dev/urandom | od -An -tx1 | tr -d " \n" > "$token" && chmod 600 "$token" && mv -f "$token" /etc/bat-server/credentials/token'
+sudo systemctl restart bat-server.service
+sudo cat /etc/bat-server/credentials/token
 ```
 
 Both set `IS_SANDBOX=1` so Claude Code's `bypassPermissions` is allowed when the service runs as root on a single-purpose box. Agent credentials (a logged-in `claude`/`codex` or an API key) are still provided once, the same as any host.

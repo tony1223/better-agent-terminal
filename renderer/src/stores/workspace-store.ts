@@ -32,6 +32,11 @@ export function sdkSessionRuntimeFamily(agentPreset?: AgentPresetId): 'claude' |
   return null
 }
 
+function defaultModelForNewAgent(agentPreset?: AgentPresetId): string | undefined {
+  if (agentPreset !== 'codex-agent' && agentPreset !== 'codex-agent-worktree') return undefined
+  return settingsStore.getSettings().defaultCodexModel || undefined
+}
+
 class WorkspaceStore {
   private state: AppState = {
     workspaces: [],
@@ -355,6 +360,7 @@ class WorkspaceStore {
     const title = preset && preset.id !== 'none'
       ? preset.name
       : 'New Terminal'
+    const defaultModel = defaultModelForNewAgent(agentPreset)
 
     const terminal: TerminalInstance = {
       id: init?.id ?? uuidv4(),
@@ -365,6 +371,7 @@ class WorkspaceStore {
       cwd: init?.cwd ?? workspace.folderPath,
       ...(init?.worktreePath ? { worktreePath: init.worktreePath } : {}),
       ...(init?.worktreeBranch ? { worktreeBranch: init.worktreeBranch } : {}),
+      ...(defaultModel ? { model: defaultModel } : {}),
       scrollbackBuffer: [],
       lastActivityTime: Date.now(),
       historyKey: uuidv4().replace(/-/g, '').slice(0, 12),

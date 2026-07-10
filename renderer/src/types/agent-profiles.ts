@@ -16,7 +16,11 @@ export interface AgentParamDefinition {
 }
 
 function getCodexAgentParamDefinitions(): AgentParamDefinition[] {
-  const dangerousMode = settingsStore.getSettings().allowBypassPermissions === true
+  const settings = settingsStore.getSettings()
+  const dangerousMode = settings.allowBypassPermissions === true
+  const defaultEffort = settings.defaultCodexEffort && CODEX_EFFORT_LEVELS.includes(settings.defaultCodexEffort)
+    ? settings.defaultCodexEffort
+    : 'high'
 
   return [
     {
@@ -45,7 +49,7 @@ function getCodexAgentParamDefinitions(): AgentParamDefinition[] {
       key: 'effortLevel',
       label: 'Codex reasoning effort',
       type: 'select',
-      defaultValue: 'high',
+      defaultValue: defaultEffort,
       options: CODEX_EFFORT_LEVELS.map(level => ({ value: level, label: `effort: ${level}` })),
     },
   ]

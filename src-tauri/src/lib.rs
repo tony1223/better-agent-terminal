@@ -7,9 +7,9 @@
 
 mod account_store;
 mod app_data;
-mod async_rt;
 #[cfg(feature = "desktop")]
 mod app_menu;
+mod async_rt;
 #[cfg(feature = "desktop")]
 mod claude_usage;
 mod codex_account_store;
@@ -43,10 +43,11 @@ mod window_registry;
 #[cfg(feature = "desktop")]
 use commands::{
     agent as agent_cmd, app as app_cmd, claude as claude_cmd, claude_channel as claude_channel_cmd,
-    claude_cli as claude_cli_cmd, clipboard as clipboard_cmd, debug as debug_cmd, dialog as dialog_cmd, fs as fs_cmd,
-    fugu as fugu_cmd, git as git_cmd, github as github_cmd, image as image_cmd, notification as notification_cmd,
-    profile as profile_cmd, pty as pty_cmd, remote as remote_cmd, runtime as runtime_cmd, settings,
-    shell as shell_cmd, snippet as snippet_cmd, tunnel as tunnel_cmd, update as update_cmd,
+    claude_cli as claude_cli_cmd, clipboard as clipboard_cmd, debug as debug_cmd,
+    dialog as dialog_cmd, fs as fs_cmd, fugu as fugu_cmd, git as git_cmd, github as github_cmd,
+    image as image_cmd, notification as notification_cmd, profile as profile_cmd, pty as pty_cmd,
+    remote as remote_cmd, runtime as runtime_cmd, settings, shell as shell_cmd,
+    snippet as snippet_cmd, tunnel as tunnel_cmd, update as update_cmd,
     worker_buffer as worker_buffer_cmd, workspace as workspace_cmd, worktree as worktree_cmd,
 };
 use serde_json::{json, Value};
@@ -54,12 +55,29 @@ use std::path::PathBuf;
 #[cfg(feature = "desktop")]
 use tauri::{Emitter, Manager};
 
+const SYSTEMD_TOKEN_CREDENTIAL: &str = "bat-server-token";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeadlessTokenSource {
+    CommandLine,
+    Environment,
+    TokenFile,
+    SystemdCredential,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HeadlessTokenInput {
+    Value(String, HeadlessTokenSource),
+    File(PathBuf, HeadlessTokenSource),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct HeadlessServerArgs {
     port: u16,
     bind_interface: String,
     data_dir: Option<PathBuf>,
     token: Option<String>,
+    token_source: Option<HeadlessTokenSource>,
 }
 
 #[derive(Debug)]
@@ -96,13 +114,18 @@ where
             print_headless_server_help();
             0
         }
-        Ok(HeadlessCliAction::Run(args)) => match run_server(args) {
-            Ok(()) => 0,
-            Err(err) => {
-                eprintln!("bat-server failed to start: {err}");
-                1
+        Ok(HeadlessCliAction::Run(args)) => {
+            if let Some(warning) = legacy_headless_token_warning(args.token_source) {
+                eprintln!("[bat-server] warning: {warning}");
             }
-        },
+            match run_server(args) {
+                Ok(()) => 0,
+                Err(err) => {
+                    eprintln!("bat-server failed to start: {err}");
+                    1
+                }
+            }
+        }
         Err(err) => {
             eprintln!("bat-server: {err}");
             eprintln!("Try `bat-server --help` for usage.");
@@ -648,9 +671,7 @@ where
         .or_else(|| std::env::var_os(app_data::TAURI_DATA_DIR_ENV))
         .map(PathBuf::from)
         .or_else(default_headless_data_dir);
-    let mut token = std::env::var("BAT_TOKEN")
-        .ok()
-        .filter(|value| !value.is_empty());
+    let mut token_input = default_headless_token_input();
     let mut iter = args.into_iter().peekable();
 
     while let Some(arg) = iter.next() {
@@ -697,14 +718,38 @@ where
             continue;
         }
         if let Some(value) = arg.strip_prefix("--token=") {
-            token = Some(value.to_string());
+            token_input = Some(HeadlessTokenInput::Value(
+                value.to_string(),
+                HeadlessTokenSource::CommandLine,
+            ));
             continue;
         }
         if arg == "--token" {
-            token = Some(
+            token_input = Some(HeadlessTokenInput::Value(
                 iter.next()
                     .ok_or_else(|| "--token requires a value".to_string())?,
-            );
+                HeadlessTokenSource::CommandLine,
+            ));
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("--token-file=") {
+            if value.is_empty() {
+                return Err("--token-file requires a path".to_string());
+            }
+            token_input = Some(HeadlessTokenInput::File(
+                PathBuf::from(value),
+                HeadlessTokenSource::TokenFile,
+            ));
+            continue;
+        }
+        if arg == "--token-file" {
+            let value = iter
+                .next()
+                .ok_or_else(|| "--token-file requires a path".to_string())?;
+            token_input = Some(HeadlessTokenInput::File(
+                PathBuf::from(value),
+                HeadlessTokenSource::TokenFile,
+            ));
             continue;
         }
         if arg.starts_with('-') {
@@ -714,12 +759,89 @@ where
     }
 
     let bind_interface = normalize_headless_bind(&bind_interface)?;
+    let (token, token_source) = match token_input {
+        Some(HeadlessTokenInput::Value(token, source)) => (Some(token), Some(source)),
+        Some(HeadlessTokenInput::File(path, source)) => {
+            (Some(read_headless_token_file(&path)?), Some(source))
+        }
+        None => (None, None),
+    };
     Ok(HeadlessCliAction::Run(HeadlessServerArgs {
         port,
         bind_interface,
         data_dir,
         token,
+        token_source,
     }))
+}
+
+fn default_headless_token_input() -> Option<HeadlessTokenInput> {
+    if let Some(token) = std::env::var("BAT_TOKEN")
+        .ok()
+        .filter(|value| !value.is_empty())
+    {
+        return Some(HeadlessTokenInput::Value(
+            token,
+            HeadlessTokenSource::Environment,
+        ));
+    }
+
+    if let Some(path) = std::env::var_os("BAT_TOKEN_FILE")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        return Some(HeadlessTokenInput::File(
+            path,
+            HeadlessTokenSource::TokenFile,
+        ));
+    }
+
+    if let Some(directory) = std::env::var_os("CREDENTIALS_DIRECTORY")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        let path = directory.join(SYSTEMD_TOKEN_CREDENTIAL);
+        if path.is_file() {
+            return Some(HeadlessTokenInput::File(
+                path,
+                HeadlessTokenSource::SystemdCredential,
+            ));
+        }
+    }
+
+    None
+}
+
+fn read_headless_token_file(path: &std::path::Path) -> Result<String, String> {
+    let token = std::fs::read_to_string(path)
+        .map_err(|err| format!("could not read token file {}: {err}", path.display()))?;
+    #[cfg(unix)]
+    if let Ok(metadata) = std::fs::metadata(path) {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            eprintln!(
+                "[bat-server] warning: token file {} is accessible beyond its owner; prefer chmod 600",
+                path.display()
+            );
+        }
+    }
+    let token = token.trim();
+    if token.is_empty() {
+        return Err(format!("token file is empty: {}", path.display()));
+    }
+    Ok(token.to_string())
+}
+
+fn legacy_headless_token_warning(source: Option<HeadlessTokenSource>) -> Option<&'static str> {
+    match source {
+        Some(HeadlessTokenSource::CommandLine) => Some(
+            "--token is supported for compatibility; prefer --token-file or a systemd credential",
+        ),
+        Some(HeadlessTokenSource::Environment) => Some(
+            "BAT_TOKEN is supported for compatibility; prefer BAT_TOKEN_FILE or a systemd credential",
+        ),
+        _ => None,
+    }
 }
 
 fn parse_env_port() -> Result<Option<u16>, String> {
@@ -778,10 +900,12 @@ Usage:\n  bat-server [options]\n\n\
 Options:\n  --port=N            TCP port to listen on (default: 9876)\n  \
 --bind=IFACE        localhost | tailscale | all (default: localhost)\n  \
 --data-dir=PATH     persistent state directory\n  \
---token=HEX         pin a known token (default: persisted or random)\n  \
+--token-file=PATH   read a token from an owner-restricted file (recommended)\n  \
+--token=HEX         pin a known token (compatibility; emits a warning)\n  \
 --debug             write debug logs inside the app data dir\n  \
 -h, --help          show this help\n\n\
-Environment variables: BAT_DATA_DIR BAT_TAURI_DATA_DIR BAT_PORT BAT_BIND BAT_TOKEN BAT_DEBUG"
+Environment variables: BAT_DATA_DIR BAT_TAURI_DATA_DIR BAT_PORT BAT_BIND BAT_TOKEN_FILE BAT_TOKEN BAT_DEBUG\n\n\
+systemd credential: $CREDENTIALS_DIRECTORY/bat-server-token"
     );
 }
 
@@ -806,6 +930,55 @@ mod headless_tests {
         assert_eq!(args.bind_interface, "tailscale");
         assert_eq!(args.data_dir, Some(PathBuf::from("/tmp/bat")));
         assert_eq!(args.token.as_deref(), Some("abc123"));
+        assert_eq!(args.token_source, Some(HeadlessTokenSource::CommandLine));
+        assert!(legacy_headless_token_warning(args.token_source).is_some());
+    }
+
+    #[test]
+    fn parse_headless_args_reads_token_file_without_legacy_warning() {
+        let path = std::env::temp_dir().join(format!(
+            "bat-server-token-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, "file-token\n").unwrap();
+        let parsed = parse_headless_server_args([
+            "--token-file".to_string(),
+            path.to_string_lossy().into_owned(),
+        ])
+        .unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        let HeadlessCliAction::Run(args) = parsed else {
+            panic!("expected run action");
+        };
+        assert_eq!(args.token.as_deref(), Some("file-token"));
+        assert_eq!(args.token_source, Some(HeadlessTokenSource::TokenFile));
+        assert_eq!(legacy_headless_token_warning(args.token_source), None);
+    }
+
+    #[test]
+    fn parse_headless_args_keeps_last_token_source_compatibility() {
+        let parsed = parse_headless_server_args([
+            "--token-file=missing-token-file".to_string(),
+            "--token=legacy-override".to_string(),
+        ])
+        .unwrap();
+        let HeadlessCliAction::Run(args) = parsed else {
+            panic!("expected run action");
+        };
+        assert_eq!(args.token.as_deref(), Some("legacy-override"));
+        assert_eq!(args.token_source, Some(HeadlessTokenSource::CommandLine));
+
+        assert!(matches!(
+            parse_headless_server_args([
+                "--token-file=missing-token-file".to_string(),
+                "--help".to_string(),
+            ]),
+            Ok(HeadlessCliAction::Help)
+        ));
     }
 
     #[test]
