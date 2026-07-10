@@ -1,5 +1,6 @@
 import * as assert from 'assert'
 import { readFile } from 'fs/promises'
+import { normalizeReasoningSummary } from '../renderer/src/utils/reasoning-summary'
 
 async function main() {
   const source = await readFile('renderer/src/components/CodexAgentPanel.tsx', 'utf8')
@@ -34,6 +35,31 @@ async function main() {
     claudeSource,
     /if \(!isRemoteConnected \|\| remoteHistoryAttachedRef\.current\) return/,
     'Claude reconnect should replay remote history once even when session startup is already cached',
+  )
+  assert.equal(
+    normalizeReasoningSummary('**Step A**\n\n<!-- -->\n\n**Step B**'),
+    '**Step A**\n\n**Step B**',
+    'Codex reasoning summaries should hide the upstream empty-comment separator',
+  )
+  assert.equal(
+    normalizeReasoningSummary('**Step A**<!-- -->**Step B**'),
+    '**Step A**\n\n**Step B**',
+    'Inline Codex separators should remain a Markdown paragraph boundary',
+  )
+  assert.equal(
+    normalizeReasoningSummary('before <!-- keep this --> after'),
+    'before <!-- keep this --> after',
+    'Reasoning normalization must preserve non-empty HTML comments',
+  )
+  assert.equal(
+    source.includes('<pre className="claude-thinking-content">{msg.thinking}</pre>'),
+    false,
+    'Completed Codex reasoning should not render as raw preformatted Markdown',
+  )
+  assert.equal(
+    (source.match(/<ReasoningSummary/g) || []).length >= 3,
+    true,
+    'Completed, streaming, and subagent Codex reasoning should share ReasoningSummary rendering',
   )
   for (const [name, panelSource] of [['Codex', source], ['Claude', claudeSource]] as const) {
     assert.match(

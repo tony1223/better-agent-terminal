@@ -21,6 +21,7 @@ interface ChatMarkdownProps {
   text: string
   cwd: string
   className?: string
+  resolvePathLinks?: boolean
 }
 
 const resolvedPathCache = new Map<string, ResolvedPathLink | null>()
@@ -82,12 +83,16 @@ function applyResolvedPathLinks(html: string, links: Map<string, ResolvedPathLin
   return container.innerHTML
 }
 
-export function ChatMarkdown({ text, cwd, className = 'claude-markdown' }: ChatMarkdownProps) {
+export function ChatMarkdown({ text, cwd, className = 'claude-markdown', resolvePathLinks = true }: ChatMarkdownProps) {
   const [resolvedLinks, setResolvedLinks] = useState<Map<string, ResolvedPathLink>>(new Map())
   const html = useMemo(() => renderChatMarkdown(text, cwd), [text, cwd])
 
   useEffect(() => {
     let cancelled = false
+    if (!resolvePathLinks) {
+      setResolvedLinks(new Map())
+      return
+    }
     const candidates = extractPathLinkCandidates(text)
     if (candidates.length === 0) {
       setResolvedLinks(new Map())
@@ -128,9 +133,12 @@ export function ChatMarkdown({ text, cwd, className = 'claude-markdown' }: ChatM
     })
 
     return () => { cancelled = true }
-  }, [text, cwd])
+  }, [text, cwd, resolvePathLinks])
 
-  const linkedHtml = useMemo(() => applyResolvedPathLinks(html, resolvedLinks), [html, resolvedLinks])
+  const linkedHtml = useMemo(
+    () => resolvePathLinks ? applyResolvedPathLinks(html, resolvedLinks) : html,
+    [html, resolvedLinks, resolvePathLinks],
+  )
 
   return (
     <div

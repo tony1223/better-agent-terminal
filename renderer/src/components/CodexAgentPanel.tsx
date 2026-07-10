@@ -34,6 +34,7 @@ import { normalizePendingAskUser, wrapPreviewHtml } from './AskUserQuestion.help
 import { autoContinueTurnEndKey, buildCollapsedOutputPreview, formatContentSize, formatElapsed, formatFullTimestamp, formatTimestamp, parseContentBlocks, parseShellInvocation, shouldAutoContinueAfterTurnEnd, shouldShowTimeDivider, splitSystemReminders, stringifyToolResult, summarizeToolSearchResult, toolDescription, toolInputContent, toolInputSummary, truncateMiddle } from './CodexAgentPanel.helpers'
 import type { AttachedFile, AttachedImage, CodexAccountEntry, CodexAgentPanelProps, MessageItem, ModelInfo, PendingAskUser, PendingPermission, SessionMeta, SessionSummary, SlashCommandInfo } from './CodexAgentPanel.types'
 import { CodexTodoChecklist } from './CodexTodoChecklist'
+import { ReasoningSummary } from './ReasoningSummary'
 
 function clearRuntimeStatusMeta(meta: SessionMeta | null): SessionMeta | null {
   if (!meta?.runtimeStatus && !meta?.runtimeMessage && !meta?.runtimeStatusStartedAt) return meta
@@ -621,7 +622,7 @@ export function CodexAgentPanel({ sessionId, cwd, isActive, workspaceId, onClose
     }
   }, [])
   const messagesEndRef = useRef<HTMLDivElement>(null)
-  const streamingThinkingRef = useRef<HTMLPreElement>(null)
+  const streamingThinkingRef = useRef<HTMLDivElement>(null)
   const messagesContainerRef = useRef<HTMLDivElement>(null)
   const panelRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -4163,7 +4164,7 @@ export function CodexAgentPanel({ sessionId, cwd, isActive, workspaceId, onClose
                   <span className="claude-thinking-label">{t('claude.thinking')}</span>
                 </div>
                 {isExpanded && (
-                  <pre className="claude-thinking-content">{msg.thinking}</pre>
+                  <ReasoningSummary text={msg.thinking} cwd={markdownCwd} />
                 )}
               </div>
             )
@@ -4325,7 +4326,7 @@ export function CodexAgentPanel({ sessionId, cwd, isActive, workspaceId, onClose
                   <span className="claude-thinking-label">{t('claude.thinking')}{isStreaming && streamingThinking && !streamingText ? '...' : ''}</span>
                 </div>
                 {showThinking && (
-                  <pre ref={streamingThinkingRef} className="claude-thinking-content">{streamingThinking}</pre>
+                  <ReasoningSummary ref={streamingThinkingRef} text={streamingThinking} cwd={markdownCwd} />
                 )}
               </div>
             </div>
@@ -5417,7 +5418,7 @@ export function CodexAgentPanel({ sessionId, cwd, isActive, workspaceId, onClose
                     <div className="tl-item">
                       <div className="tl-dot dot-thinking" />
                       <div className="tl-content">
-                        <pre className="claude-thinking-block">{streamThink}</pre>
+                        <ReasoningSummary text={streamThink} cwd={markdownCwd} className="claude-thinking-content claude-thinking-subagent" />
                       </div>
                     </div>
                   )}

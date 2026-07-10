@@ -835,6 +835,31 @@
   font-family: inherit;
 }
 
+.claude-thinking-markdown {
+  white-space: normal;
+}
+
+.claude-thinking-markdown > :first-child {
+  margin-top: 0;
+}
+
+.claude-thinking-markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.claude-thinking-markdown p {
+  margin: 0 0 8px;
+}
+
+.claude-thinking-markdown strong {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.claude-thinking-subagent {
+  margin-left: 0;
+}
+
 /* Tool Call Cards */
 .claude-tool-header {
   display: flex;
