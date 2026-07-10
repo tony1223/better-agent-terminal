@@ -1,5 +1,5 @@
 import { host, isTauri } from './host-api'
-import { useEffect, useState, useCallback, useRef } from 'react'
+import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import i18next from 'i18next'
 import { workspaceStore } from './stores/workspace-store'
@@ -46,6 +46,7 @@ const MAX_SNIPPET_WIDTH = 500
 // the host, and reset to the min on success or on resume from sleep.
 const RECONNECT_BACKOFF_MIN = 3000
 const RECONNECT_BACKOFF_MAX = 30000
+const EMPTY_TERMINALS: TerminalInstance[] = []
 
 type ProfileEntryLike = {
   id?: string
@@ -1002,6 +1003,18 @@ export default function App() {
 
   // Filter out detached workspaces from main window
   const visibleWorkspaces = state.workspaces.filter(w => !detachedIds.has(w.id))
+  // Workspace switches do not change the terminal collection. Keep each
+  // workspace's array referentially stable so memoized hidden views do not
+  // reconcile every mounted terminal and message timeline on every switch.
+  const terminalsByWorkspace = useMemo(() => {
+    const grouped = new Map<string, TerminalInstance[]>()
+    for (const terminal of state.terminals) {
+      const terminals = grouped.get(terminal.workspaceId)
+      if (terminals) terminals.push(terminal)
+      else grouped.set(terminal.workspaceId, [terminal])
+    }
+    return grouped
+  }, [state.terminals])
 
   useEffect(() => {
     if (host.debug.isDebugMode !== true) return
@@ -1046,7 +1059,7 @@ export default function App() {
           <div className="workspace-container active">
             <WorkspaceView
               workspace={ws}
-              terminals={workspaceStore.getWorkspaceTerminals(ws.id)}
+              terminals={terminalsByWorkspace.get(ws.id) ?? EMPTY_TERMINALS}
               focusedTerminalId={state.focusedTerminalId}
               isActive={true}
               isRemoteConnected={isRemoteConnected}
@@ -1104,8 +1117,10 @@ export default function App() {
             >
               <WorkspaceView
                 workspace={workspace}
-                terminals={workspaceStore.getWorkspaceTerminals(workspace.id)}
-                focusedTerminalId={workspace.id === state.activeWorkspaceId ? state.focusedTerminalId : null}
+                terminals={terminalsByWorkspace.get(workspace.id) ?? EMPTY_TERMINALS}
+                focusedTerminalId={workspace.id === state.activeWorkspaceId
+                  ? state.focusedTerminalId
+                  : workspace.focusedTerminalId ?? null}
                 isActive={workspace.id === state.activeWorkspaceId}
                 isRemoteConnected={isRemoteConnected}
               />

@@ -1,5 +1,5 @@
 import { host, isTauri } from '../host-api'
-import { useState, useEffect, useRef, useCallback, useMemo, Fragment, cloneElement, isValidElement } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo, Fragment, cloneElement, isValidElement, memo } from 'react'
 import { flushSync } from 'react-dom'
 import { useTranslation } from 'react-i18next'
 import type { TFunction } from 'i18next'
@@ -33,6 +33,7 @@ import { buildCollapsedOutputPreview, formatContentSize, parseShellInvocation, s
 import { normalizePendingAskUser, summarizeAskUserInput, wrapPreviewHtml } from './AskUserQuestion.helpers'
 import { AgentActivityTree } from './AgentActivityTree'
 import { buildAgentTaskTree, summarizeAgentTree, terminateLifecycleEntries, type TaskLifecycle } from '../lib/agent-task-tree'
+import { usePanelActivation, usePanelActiveEffect, type PanelActivation } from '../utils/panel-activation'
 
 interface SessionMeta {
   model?: string
@@ -256,7 +257,16 @@ function includeCurrentOption(values: readonly string[], current: string): strin
   return current && !filtered.includes(current) ? [current, ...filtered] : filtered
 }
 
-export function ClaudeAgentPanel({ sessionId, cwd, isActive, workspaceId, onClose, showUserMsg = true, showAssistantMsg = true, showToolMsg = true, showThinkingMsg = true, isRemoteConnected = false, targetAgent }: Readonly<ClaudeAgentPanelProps>) {
+type ClaudeAgentPanelContentProps = Omit<ClaudeAgentPanelProps, 'isActive'> & {
+  activation: PanelActivation
+}
+
+export function ClaudeAgentPanel({ isActive, ...props }: Readonly<ClaudeAgentPanelProps>) {
+  const activation = usePanelActivation(isActive)
+  return <ClaudeAgentPanelContent {...props} activation={activation} />
+}
+
+const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionId, cwd, activation, workspaceId, onClose, showUserMsg = true, showAssistantMsg = true, showToolMsg = true, showThinkingMsg = true, isRemoteConnected = false, targetAgent }: Readonly<ClaudeAgentPanelContentProps>) {
   const { t, i18n } = useTranslation()
   // Determine backend/session flavor from agentPreset
   const terminal = workspaceStore.getState().terminals.find(t => t.id === sessionId)
@@ -1742,24 +1752,24 @@ export function ClaudeAgentPanel({ sessionId, cwd, isActive, workspaceId, onClos
   }, [sessionId, cwd, isCodexSession, codexSandboxMode, codexApprovalPolicy, isRemoteConnected])
 
   // Refresh session metadata when panel becomes active (fixes stale display after window switch)
-  useEffect(() => {
-    if (isActive) {
-      host.claude.getSessionMeta(sessionId).then(meta => {
-        if (meta) {
-          setSessionMeta(meta as unknown as SessionMeta)
-          const hostModel = (meta as unknown as SessionMeta).model
-          if (hostModel) {
-            const normalizedHostModel = normalizeClaudeModelSelection(hostModel) || hostModel
-            // Remote mode is host-owned: on a window switch the chip must reflect
-            // the host session's live model, overwriting any stale local value.
-            // Locally we keep our own value to avoid racing an in-flight change
-            // the host hasn't applied yet.
-            setCurrentModel(prev => isRemoteConnected ? normalizedHostModel : (prev || normalizedHostModel))
-          }
+  const refreshActiveSessionMeta = useCallback(() => {
+    host.claude.getSessionMeta(sessionId).then(meta => {
+      if (meta) {
+        const nextMeta = meta as unknown as SessionMeta
+        setSessionMeta(previous => JSON.stringify(previous) === JSON.stringify(nextMeta) ? previous : nextMeta)
+        const hostModel = nextMeta.model
+        if (hostModel) {
+          const normalizedHostModel = normalizeClaudeModelSelection(hostModel) || hostModel
+          // Remote mode is host-owned: on a window switch the chip must reflect
+          // the host session's live model, overwriting any stale local value.
+          // Locally we keep our own value to avoid racing an in-flight change
+          // the host hasn't applied yet.
+          setCurrentModel(prev => isRemoteConnected ? normalizedHostModel : (prev || normalizedHostModel))
         }
-      }).catch(() => {})
-    }
-  }, [isActive, sessionId, isRemoteConnected])
+      }
+    }).catch(() => {})
+  }, [sessionId, isRemoteConnected])
+  usePanelActiveEffect(activation, refreshActiveSessionMeta)
 
   const ensureSessionStarted = useCallback(async () => {
     const existingStart = startedSessionPromises.get(sessionId)
@@ -2036,9 +2046,9 @@ export function ClaudeAgentPanel({ sessionId, cwd, isActive, workspaceId, onClos
     }
   }, [sessionId, sessionMeta?.sdkSessionId, availableModels.length, isCodexSession])
 
-  // Fetch git branch on mount/cwd changes, and keep active sessions fresh when
-  // the branch changes outside the running renderer session.
-  useEffect(() => {
+  // Fetch git branch while active and keep it fresh when the branch changes
+  // outside the running renderer session.
+  const watchActiveGitBranch = useCallback(() => {
     let disposed = false
     const refreshGitBranch = () => {
       host.git.getBranch(cwd)
@@ -2046,8 +2056,6 @@ export function ClaudeAgentPanel({ sessionId, cwd, isActive, workspaceId, onClos
         .catch(() => { if (!disposed) setGitBranch(null) })
     }
     refreshGitBranch()
-    if (!isActive) return () => { disposed = true }
-
     const interval = window.setInterval(refreshGitBranch, 5000)
     const handleFocus = () => refreshGitBranch()
     const handleVisibilityChange = () => {
@@ -2061,7 +2069,8 @@ export function ClaudeAgentPanel({ sessionId, cwd, isActive, workspaceId, onClos
       window.removeEventListener('focus', handleFocus)
       document.removeEventListener('visibilitychange', handleVisibilityChange)
     }
-  }, [cwd, isActive])
+  }, [cwd])
+  usePanelActiveEffect(activation, watchActiveGitBranch)
 
   // Fetch subagent messages from SDK when task modal opens (for completed tasks with no streamed messages)
   useEffect(() => {
@@ -2128,12 +2137,11 @@ export function ClaudeAgentPanel({ sessionId, cwd, isActive, workspaceId, onClos
     return () => clearTimeout(timer)
   }, [filePickerQuery, showFilePicker, cwd])
 
-  // Focus textarea when active
-  useEffect(() => {
-    if (isActive) {
-      textareaRef.current?.focus()
-    }
-  }, [isActive])
+  // Focus textarea when active without reconciling the full message timeline.
+  const focusActiveTextarea = useCallback(() => {
+    textareaRef.current?.focus()
+  }, [])
+  usePanelActiveEffect(activation, focusActiveTextarea)
 
   const handleModelSelect = useCallback(async (modelValue: string) => {
     const selectedModel = normalizeClaudeModelSelection(modelValue) || modelValue
@@ -2348,17 +2356,17 @@ export function ClaudeAgentPanel({ sessionId, cwd, isActive, workspaceId, onClos
     }
   }, [])
 
-  // Listen for skill insertion from SkillsPanel
-  useEffect(() => {
+  // Listen for skill insertion from SkillsPanel only while this panel is active.
+  const bindActiveSkillInsertion = useCallback(() => {
     const handler = (e: Event) => {
-      if (!isActive) return
       const { name } = (e as CustomEvent).detail as { name: string }
       setInputValue('/' + name + ' ')
       textareaRef.current?.focus()
     }
     window.addEventListener('claude-insert-command', handler)
     return () => window.removeEventListener('claude-insert-command', handler)
-  }, [isActive, setInputValue])
+  }, [setInputValue])
+  usePanelActiveEffect(activation, bindActiveSkillInsertion)
 
   const handleSend = useCallback(async () => {
     const __sendT0 = performance.now()
@@ -3173,12 +3181,13 @@ export function ClaudeAgentPanel({ sessionId, cwd, isActive, workspaceId, onClos
     }
   }, [pendingPermission])
 
-  // Auto-focus permission card when it appears or when panel becomes active again
-  useEffect(() => {
-    if (isActive && pendingPermission && permissionCardRef.current) {
+  // Auto-focus permission card when it appears or when panel becomes active again.
+  const focusActivePermission = useCallback(() => {
+    if (pendingPermission && permissionCardRef.current) {
       permissionCardRef.current.focus()
     }
-  }, [isActive, pendingPermission])
+  }, [pendingPermission])
+  usePanelActiveEffect(activation, focusActivePermission)
 
   const permissionCustomRef = useRef<HTMLInputElement>(null)
 
@@ -3189,9 +3198,9 @@ export function ClaudeAgentPanel({ sessionId, cwd, isActive, workspaceId, onClos
     }
   }, [permissionFocus])
 
-  // Global keyboard listener
-  useEffect(() => {
-    if (!isActive) return
+  // Global keyboard listener. Activation is handled by the lightweight
+  // controller so workspace switches do not re-render the message history.
+  const bindActiveKeyboard = useCallback(() => {
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
       // Ctrl+P: open file picker
       if ((e.ctrlKey || e.metaKey) && e.key === 'p') {
@@ -3303,7 +3312,8 @@ export function ClaudeAgentPanel({ sessionId, cwd, isActive, workspaceId, onClos
     }
     window.addEventListener('keydown', handleGlobalKeyDown)
     return () => window.removeEventListener('keydown', handleGlobalKeyDown)
-  }, [isActive, isStreaming, handleStop, pendingPermission, permissionFocus, handlePermissionSelect, showResumeList, showModelList, taskModal, contentModal, showFilePicker, filePickerPreview])
+  }, [isStreaming, handleStop, pendingPermission, permissionFocus, handlePermissionSelect, showResumeList, showModelList, taskModal, contentModal, showFilePicker, filePickerPreview])
+  usePanelActiveEffect(activation, bindActiveKeyboard)
 
   const handleAskUserSubmit = useCallback(() => {
     if (!pendingQuestion) return
@@ -5837,4 +5847,4 @@ export function ClaudeAgentPanel({ sessionId, cwd, isActive, workspaceId, onClos
       )}
     </div>
   )
-}
+})

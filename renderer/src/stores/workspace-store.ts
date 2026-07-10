@@ -141,7 +141,9 @@ class WorkspaceStore {
     const currentWsId = this.state.activeWorkspaceId
     const currentFocus = this.state.focusedTerminalId
     const updatedWorkspaces = this.state.workspaces.map(w =>
-      w.id === currentWsId ? { ...w, focusedTerminalId: currentFocus ?? undefined } : w
+      w.id === currentWsId && w.focusedTerminalId !== (currentFocus ?? undefined)
+        ? { ...w, focusedTerminalId: currentFocus ?? undefined }
+        : w
     )
 
     const restoredFocus = this.restoredFocusForWorkspace(id, updatedWorkspaces)
@@ -509,6 +511,9 @@ class WorkspaceStore {
   }
 
   updateTerminalModel(id: string, model: string): void {
+    const terminal = this.state.terminals.find(t => t.id === id)
+    if (!terminal || terminal.model === model) return
+
     this.state = {
       ...this.state,
       terminals: this.state.terminals.map(t =>

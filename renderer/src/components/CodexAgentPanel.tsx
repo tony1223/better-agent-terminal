@@ -1,5 +1,5 @@
 import { host, isTauri } from '../host-api'
-import { useState, useEffect, useRef, useCallback, useMemo, Fragment, cloneElement, isValidElement } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo, Fragment, cloneElement, isValidElement, memo } from 'react'
 import { flushSync } from 'react-dom'
 import { useTranslation } from 'react-i18next'
 import type { TFunction } from 'i18next'
@@ -35,6 +35,7 @@ import { autoContinueTurnEndKey, buildCollapsedOutputPreview, formatContentSize,
 import type { AttachedFile, AttachedImage, CodexAccountEntry, CodexAgentPanelProps, MessageItem, ModelInfo, PendingAskUser, PendingPermission, SessionMeta, SessionSummary, SlashCommandInfo } from './CodexAgentPanel.types'
 import { CodexTodoChecklist } from './CodexTodoChecklist'
 import { ReasoningSummary } from './ReasoningSummary'
+import { usePanelActivation, usePanelActiveEffect, type PanelActivation } from '../utils/panel-activation'
 
 function clearRuntimeStatusMeta(meta: SessionMeta | null): SessionMeta | null {
   if (!meta?.runtimeStatus && !meta?.runtimeMessage && !meta?.runtimeStatusStartedAt) return meta
@@ -262,7 +263,16 @@ function isCodexDiffChangeLine(line: string): boolean {
     || (line.startsWith('-') && !line.startsWith('---'))
 }
 
-export function CodexAgentPanel({ sessionId, cwd, isActive, workspaceId, onClose, showUserMsg = true, showAssistantMsg = true, showToolMsg = true, showThinkingMsg = true, isRemoteConnected = false, onRequestLogin }: Readonly<CodexAgentPanelProps>) {
+type CodexAgentPanelContentProps = Omit<CodexAgentPanelProps, 'isActive'> & {
+  activation: PanelActivation
+}
+
+export function CodexAgentPanel({ isActive, ...props }: Readonly<CodexAgentPanelProps>) {
+  const activation = usePanelActivation(isActive)
+  return <CodexAgentPanelContent {...props} activation={activation} />
+}
+
+const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId, cwd, activation, workspaceId, onClose, showUserMsg = true, showAssistantMsg = true, showToolMsg = true, showThinkingMsg = true, isRemoteConnected = false, onRequestLogin }: Readonly<CodexAgentPanelContentProps>) {
   const { t, i18n } = useTranslation()
   const terminal = workspaceStore.getState().terminals.find(t => t.id === sessionId)
   const isCodexSession = true
@@ -1710,22 +1720,22 @@ export function CodexAgentPanel({ sessionId, cwd, isActive, workspaceId, onClose
   }, [sessionId, cwd, isCodexSession, codexSandboxMode, codexApprovalPolicy])
 
   // Refresh session metadata when panel becomes active (fixes stale display after window switch)
-  useEffect(() => {
-    if (isActive) {
-      host.claude.getSessionMeta(sessionId).then(meta => {
-        if (meta) {
-          setSessionMeta(meta as unknown as SessionMeta)
-          if ((meta as unknown as SessionMeta).model) {
-            const nextModel = (meta as unknown as SessionMeta).model!
-            setCurrentModel(prev => isCodexSession ? nextModel : (prev || nextModel))
-            if (isCodexSession) {
-              workspaceStore.updateTerminalModel(sessionId, nextModel)
-            }
+  const refreshActiveSessionMeta = useCallback(() => {
+    host.claude.getSessionMeta(sessionId).then(meta => {
+      if (meta) {
+        const nextMeta = meta as unknown as SessionMeta
+        setSessionMeta(previous => JSON.stringify(previous) === JSON.stringify(nextMeta) ? previous : nextMeta)
+        if (nextMeta.model) {
+          const nextModel = nextMeta.model
+          setCurrentModel(prev => isCodexSession ? nextModel : (prev || nextModel))
+          if (isCodexSession) {
+            workspaceStore.updateTerminalModel(sessionId, nextModel)
           }
         }
-      }).catch(() => {})
-    }
-  }, [isActive, sessionId, isCodexSession])
+      }
+    }).catch(() => {})
+  }, [sessionId, isCodexSession])
+  usePanelActiveEffect(activation, refreshActiveSessionMeta)
 
   const ensureSessionStarted = useCallback(async () => {
     const existingStart = startedSessionPromises.get(sessionId)
@@ -1915,9 +1925,9 @@ export function CodexAgentPanel({ sessionId, cwd, isActive, workspaceId, onClose
     }
   }, [sessionId, sessionMeta?.sdkSessionId, availableModels.length, isCodexSession])
 
-  // Fetch git branch on mount/cwd changes, and keep active sessions fresh when
-  // the branch changes outside the running renderer session.
-  useEffect(() => {
+  // Fetch git branch while active and keep it fresh when the branch changes
+  // outside the running renderer session.
+  const watchActiveGitBranch = useCallback(() => {
     let disposed = false
     const refreshGitBranch = () => {
       host.git.getBranch(cwd)
@@ -1925,8 +1935,6 @@ export function CodexAgentPanel({ sessionId, cwd, isActive, workspaceId, onClose
         .catch(() => { if (!disposed) setGitBranch(null) })
     }
     refreshGitBranch()
-    if (!isActive) return () => { disposed = true }
-
     const interval = window.setInterval(refreshGitBranch, 5000)
     const handleFocus = () => refreshGitBranch()
     const handleVisibilityChange = () => {
@@ -1940,7 +1948,8 @@ export function CodexAgentPanel({ sessionId, cwd, isActive, workspaceId, onClose
       window.removeEventListener('focus', handleFocus)
       document.removeEventListener('visibilitychange', handleVisibilityChange)
     }
-  }, [cwd, isActive])
+  }, [cwd])
+  usePanelActiveEffect(activation, watchActiveGitBranch)
 
   // Fetch subagent messages from SDK when task modal opens (for completed tasks with no streamed messages)
   useEffect(() => {
@@ -2007,12 +2016,11 @@ export function CodexAgentPanel({ sessionId, cwd, isActive, workspaceId, onClose
     return () => clearTimeout(timer)
   }, [filePickerQuery, showFilePicker, cwd])
 
-  // Focus textarea when active
-  useEffect(() => {
-    if (isActive) {
-      textareaRef.current?.focus()
-    }
-  }, [isActive])
+  // Focus textarea when active without reconciling the full message timeline.
+  const focusActiveTextarea = useCallback(() => {
+    textareaRef.current?.focus()
+  }, [])
+  usePanelActiveEffect(activation, focusActiveTextarea)
 
   const handleModelSelect = useCallback(async (modelValue: string) => {
     if (isCodexSession && modelValue !== currentModel) {
@@ -2225,17 +2233,17 @@ export function CodexAgentPanel({ sessionId, cwd, isActive, workspaceId, onClose
     }
   }, [])
 
-  // Listen for skill insertion from SkillsPanel
-  useEffect(() => {
+  // Listen for skill insertion from SkillsPanel only while this panel is active.
+  const bindActiveSkillInsertion = useCallback(() => {
     const handler = (e: Event) => {
-      if (!isActive) return
       const { name } = (e as CustomEvent).detail as { name: string }
       setInputValue('/' + name + ' ')
       textareaRef.current?.focus()
     }
     window.addEventListener('claude-insert-command', handler)
     return () => window.removeEventListener('claude-insert-command', handler)
-  }, [isActive, setInputValue])
+  }, [setInputValue])
+  usePanelActiveEffect(activation, bindActiveSkillInsertion)
 
   const handleSend = useCallback(async () => {
     const sendStart = performance.now()
@@ -3042,12 +3050,13 @@ export function CodexAgentPanel({ sessionId, cwd, isActive, workspaceId, onClose
     }
   }, [pendingPermission])
 
-  // Auto-focus permission card when it appears or when panel becomes active again
-  useEffect(() => {
-    if (isActive && pendingPermission && permissionCardRef.current) {
+  // Auto-focus permission card when it appears or when panel becomes active again.
+  const focusActivePermission = useCallback(() => {
+    if (pendingPermission && permissionCardRef.current) {
       permissionCardRef.current.focus()
     }
-  }, [isActive, pendingPermission])
+  }, [pendingPermission])
+  usePanelActiveEffect(activation, focusActivePermission)
 
   const permissionCustomRef = useRef<HTMLInputElement>(null)
 
@@ -3058,9 +3067,9 @@ export function CodexAgentPanel({ sessionId, cwd, isActive, workspaceId, onClose
     }
   }, [permissionFocus])
 
-  // Global keyboard listener
-  useEffect(() => {
-    if (!isActive) return
+  // Global keyboard listener. Activation is handled by the lightweight
+  // controller so workspace switches do not re-render the message history.
+  const bindActiveKeyboard = useCallback(() => {
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
       // Ctrl+P: open file picker
       if ((e.ctrlKey || e.metaKey) && e.key === 'p') {
@@ -3176,7 +3185,8 @@ export function CodexAgentPanel({ sessionId, cwd, isActive, workspaceId, onClose
     }
     window.addEventListener('keydown', handleGlobalKeyDown)
     return () => window.removeEventListener('keydown', handleGlobalKeyDown)
-  }, [isActive, isStreaming, handleStop, pendingPermission, permissionFocus, handlePermissionSelect, showResumeList, showModelList, taskModal, contentModal, showFilePicker, filePickerPreview])
+  }, [isStreaming, handleStop, pendingPermission, permissionFocus, handlePermissionSelect, showResumeList, showModelList, taskModal, contentModal, showFilePicker, filePickerPreview])
+  usePanelActiveEffect(activation, bindActiveKeyboard)
 
   const handleAskUserSubmit = useCallback(() => {
     if (!pendingQuestion) return
@@ -5693,4 +5703,4 @@ export function CodexAgentPanel({ sessionId, cwd, isActive, workspaceId, onClose
       )}
     </div>
   )
-}
+})

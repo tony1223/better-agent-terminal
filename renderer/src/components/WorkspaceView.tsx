@@ -1,6 +1,6 @@
 import { host } from '../host-api'
 import { v4 as uuidv4 } from 'uuid'
-import { useEffect, useCallback, useState, lazy, Suspense, useRef } from 'react'
+import { useEffect, useCallback, useState, lazy, memo, Suspense, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { Workspace, TerminalInstance, EnvVariable, CreatePtyOptions } from '../types'
 import { workspaceStore } from '../stores/workspace-store'
@@ -201,7 +201,7 @@ export function clearInitializedWorkspaces(): void {
   initializedWorkspaces.clear()
 }
 
-export function WorkspaceView({ workspace, terminals, focusedTerminalId, isActive, isRemoteConnected = false }: Readonly<WorkspaceViewProps>) {
+export const WorkspaceView = memo(function WorkspaceView({ workspace, terminals, focusedTerminalId, isActive, isRemoteConnected = false }: Readonly<WorkspaceViewProps>) {
   const { t, i18n } = useTranslation()
   const [showCloseConfirm, setShowCloseConfirm] = useState<string | null>(null)
   const [thumbnailSettings, setThumbnailSettings] = useState<ThumbnailSettings>(loadThumbnailSettings)
@@ -1430,4 +1430,4 @@ export function WorkspaceView({ workspace, terminals, focusedTerminalId, isActiv
       )}
     </div>
   )
-}
+})
