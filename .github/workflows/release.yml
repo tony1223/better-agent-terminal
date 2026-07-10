@@ -964,6 +964,7 @@ jobs:
         if: steps.download.outcome == 'success'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         run: |
           find dist-bat-server -type f \( -name '*.tar.gz' -o -name '*.AppImage' \) -print0 | \
             while IFS= read -r -d '' asset; do

@@ -40,6 +40,7 @@ assert.match(workflow, /aarch64_rustflags:\s*'-C link-arg=-lgcc'/)
 assert.doesNotMatch(workflow, /name:\s*Cache (?:root|sidecar) node_modules/)
 assert.match(workflow, /bat-server-build:\s*\n\s+needs:\s*verify/)
 assert.match(workflow, /bat-server-publish:\s*\n\s+needs:\s*\[release, bat-server-build\]/)
+assert.match(workflow, /GH_REPO:\s*\$\{\{ github\.repository \}\}/)
 assert.match(workflow, /pattern:\s*release-\*/)
 assert.match(workflow, /pattern:\s*updater-meta-\*/)
 
