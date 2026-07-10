@@ -144,7 +144,7 @@ registerHandler('claude.startSession', async (params) => {
 // the conversation from its own session store. We default the
 // permissionMode to 'bypassPermissions' to match Electron's resume
 // contract (resumed sessions don't re-prompt for prior approvals).
-async function resumeClaudeSession(params) {
+async function resumeClaudeSession(params, opts = {}) {
   const sessionId = params?.sessionId
   const sdkSessionIdToResume = params?.sdkSessionId
   if (typeof sessionId !== 'string' || !sessionId) {
@@ -210,7 +210,9 @@ async function resumeClaudeSession(params) {
   const historyCwd = (s.options && typeof s.options === 'object' && typeof s.options.cwd === 'string')
     ? s.options.cwd
     : process.cwd()
-  const history = await loadSessionHistory(sessionId, sdkSessionIdToResume, historyCwd, { allowGlobalFallback: false })
+  const history = await loadSessionHistory(sessionId, sdkSessionIdToResume, historyCwd, {
+    allowGlobalFallback: opts.allowGlobalHistoryFallback === true,
+  })
   if (!history.found) {
     logWarn(`claude.resumeSession: stale sdkSessionId=${sdkSessionIdToResume} for cwd=${historyCwd}; starting fresh session`)
     return { ok: true, sessionId, stale: true, requestedSdkSessionId: sdkSessionIdToResume }
@@ -231,33 +233,49 @@ registerHandler('claude.resumeSession', resumeClaudeSession)
 // Either way it (re)emits `claude:history`, so the client never goes blank.
 registerHandler('claude.clientResume', async (params) => {
   const sessionId = params?.sessionId
-  const sdkSessionId = params?.sdkSessionId
   if (typeof sessionId !== 'string' || !sessionId) {
     throw new Error('claude.clientResume: missing sessionId')
   }
+  const existing = sessions.get(sessionId)
+  const requestedSdkSessionId = typeof params?.sdkSessionId === 'string' ? params.sdkSessionId : ''
+  // A reconnecting client may not have persisted the SDK id that the live host
+  // already knows. Prefer the host-owned id and accept the requested id only as
+  // a fallback for an absent/rebuilt session.
+  const sdkSessionId = typeof existing?.sdkSessionId === 'string' && existing.sdkSessionId
+    ? existing.sdkSessionId
+    : requestedSdkSessionId
   if (typeof sdkSessionId !== 'string' || !sdkSessionId) {
     throw new Error('claude.clientResume: missing sdkSessionId')
   }
   // Codex history is owned by the Tauri codex app-server runtime, not the
   // sidecar — defer to the normal codex resume which already returns history.
   if (isCodexAgentPreset(params?.options?.agentPreset) || isCodexSession(sessionId)) {
-    return resumeClaudeSession(params)
+    return resumeClaudeSession({ ...params, sdkSessionId })
   }
-  const existing = sessions.get(sessionId)
   if (existing) {
     const optCwd = params?.options && typeof params.options.cwd === 'string' ? params.options.cwd : ''
-    const cwd = optCwd
-      || (existing.options && typeof existing.options.cwd === 'string' ? existing.options.cwd : '')
+    // The live host session owns its actual cwd/worktree. Client workspace data
+    // can be stale, so only use it when the host has no cwd of its own.
+    const cwd = (existing.options && typeof existing.options.cwd === 'string' ? existing.options.cwd : '')
+      || optCwd
       || process.cwd()
     const live = existing.streaming === true
       || (existing.liveQuery && existing.liveQuery.isClosed === false)
     const history = await loadSessionHistory(sessionId, sdkSessionId, cwd, {
-      allowGlobalFallback: false,
+      // sdkSessionId is an exact transcript identity. Falling back across
+      // ~/.claude/projects recovers moved worktrees/stale cwd without guessing.
+      allowGlobalFallback: true,
       preserveLiveMessages: live,
     })
     return { ok: true, sessionId, sdkSessionId, existed: true, alreadyLive: !!live, found: history.found }
   }
-  return resumeClaudeSession(params)
+  // The sidecar may have restarted while the host/client retained the session
+  // metadata. Permit exact-id global lookup on this read/reattach path; normal
+  // resumeSession keeps its stricter cwd validation.
+  return resumeClaudeSession(
+    { ...params, sdkSessionId },
+    { allowGlobalHistoryFallback: true },
+  )
 })
 
 // claude.restSession / wakeSession / isResting: mirror the resting-UX

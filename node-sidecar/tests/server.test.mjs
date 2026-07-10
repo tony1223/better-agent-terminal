@@ -2054,10 +2054,35 @@ async function inProcess() {
       assert.strictEqual(mod.sessions.get('cc-1'), existingRef, 'clientResume must not rebuild an existing session record')
       assert.equal(mod.sessions.get('cc-1').sdkSessionId, 'sdk-cc-1')
 
+      // A second client may have neither the SDK id nor the host's current cwd
+      // in its workspace snapshot. The live host session is authoritative.
+      ccCaptured.length = 0
+      const hostOwnedReply = await dispatch({ jsonrpc: '2.0', id: 702, method: 'claude.clientResume',
+        params: { sessionId: 'cc-1', options: { cwd: '/stale-client-cwd' } } })
+      assert.equal(hostOwnedReply.result.sdkSessionId, 'sdk-cc-1')
+      assert.equal(hostOwnedReply.result.found, true)
+      const hostOwnedHistory = ccCaptured.find(e => e.name === 'claude:history')
+      assert.deepEqual(hostOwnedHistory.payload.items.map(i => `${i.role}:${i.content}`), ['user:hi', 'assistant:hello'])
+      assert.strictEqual(mod.sessions.get('cc-1'), existingRef, 'host-owned clientResume must stay non-destructive')
+
+      // If the sidecar session map was rebuilt, exact-id global lookup still
+      // recovers a transcript whose worktree/cwd no longer matches the client.
+      writeFileSync(join(ccProjectDir, 'sdk-cc-global.jsonl'), [
+        JSON.stringify({ type: 'user', uuid: 'cc-global-u', timestamp: '2026-05-11T00:00:02.000Z', message: { role: 'user', content: 'moved' } }),
+        JSON.stringify({ type: 'assistant', uuid: 'cc-global-a', timestamp: '2026-05-11T00:00:03.000Z', message: { role: 'assistant', content: [{ type: 'text', text: 'found' }] } }),
+      ].join('\n') + '\n')
+      ccCaptured.length = 0
+      const globalReply = await dispatch({ jsonrpc: '2.0', id: 703, method: 'claude.clientResume',
+        params: { sessionId: 'cc-global', sdkSessionId: 'sdk-cc-global', options: { cwd: '/stale-client-cwd' } } })
+      assert.equal(globalReply.result.ok, true)
+      assert.equal(globalReply.result.sdkSessionId, 'sdk-cc-global')
+      const globalHistory = ccCaptured.find(e => e.name === 'claude:history')
+      assert.deepEqual(globalHistory.payload.items.map(i => `${i.role}:${i.content}`), ['user:moved', 'assistant:found'])
+
       // Validation mirrors resumeSession.
-      const noSid = await dispatch({ jsonrpc: '2.0', id: 702, method: 'claude.clientResume', params: { sessionId: 'x' } })
+      const noSid = await dispatch({ jsonrpc: '2.0', id: 704, method: 'claude.clientResume', params: { sessionId: 'x' } })
       assert.match(noSid.error?.message || '', /missing sdkSessionId/)
-      const noSession = await dispatch({ jsonrpc: '2.0', id: 703, method: 'claude.clientResume', params: { sdkSessionId: 'y' } })
+      const noSession = await dispatch({ jsonrpc: '2.0', id: 705, method: 'claude.clientResume', params: { sdkSessionId: 'y' } })
       assert.match(noSession.error?.message || '', /missing sessionId/)
     } finally {
       setCcProjectsDir(null)

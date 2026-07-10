@@ -25,6 +25,16 @@ async function main() {
     /const resumeModel = currentModel[\s\S]*resumeModel[\s\S]*codexSandboxMode[\s\S]*codexApprovalPolicy[\s\S]*permissionMode[\s\S]*resumeEffort/,
     'Codex manual resume should preserve current model, sandbox, approval, permission mode, and effort',
   )
+  assert.match(
+    claudeSource,
+    /const hostMeta = await host\.claude\.getSessionMeta\(sessionId\)[\s\S]*const remoteSdkSessionId = hostMeta\?\.sdkSessionId \|\| savedSdkSessionId \|\| ''[\s\S]*host\.claude\.clientResume\([\s\S]*remoteSdkSessionId,[\s\S]*remoteCwd,/,
+    'Claude remote attach should recover host-owned metadata before requesting history',
+  )
+  assert.match(
+    claudeSource,
+    /if \(!isRemoteConnected \|\| remoteHistoryAttachedRef\.current\) return/,
+    'Claude reconnect should replay remote history once even when session startup is already cached',
+  )
   for (const [name, panelSource] of [['Codex', source], ['Claude', claudeSource]] as const) {
     assert.match(
       panelSource,

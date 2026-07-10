@@ -580,12 +580,20 @@ export function ClaudeAgentPanel({ sessionId, cwd, isActive, workspaceId, onClos
   const INITIAL_ARCHIVE_LOAD = 200
   const LOAD_BATCH = 50
   const historyLoadedRef = useRef(false)
+  // A remote host owns the live session and its transcript. Reset this latch
+  // whenever the connection/session changes so reconnecting asks the host to
+  // replay history once, without replaying it before every sendMessage call.
+  const remoteHistoryAttachedRef = useRef(false)
   const inputHistoryRef = useRef<string[]>([])
   const inputHistoryIndexRef = useRef(-1)
   const inputDraftRef = useRef('')
   const pendingPromptSentRef = useRef(false)
   const messageCountRef = useRef(0)
   const autoLoadedArchiveSessionRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    remoteHistoryAttachedRef.current = false
+  }, [sessionId, isRemoteConnected])
 
   useEffect(() => {
     const sandboxMode = normalizedAgentParams?.sandboxMode
@@ -1731,7 +1739,7 @@ export function ClaudeAgentPanel({ sessionId, cwd, isActive, workspaceId, onClos
       cancelled = true
       scheduleStartedSessionCleanup(sessionId)
     }
-  }, [sessionId, cwd, isCodexSession, codexSandboxMode, codexApprovalPolicy])
+  }, [sessionId, cwd, isCodexSession, codexSandboxMode, codexApprovalPolicy, isRemoteConnected])
 
   // Refresh session metadata when panel becomes active (fixes stale display after window switch)
   useEffect(() => {
@@ -1757,7 +1765,10 @@ export function ClaudeAgentPanel({ sessionId, cwd, isActive, workspaceId, onClos
     const existingStart = startedSessionPromises.get(sessionId)
     if (existingStart) {
       await existingStart
-      return
+      // A reconnect keeps the same mounted panel and module-level start
+      // promise. Continue once so the newly connected remote client can ask
+      // the host to replay history; ordinary sends still take the fast return.
+      if (!isRemoteConnected || remoteHistoryAttachedRef.current) return
     }
 
     const startPromise = (async () => {
@@ -1785,26 +1796,41 @@ export function ClaudeAgentPanel({ sessionId, cwd, isActive, workspaceId, onClos
         // a real resume only when it's absent), so onHistory repopulates the
         // view without disturbing an in-flight host turn. Local windows keep the
         // existing short-circuit (their getSessionState already has messages).
-        if (isRemoteConnected && savedSdkSessionId) {
-          dlog(`${stag} ensureSessionStarted: existing remote session; clientResume for history`)
-          await host.claude.clientResume(
-            sessionId,
-            savedSdkSessionId,
-            cwd,
-            effectiveModel || savedModel,
-            apiVersion,
-            useWorktree ? true : undefined,
-            terminalState?.worktreePath,
-            terminalState?.worktreeBranch,
-            terminalState?.agentPreset,
-            undefined,
-            undefined,
-            permissionMode,
-            effectiveEffort,
-            effectiveUltracode ? true : undefined,
-          ).catch((err: unknown) => {
+        if (isRemoteConnected) {
+          // The host's live metadata is authoritative. A session created by a
+          // different client (or by headless bat-server) may never have written
+          // its SDK id into this client's workspace snapshot, even though the
+          // host already captured it from claude:status. Ask for that metadata
+          // before attaching; an empty id remains valid for a live Claude
+          // session because clientResume can derive it host-side.
+          const hostMeta = await host.claude.getSessionMeta(sessionId).catch(() => null) as SessionMeta | null
+          const remoteSdkSessionId = hostMeta?.sdkSessionId || savedSdkSessionId || ''
+          const remoteCwd = hostMeta?.cwd || cwd
+          dlog(`${stag} ensureSessionStarted: existing remote session; clientResume for history sdkSessionId=${remoteSdkSessionId ? remoteSdkSessionId.slice(0, 8) : 'host-owned'}`)
+          try {
+            await host.claude.clientResume(
+              sessionId,
+              remoteSdkSessionId,
+              remoteCwd,
+              hostMeta?.model || effectiveModel || savedModel,
+              apiVersion,
+              useWorktree ? true : undefined,
+              terminalState?.worktreePath,
+              terminalState?.worktreeBranch,
+              terminalState?.agentPreset,
+              undefined,
+              undefined,
+              permissionMode,
+              effectiveEffort,
+              effectiveUltracode ? true : undefined,
+            )
+            remoteHistoryAttachedRef.current = true
+            if (remoteSdkSessionId && remoteSdkSessionId !== savedSdkSessionId) {
+              workspaceStore.setTerminalSdkSessionId(sessionId, remoteSdkSessionId)
+            }
+          } catch (err: unknown) {
             dlog(`${stag} clientResume failed: ${err instanceof Error ? err.message : String(err)}`)
-          })
+          }
           return
         }
         dlog(`${stag} ensureSessionStarted: existing session`)
@@ -1836,7 +1862,10 @@ export function ClaudeAgentPanel({ sessionId, cwd, isActive, workspaceId, onClos
             effectiveUltracode ? true : undefined,
             getAutoCompactWindowForModel(effectiveModel || savedModel, settingsStore.getSettings().autoCompactWindow),
           ) as ResumeSessionResult | null
-          if (!resumeResult?.stale) return
+          if (!resumeResult?.stale) {
+            if (isRemoteConnected) remoteHistoryAttachedRef.current = true
+            return
+          }
           dlog(`${stag} ensureSessionStarted: stale sdkSessionId=${savedSdkSessionId.slice(0, 8)}; starting fresh session`)
           workspaceStore.setTerminalSdkSessionId(sessionId, undefined)
         }
@@ -1855,6 +1884,7 @@ export function ClaudeAgentPanel({ sessionId, cwd, isActive, workspaceId, onClos
         ...(useWorktree ? { useWorktree: true, worktreePath: terminalState?.worktreePath, worktreeBranch: terminalState?.worktreeBranch } : {}),
         ...(getAutoCompactWindowForModel(effectiveModel, globalSettings.autoCompactWindow) ? { autoCompactWindow: getAutoCompactWindowForModel(effectiveModel, globalSettings.autoCompactWindow)! } : {}),
       })
+      if (isRemoteConnected) remoteHistoryAttachedRef.current = true
     })().catch((err: unknown) => {
       clearStartedSessionTracking(sessionId)
       throw err
@@ -1863,7 +1893,7 @@ export function ClaudeAgentPanel({ sessionId, cwd, isActive, workspaceId, onClos
     startedSessions.add(sessionId)
     startedSessionPromises.set(sessionId, startPromise)
     await startPromise
-  }, [sessionId, cwd, currentModel, effortLevel, permissionMode, isCodexSession, codexSandboxMode, codexApprovalPolicy])
+  }, [sessionId, cwd, currentModel, effortLevel, permissionMode, isCodexSession, codexSandboxMode, codexApprovalPolicy, isRemoteConnected])
 
   const sendClaudeMessage = useCallback(async (
     prompt: string,
