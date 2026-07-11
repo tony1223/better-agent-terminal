@@ -19,6 +19,26 @@ async function main() {
   )
   assert.match(
     source,
+    /if \(typeof m\.isStreaming === 'boolean'\) \{\s*setIsStreaming\(m\.isStreaming\)/,
+    'Codex live status must synchronize the authoritative backend running state',
+  )
+  assert.equal(
+    source.includes("if (isCodexSession && message.role === 'user') setIsStreaming(true)"),
+    true,
+    'Codex user echoes should recover running state against older remote hosts',
+  )
+  assert.equal(
+    source.includes("trimmed === '/sac'"),
+    true,
+    'Codex should intercept the /sac cybersecurity retry command',
+  )
+  assert.equal(
+    source.includes('shouldAutoContinueForTrigger(ac.trigger, payload)'),
+    true,
+    'Codex /sac should gate retries through the configured trigger',
+  )
+  assert.match(
+    source,
     /const resumeResult = await host\.claude\.resumeSession\([\s\S]*effectiveModel \|\| savedModel[\s\S]*permissionMode,\s*effectiveEffort[\s\S]*\) as \{ stale\?: boolean \} \| null/,
     'Codex auto-resume should preserve effective model, permission mode, and effort',
   )

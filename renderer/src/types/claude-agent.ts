@@ -4,7 +4,12 @@ export interface ClaudeMessage {
   role: 'user' | 'assistant' | 'system'
   content: string
   kind?: 'auto-continue'
-  autoContinue?: { used: number; max: number; prompt: string }
+  autoContinue?: {
+    used: number
+    max: number
+    prompt: string
+    trigger?: 'always' | 'cybersecurity-flag'
+  }
   thinking?: string
   parentToolUseId?: string
   timestamp: number

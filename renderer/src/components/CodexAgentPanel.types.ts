@@ -26,6 +26,7 @@ export interface SessionMeta {
   cacheWrite1hTokens?: number
   lastTurnFirstTokenMs?: number
   lastTurnDurationMs?: number
+  isStreaming?: boolean
   runtimeStatus?: 'starting' | 'queued' | 'waiting_for_api' | 'compacting' | string | null
   runtimeMessage?: string | null
   runtimeStatusStartedAt?: number | null

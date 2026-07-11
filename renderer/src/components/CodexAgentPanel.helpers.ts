@@ -36,12 +36,31 @@ export type AutoContinueTurnEndPayload = {
   sdkSessionId?: string
 }
 
+export type AutoContinueTrigger = 'always' | 'cybersecurity-flag'
+
 export function shouldAutoContinueAfterTurnEnd(payload: AutoContinueTurnEndPayload | null | undefined): boolean {
   if (!payload) return false
   if (payload.reason === 'completed') return true
   if (payload.reason !== 'error') return false
   const error = payload.error || ''
   return /codex:\s*no response from model after \d+s\.\s*please try again\./i.test(error)
+}
+
+export function isCybersecurityFlagTurnEnd(payload: AutoContinueTurnEndPayload | null | undefined): boolean {
+  if (!payload) return false
+  const result = typeof payload.result === 'string' ? payload.result : ''
+  const error = typeof payload.error === 'string' ? payload.error : ''
+  const text = `${error}\n${result}`.trimStart()
+  return /^(?:(?:error|codex error):\s*)*this content was flagged for possible cybersecurity risk(?:\.|\b)/i.test(text)
+}
+
+export function shouldAutoContinueForTrigger(
+  trigger: AutoContinueTrigger,
+  payload: AutoContinueTurnEndPayload | null | undefined,
+): boolean {
+  return trigger === 'cybersecurity-flag'
+    ? isCybersecurityFlagTurnEnd(payload)
+    : shouldAutoContinueAfterTurnEnd(payload)
 }
 
 export function autoContinueTurnEndKey(

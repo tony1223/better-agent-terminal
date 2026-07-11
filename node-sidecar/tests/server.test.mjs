@@ -1095,6 +1095,7 @@ async function inProcess() {
       'contextWindow', 'maxOutputTokens', 'contextTokens',
       'cacheReadTokens', 'cacheCreationTokens',
       'callCacheRead', 'callCacheWrite', 'lastQueryCalls',
+      'isStreaming',
       'runtimeStatus', 'runtimeMessage', 'runtimeStatusStartedAt',
     ]) {
       assert.ok(key in sdkStatus.payload.meta,
@@ -1109,6 +1110,8 @@ async function inProcess() {
       assert.equal(typeof sdkStatus.payload.meta[numKey], 'number',
         `claude:status meta.${numKey} must be a number`)
     }
+    assert.equal(events[1].payload.meta.isStreaming, true,
+      'starting status should keep the renderer in its live Thinking state')
     // Renderer-facing assistant messages are normalized to the same
     // ClaudeMessage shape used in session state.
     assert.equal(events[5].payload.message.role, 'assistant')

@@ -31,7 +31,8 @@ import { useRafBatchedString } from '../utils/use-raf-batched-string'
 import { translateRuntimeMessage } from '../utils/runtime-status-message'
 import { dispatchWorkerCommand, parseWorkerSlashCommand } from '../utils/worker-command'
 import { normalizePendingAskUser, wrapPreviewHtml } from './AskUserQuestion.helpers'
-import { autoContinueTurnEndKey, buildCollapsedOutputPreview, formatContentSize, formatElapsed, formatFullTimestamp, formatTimestamp, parseContentBlocks, parseShellInvocation, shouldAutoContinueAfterTurnEnd, shouldShowTimeDivider, splitSystemReminders, stringifyToolResult, summarizeToolSearchResult, toolDescription, toolInputContent, toolInputSummary, truncateMiddle } from './CodexAgentPanel.helpers'
+import { autoContinueTurnEndKey, buildCollapsedOutputPreview, formatContentSize, formatElapsed, formatFullTimestamp, formatTimestamp, parseContentBlocks, parseShellInvocation, shouldAutoContinueForTrigger, shouldShowTimeDivider, splitSystemReminders, stringifyToolResult, summarizeToolSearchResult, toolDescription, toolInputContent, toolInputSummary, truncateMiddle } from './CodexAgentPanel.helpers'
+import type { AutoContinueTrigger } from './CodexAgentPanel.helpers'
 import type { AttachedFile, AttachedImage, CodexAccountEntry, CodexAgentPanelProps, MessageItem, ModelInfo, PendingAskUser, PendingPermission, SessionMeta, SessionSummary, SlashCommandInfo } from './CodexAgentPanel.types'
 import { CodexTodoChecklist } from './CodexTodoChecklist'
 import { ReasoningSummary } from './ReasoningSummary'
@@ -630,8 +631,8 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
   const currentTurnMsgIdRef = useRef<string | null>(null)
   // /auto-continue: when enabled, after each turn ends auto-send `prompt`
   // up to `max` times. `used` resets when the user manually sends.
-  const autoContinueRef = useRef<{ enabled: boolean; max: number; used: number; prompt: string }>({
-    enabled: false, max: 3, used: 0, prompt: '繼續',
+  const autoContinueRef = useRef<{ enabled: boolean; max: number; used: number; prompt: string; trigger: AutoContinueTrigger }>({
+    enabled: false, max: 3, used: 0, prompt: '繼續', trigger: 'always',
   })
   const autoContinueHandledTurnKeysRef = useRef<Set<string>>(new Set())
   const autoContinueTimerRef = useRef<number | null>(null)
@@ -1128,6 +1129,10 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
           }
           return
         }
+        // A live user echo means the host accepted a new Codex turn. This also
+        // repairs running state against older remote hosts whose status metadata
+        // predates the additive `isStreaming` field.
+        if (isCodexSession && message.role === 'user') setIsStreaming(true)
         // Route subagent messages to separate bucket
         if (message.parentToolUseId) {
           const bucket = subagentMessagesRef.current.get(message.parentToolUseId) || []
@@ -1295,10 +1300,11 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
             return m
           }))
         }
-        // Auto-continue: continue on success and specific recoverable Codex timeout errors.
-        if (!shouldAutoContinueAfterTurnEnd(payload)) return
         const ac = autoContinueRef.current
         if (!ac.enabled) return
+        // `/ac` continues successful/recoverable turns. `/sac` is deliberately
+        // narrower and only retries the known cybersecurity-flag response.
+        if (!shouldAutoContinueForTrigger(ac.trigger, payload)) return
         const turnEndKey = autoContinueTurnEndKey(payload, currentTurnMsgIdRef.current)
         if (autoContinueHandledTurnKeysRef.current.has(turnEndKey)) return
         autoContinueHandledTurnKeysRef.current.add(turnEndKey)
@@ -1318,8 +1324,8 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
         setMessages(prev => [...prev, {
           id: acMsgId, sessionId, role: 'system' as const,
           kind: 'auto-continue',
-          autoContinue: { used: nextUsed, max: ac.max, prompt: acPrompt },
-          content: `Auto-continue ${nextUsed}/${ac.max} · prompt: ${acPrompt}`,
+          autoContinue: { used: nextUsed, max: ac.max, prompt: acPrompt, trigger: ac.trigger },
+          content: `${ac.trigger === 'cybersecurity-flag' ? 'Cybersecurity retry' : 'Auto-continue'} ${nextUsed}/${ac.max} · prompt: ${acPrompt}`,
           timestamp: Date.now(),
         }])
         setIsStreaming(true)
@@ -1387,6 +1393,7 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
 
       api.onStream((sid: string, data: unknown) => {
         if (sid !== sessionId) return
+        setIsStreaming(true)
         const d = data as { text?: string; thinking?: string; parentToolUseId?: string }
         // Extended-thinking heartbeats arrive as empty-content stream events
         // every ~1-1.5s even when the model is producing nothing visible for
@@ -1426,6 +1433,13 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
           host.debug.log(`${tag} onStatus sdkSessionId=${((meta as unknown as SessionMeta).sdkSessionId || '').slice(0, 8)}`)
         }
         const m = meta as unknown as SessionMeta
+        if (typeof m.isStreaming === 'boolean') {
+          setIsStreaming(m.isStreaming)
+        } else if (m.runtimeStatus) {
+          // Compatibility with older hosts: runtimeStatus is only populated
+          // while a turn is starting, queued, compacting, or waiting on the API.
+          setIsStreaming(true)
+        }
         setSessionMeta(m)
         // Track cache efficiency history (only push when values change)
         if (m.inputTokens > 0 && m.cacheReadTokens !== undefined) {
@@ -2302,17 +2316,22 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
     inputHistoryIndexRef.current = -1
     inputDraftRef.current = ''
 
-    // Intercept /auto-continue and /ac — toggle auto-continue mode.
+    // Intercept /auto-continue, /ac, and /sac — toggle bounded retry mode.
     // Syntax:
     //   /auto-continue                   enable, default max=3, prompt="繼續"
     //   /auto-continue 5                 enable, max=5, prompt="繼續"
     //   /auto-continue 5 請繼續未完成的    enable, max=5, custom prompt
     //   /auto-continue 請繼續              enable, max=3, custom prompt
     //   /auto-continue off | stop         disable
+    //   /sac 3 原本的指令                 retry only after a cybersecurity flag
     if (trimmed === '/auto-continue' || trimmed === '/ac' ||
-        trimmed.startsWith('/auto-continue ') || trimmed.startsWith('/ac ')) {
+        trimmed === '/sac' || trimmed.startsWith('/auto-continue ') ||
+        trimmed.startsWith('/ac ') || trimmed.startsWith('/sac ')) {
       clearInput()
-      const cmd = trimmed.startsWith('/auto-continue') ? '/auto-continue' : '/ac'
+      const cmd = trimmed.startsWith('/auto-continue')
+        ? '/auto-continue'
+        : trimmed.startsWith('/sac') ? '/sac' : '/ac'
+      const trigger: AutoContinueTrigger = cmd === '/sac' ? 'cybersecurity-flag' : 'always'
       const rest = trimmed.slice(cmd.length).trim()
       let content: string
       clearPendingAutoContinue()
@@ -2330,8 +2349,10 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
         } else if (rest) {
           prompt = rest
         }
-        autoContinueRef.current = { enabled: true, max, used: 0, prompt }
-        content = `Auto-continue enabled (max ${max}). Prompt: "${prompt}"`
+        autoContinueRef.current = { enabled: true, max, used: 0, prompt, trigger }
+        content = trigger === 'cybersecurity-flag'
+          ? `Cybersecurity retry enabled (max ${max}). Prompt: "${prompt}"`
+          : `Auto-continue enabled (max ${max}). Prompt: "${prompt}"`
       }
       setMessages(prev => [...prev, {
         id: `sys-ac-${Date.now()}`, sessionId, role: 'system' as const,
@@ -2806,6 +2827,8 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
           { name: 'whoami', description: 'Show current account info', argumentHint: '' },
           { name: 'switch', description: 'Switch between registered accounts', argumentHint: '<number|email>' },
           { name: 'abort', description: 'Force stop current operation immediately', argumentHint: '' },
+          { name: 'auto-continue', description: 'Auto-send after each completed turn', argumentHint: '[count] [prompt]' },
+          { name: 'sac', description: 'Retry only after a cybersecurity flag', argumentHint: '[count] [prompt]' },
           { name: 'worker', description: 'Inspect or control worker processes', argumentHint: '<name|all> [status|start|stop|restart|reload|clear]' },
         ]
       : [
@@ -4139,7 +4162,7 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
             <div className="tl-dot dot-auto-continue" />
             <div className="tl-content claude-message-auto-continue">
               <span className="claude-auto-continue-label">
-                Auto-continue{auto ? ` ${auto.used}/${auto.max}` : ''}
+                {auto?.trigger === 'cybersecurity-flag' ? 'Cybersecurity retry' : 'Auto-continue'}{auto ? ` ${auto.used}/${auto.max}` : ''}
               </span>
               <span className="claude-auto-continue-prompt" title={prompt}>{prompt}</span>
               {msg.timestamp > 0 && (

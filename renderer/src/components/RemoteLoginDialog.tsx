@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { host } from '../host-api'
+import { formatAuthErrorMessage } from '../utils/error-message'
 
 type LoginKind = 'claude' | 'codex'
 
@@ -42,9 +43,13 @@ export function RemoteLoginDialog({ kind, hostLabel, onClose, onSuccess }: Reado
 
   const label = kind === 'codex' ? 'Codex' : 'Claude'
   const displayHost = hostLabel || t('workspace.remoteHostFallback')
-  const loginErrorText = (value: string | undefined, fallbackKey: string): string => {
-    if (value === 'auth_in_progress') return t('workspace.remoteLoginInProgress')
-    return value || t(fallbackKey)
+  const loginErrorText = (value: unknown, fallbackKey: string): string => {
+    const message = formatAuthErrorMessage(value, t(fallbackKey))
+    if (message === 'auth_in_progress') return t('workspace.remoteLoginInProgress')
+    return message
+  }
+  const logLoginFailure = (stage: string, message: string) => {
+    void host.debug.log(`[RemoteLoginDialog] ${kind} ${stage} failed: ${message}`)
   }
 
   const cancelRemoteLogin = useCallback(() => {
@@ -81,13 +86,17 @@ export function RemoteLoginDialog({ kind, hostLabel, onClose, onSuccess }: Reado
           return
         }
         if (res?.status === 'error') {
-          setError(loginErrorText(res.error, 'workspace.remoteLoginFailed'))
+          const message = loginErrorText(res.error, 'workspace.remoteLoginFailed')
+          logLoginFailure('poll', message)
+          setError(message)
           setPhase('error')
           return
         }
       } catch (err) {
         if (stoppedRef.current) return
-        setError(err instanceof Error ? err.message : String(err))
+        const message = loginErrorText(err, 'workspace.remoteLoginFailed')
+        logLoginFailure('poll', message)
+        setError(message)
         setPhase('error')
         return
       }
@@ -120,12 +129,16 @@ export function RemoteLoginDialog({ kind, hostLabel, onClose, onSuccess }: Reado
             pollCodex()
           } else {
             if (stoppedRef.current) return
-            setError(loginErrorText(res?.error, 'workspace.remoteLoginStartFailed'))
+            const message = loginErrorText(res?.error, 'workspace.remoteLoginStartFailed')
+            logLoginFailure('start', message)
+            setError(message)
             setPhase('error')
           }
         } catch (err) {
           if (stoppedRef.current) return
-          setError(err instanceof Error ? err.message : String(err))
+          const message = loginErrorText(err, 'workspace.remoteLoginStartFailed')
+          logLoginFailure('start', message)
+          setError(message)
           setPhase('error')
         }
       })()
@@ -152,12 +165,16 @@ export function RemoteLoginDialog({ kind, hostLabel, onClose, onSuccess }: Reado
           setPhase('awaiting-code')
         } else {
           if (stoppedRef.current) return
-          setError(loginErrorText(res?.error, 'workspace.remoteLoginStartFailed'))
+          const message = loginErrorText(res?.error, 'workspace.remoteLoginStartFailed')
+          logLoginFailure('start', message)
+          setError(message)
           setPhase('error')
         }
       } catch (err) {
         if (stoppedRef.current) return
-        setError(err instanceof Error ? err.message : String(err))
+        const message = loginErrorText(err, 'workspace.remoteLoginStartFailed')
+        logLoginFailure('start', message)
+        setError(message)
         setPhase('error')
       }
     })()
@@ -182,10 +199,14 @@ export function RemoteLoginDialog({ kind, hostLabel, onClose, onSuccess }: Reado
         onClose()
         return
       }
-      setError(loginErrorText(res?.error, 'workspace.remoteLoginFailed'))
+      const message = loginErrorText(res?.error, 'workspace.remoteLoginFailed')
+      logLoginFailure('submit', message)
+      setError(message)
       setPhase(res?.terminal ? 'error' : 'awaiting-code')
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      const message = loginErrorText(err, 'workspace.remoteLoginFailed')
+      logLoginFailure('submit', message)
+      setError(message)
       setPhase('error')
     }
   }, [code, onClose, onSuccess])

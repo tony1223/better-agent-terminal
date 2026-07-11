@@ -2,6 +2,8 @@ import * as assert from 'assert'
 import {
   autoContinueTurnEndKey,
   buildCollapsedOutputPreview,
+  isCybersecurityFlagTurnEnd,
+  shouldAutoContinueForTrigger,
   shouldAutoContinueAfterTurnEnd,
   stringifyToolResult,
   summarizeShellCommand,
@@ -35,6 +37,42 @@ assert.strictEqual(
   shouldAutoContinueAfterTurnEnd({ reason: 'aborted' }),
   false,
   'aborted turns should not auto-continue'
+)
+
+const cybersecurityFlag = {
+  reason: 'completed',
+  result: 'Error: This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request.',
+}
+assert.strictEqual(
+  isCybersecurityFlagTurnEnd(cybersecurityFlag),
+  true,
+  'the known cybersecurity refusal should be detected'
+)
+assert.strictEqual(
+  shouldAutoContinueForTrigger('cybersecurity-flag', cybersecurityFlag),
+  true,
+  '/sac should retry the known cybersecurity refusal'
+)
+assert.strictEqual(
+  isCybersecurityFlagTurnEnd({
+    reason: 'error',
+    error: 'This content was flagged for possible cybersecurity risk. To get authorized for security work, join the Trusted Access for Cyber program.',
+  }),
+  true,
+  'the refusal should also be detected when Codex reports it as an error'
+)
+assert.strictEqual(
+  shouldAutoContinueForTrigger('cybersecurity-flag', { reason: 'completed', result: 'Task completed normally.' }),
+  false,
+  '/sac should not continue normal completed turns'
+)
+assert.strictEqual(
+  isCybersecurityFlagTurnEnd({
+    reason: 'completed',
+    result: 'I can explain the message "This content was flagged for possible cybersecurity risk" without retrying.',
+  }),
+  false,
+  'mentioning the refusal inside a normal response should not trigger /sac'
 )
 
 assert.strictEqual(

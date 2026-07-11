@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::hash::Hasher;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -44,6 +44,7 @@ const CODEX_CONNECTION_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const CODEX_IDLE_REAPER_INTERVAL: Duration = Duration::from_secs(30);
 const CODEX_ACCOUNT_STATE_FILE: &str = "codex-account-state.json";
 static CODEX_TEMP_IMAGE_COUNTER: AtomicU64 = AtomicU64::new(0);
+static CODEX_HOME_PROBE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 type ReplySender = Sender<Result<Value, String>>;
 
@@ -326,6 +327,7 @@ impl CodexSession {
             "effort": self.effort,
             "lastTurnFirstTokenMs": self.last_turn_first_token_ms,
             "lastTurnDurationMs": self.last_turn_duration_ms,
+            "isStreaming": self.is_running,
             "runtimeStatus": self.runtime_status.as_deref(),
             "runtimeMessage": self.runtime_message.as_deref(),
             "runtimeStatusStartedAt": self.runtime_status_started_at,
@@ -786,6 +788,42 @@ pub(crate) fn active_codex_home(app: &HostContext) -> Option<PathBuf> {
         .or_else(|| default_codex_home(app))
 }
 
+fn codex_home_not_writable(path: &Path, reason: impl std::fmt::Display) -> String {
+    format!(
+        "Codex home is not writable at {} ({reason}). Fix ownership/permissions for the BAT service user, or configure CODEX_HOME/codexSharedHome to a writable directory.",
+        path.display()
+    )
+}
+
+fn ensure_codex_home_writable_path(path: &Path) -> Result<(), String> {
+    if path.exists() {
+        if !path.is_dir() {
+            return Err(codex_home_not_writable(path, "path is not a directory"));
+        }
+    } else {
+        fs::create_dir_all(path).map_err(|err| codex_home_not_writable(path, err))?;
+    }
+
+    let probe_id = CODEX_HOME_PROBE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let probe = path.join(format!(
+        ".bat-write-probe-{}-{probe_id}",
+        std::process::id()
+    ));
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+        .map_err(|err| codex_home_not_writable(path, err))?;
+    drop(file);
+    fs::remove_file(&probe).map_err(|err| codex_home_not_writable(path, err))
+}
+
+fn ensure_codex_home_writable(app: &HostContext) -> Result<(), String> {
+    let home =
+        active_codex_home(app).ok_or_else(|| "could not resolve active Codex home".to_string())?;
+    ensure_codex_home_writable_path(&home)
+}
+
 /// Persist the live identity in the shared home back to the active account's
 /// store on app exit (captures token refresh / new memory). No-op when the
 /// unified model is OFF. Best-effort — never blocks shutdown.
@@ -1035,7 +1073,9 @@ fn is_device_code(token: &str) -> bool {
     let valid = |segment: &str| {
         segment.len() >= 3
             && segment.len() <= 8
-            && segment.chars().all(|c| c.is_ascii_alphanumeric())
+            && segment
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
     };
     valid(first) && valid(second)
 }
@@ -3805,6 +3845,7 @@ impl CodexAppServerState {
                 spawn_auth_summary.as_deref().unwrap_or("non-unified")
             ),
         );
+        ensure_codex_home_writable(app)?;
         let binary_identity = resolve_codex_binary(app).identity();
         let mut child = build_codex_command(app)
             .stdin(Stdio::piped())
@@ -6213,6 +6254,7 @@ mod tests {
     fn device_code_pattern_is_strict() {
         assert!(is_device_code("G0GT-244PL"));
         assert!(is_device_code("ABCD-EFGHI"));
+        assert!(!is_device_code("app-server"));
         assert!(!is_device_code("expires in 15 minutes"));
         assert!(!is_device_code("https://auth.openai.com/codex/device"));
         assert!(!is_device_code("one-time-code"));
@@ -6227,6 +6269,37 @@ mod tests {
             ),
             "approval failed at <redacted-url> for <redacted-code>"
         );
+        assert_eq!(
+            sanitize_login_error("codex app-server exited"),
+            "codex app-server exited"
+        );
+    }
+
+    #[test]
+    fn codex_home_write_probe_accepts_a_writable_directory() {
+        let path = env::temp_dir().join(format!(
+            "bat-codex-home-probe-{}-{}",
+            std::process::id(),
+            CODEX_HOME_PROBE_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&path).expect("create writable Codex home fixture");
+        ensure_codex_home_writable_path(&path).expect("writable Codex home");
+        assert_eq!(fs::read_dir(&path).expect("read fixture").count(), 0);
+        fs::remove_dir(&path).expect("remove writable Codex home fixture");
+    }
+
+    #[test]
+    fn codex_home_write_probe_rejects_a_file_path() {
+        let path = env::temp_dir().join(format!(
+            "bat-codex-home-file-{}-{}",
+            std::process::id(),
+            CODEX_HOME_PROBE_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&path, b"not a directory").expect("create Codex home file fixture");
+        let error = ensure_codex_home_writable_path(&path).expect_err("file path must fail");
+        assert!(error.contains("Codex home is not writable"));
+        assert!(error.contains("path is not a directory"));
+        fs::remove_file(&path).expect("remove Codex home file fixture");
     }
 
     #[test]
@@ -6658,7 +6731,7 @@ mod tests {
             runtime_status: None,
             runtime_message: None,
             runtime_status_started_at: None,
-            is_running: false,
+            is_running: true,
             is_resting: false,
             abort_requested: false,
             ignored_turn_ids: Vec::new(),
@@ -6667,6 +6740,7 @@ mod tests {
         let meta = session.metadata();
         assert_eq!(meta["contextWindow"], GPT_5_6_CONTEXT_WINDOW_FALLBACK);
         assert_eq!(meta["contextTokens"], 150);
+        assert_eq!(meta["isStreaming"], true);
     }
 
     #[test]

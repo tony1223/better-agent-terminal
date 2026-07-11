@@ -191,6 +191,10 @@ export function buildSessionMeta(s) {
     callCacheRead: 0,
     callCacheWrite: 0,
     lastQueryCalls: 0,
+    // `starting` is emitted before the live SDK query flips `streaming` on;
+    // runtimeStatus still means this session is in-flight and must keep the
+    // renderer's Thinking state visible during that startup window.
+    isStreaming: s.streaming === true || Boolean(s.runtimeStatus),
     runtimeStatus: s.runtimeStatus ?? null,
     runtimeMessage: s.runtimeMessage ?? null,
     runtimeStatusStartedAt: s.runtimeStatusStartedAt ?? null,

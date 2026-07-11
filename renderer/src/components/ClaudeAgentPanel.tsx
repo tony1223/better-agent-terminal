@@ -61,6 +61,7 @@ interface SessionMeta {
   cacheWrite1hTokens?: number
   lastTurnFirstTokenMs?: number
   lastTurnDurationMs?: number
+  isStreaming?: boolean
   runtimeStatus?: 'starting' | 'queued' | 'waiting_for_api' | 'compacting' | string | null
   runtimeMessage?: string | null
   runtimeStatusStartedAt?: number | null
@@ -1455,6 +1456,11 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
           host.debug.log(`${tag} onStatus runtimeStatus=${m.runtimeStatus} startedAt=${m.runtimeStatusStartedAt ?? 'null'} sdkSessionId=${(m.sdkSessionId || '').slice(0, 8)}`)
         } else if (host.debug.isDebugMode === true) {
           host.debug.log(`${tag} onStatus sdkSessionId=${(m.sdkSessionId || '').slice(0, 8)}`)
+        }
+        if (typeof m.isStreaming === 'boolean') {
+          setIsStreaming(m.isStreaming)
+        } else if (m.runtimeStatus) {
+          setIsStreaming(true)
         }
         setSessionMeta(m)
         // Track cache efficiency history (only push when values change)
