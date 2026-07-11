@@ -6,8 +6,8 @@ use crate::commands::update as update_cmd;
 use crate::commands::{
     agent as agent_cmd, app as app_cmd, claude as claude_cmd, fs as fs_cmd, git as git_cmd,
     github as github_cmd, image as image_cmd, notification as notification_cmd,
-    profile as profile_cmd, pty as pty_cmd, settings as settings_cmd, snippet as snippet_cmd,
-    worker_buffer::WorkerBufferState, worktree as worktree_cmd,
+    profile as profile_cmd, pty as pty_cmd, runtime as runtime_cmd, settings as settings_cmd,
+    snippet as snippet_cmd, worker_buffer::WorkerBufferState, worktree as worktree_cmd,
 };
 use crate::electron_safe_storage::{
     read_secret_json, read_secret_string, write_secret_json, write_secret_string, SecretJsonRead,
@@ -49,6 +49,7 @@ use tungstenite::Message;
 
 const DEFAULT_REMOTE_PORT: u16 = 9876;
 const INVOKE_TIMEOUT: Duration = Duration::from_secs(15);
+const RUNTIME_STATUS_TIMEOUT: Duration = Duration::from_secs(30);
 const SESSION_INVOKE_TIMEOUT: Duration = Duration::from_secs(300);
 const CLAUDE_REMOTE_LOGIN_TTL: Duration = Duration::from_secs(180);
 
@@ -2885,6 +2886,17 @@ fn invoke_rust_for_remote(
             .map(|profile_id| Value::Bool(profile_cmd::activate_profile_id(&ctx, &profile_id))),
         "profile:deactivate" => profile_id_from_params(channel, params)
             .map(|profile_id| Value::Bool(profile_cmd::deactivate_profile_id(&ctx, &profile_id))),
+        "runtime:get-status" => {
+            runtime_cmd::runtime_status_core(ctx).and_then(|status| to_json_value(channel, status))
+        }
+        "runtime:install" => string_param(params, "tool", channel).and_then(|tool| {
+            runtime_cmd::runtime_install_core(ctx, &tool)
+                .and_then(|result| to_json_value(channel, result))
+        }),
+        "runtime:clear-managed" => {
+            let tool = optional_string_param(params, "tool");
+            runtime_cmd::runtime_clear_managed_core(ctx, tool.as_deref()).map(|_| Value::Null)
+        }
         _ => return None,
     };
     Some(result)
@@ -2893,6 +2905,7 @@ fn invoke_rust_for_remote(
 fn remote_invoke_timeout(channel: &str) -> Duration {
     let canonical = canonical_remote_channel(channel);
     match canonical.as_str() {
+        "runtime:get-status" => RUNTIME_STATUS_TIMEOUT,
         "claude:start-session"
         | "claude:resume-session"
         | "claude:client-resume"
@@ -2904,7 +2917,9 @@ fn remote_invoke_timeout(channel: &str) -> Duration {
         // separate poll/submit request with an opaque login id.
         | "codex:auth-login-device-start"
         | "codex:auth-login-device-poll"
-        | "claude:fork-session" => SESSION_INVOKE_TIMEOUT,
+        | "claude:fork-session"
+        | "runtime:install"
+        | "runtime:clear-managed" => SESSION_INVOKE_TIMEOUT,
         _ => INVOKE_TIMEOUT,
     }
 }

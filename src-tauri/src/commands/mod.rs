@@ -8,8 +8,8 @@
 
 // Modules reachable from the remote-server dispatch (and the codex/remote
 // state) compile in both the desktop and the GUI-free `headless` build. The
-// rest are desktop-only host commands (native dialogs, clipboard, local git,
-// runtime installs, window/workspace management, …) and are gated out of the
+// rest are desktop-only host commands (native dialogs, clipboard,
+// window/workspace management, …) and are gated out of the
 // headless build, where they are never invoked.
 pub mod agent;
 pub mod app;
@@ -35,7 +35,6 @@ pub mod profile;
 pub mod pty;
 #[cfg(feature = "desktop")]
 pub mod remote;
-#[cfg(feature = "desktop")]
 pub mod runtime;
 pub mod settings;
 #[cfg(feature = "desktop")]

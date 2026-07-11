@@ -3524,6 +3524,19 @@ async function inProcess() {
     __resetClaudeCliCacheForTests()
     try {
       assert.equal(resolveClaudeCliBinary(), managedBin)
+      rmSync(managedBin, { force: true })
+      assert.notEqual(
+        resolveClaudeCliBinary(),
+        managedBin,
+        'a Runtime Manager clear must invalidate the cached managed path',
+      )
+      writeFileSync(managedBin, `#!/bin/sh\necho claude ${CLAUDE_NATIVE_VERSION}\n`)
+      chmodSync(managedBin, 0o700)
+      assert.equal(
+        resolveClaudeCliBinary(),
+        managedBin,
+        'a Runtime Manager install must replace a cached fallback without restarting the sidecar',
+      )
     } finally {
       rmSync(managedRoot, { recursive: true, force: true })
       if (savedDataDirForManaged === undefined) delete process.env.BAT_SIDECAR_DATA_DIR

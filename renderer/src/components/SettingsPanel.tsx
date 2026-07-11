@@ -15,6 +15,8 @@ import { CODEX_MODELS } from '../utils/codex-models'
 
 interface SettingsPanelProps {
   onClose: () => void
+  isRemoteProfile?: boolean
+  remoteOrigin?: string | null
 }
 
 // Check if a font is available using CSS Font Loading API
@@ -101,7 +103,7 @@ interface RuntimeInstallResult {
 type SettingsTab = 'general' | 'agent' | 'remote' | 'accounts' | 'runtime' | 'advanced'
 const CUSTOM_MODEL_OPTION = '__custom_model__'
 
-export function SettingsPanel({ onClose }: SettingsPanelProps) {
+export function SettingsPanel({ onClose, isRemoteProfile = false, remoteOrigin = null }: SettingsPanelProps) {
   const { t } = useTranslation()
   const [activeTab, setActiveTab] = useState<SettingsTab>('general')
   const [settings, setSettings] = useState<AppSettings>(settingsStore.getSettings())
@@ -126,7 +128,9 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
   const updateState = useSyncExternalStore(subscribeUpdate, getUpdateState)
   const [runtimeLoading, setRuntimeLoading] = useState(false)
   const [runtimeInstallingTool, setRuntimeInstallingTool] = useState<RuntimeTool | null>(null)
+  const [runtimeClearing, setRuntimeClearing] = useState(false)
   const [runtimeError, setRuntimeError] = useState<string | null>(null)
+  const [runtimeNotice, setRuntimeNotice] = useState<string | null>(null)
 
   // QR code state
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null)
@@ -206,9 +210,9 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
     }
   }, [])
 
-  const refreshRuntimeStatus = useCallback(async () => {
+  const refreshRuntimeStatus = useCallback(async (options?: { clearError?: boolean }) => {
     setRuntimeLoading(true)
-    setRuntimeError(null)
+    if (options?.clearError !== false) setRuntimeError(null)
     try {
       const status = await host.runtime.getStatus() as RuntimeStatus | null
       setRuntimeStatus(status)
@@ -230,6 +234,13 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
     if (activeTab !== 'runtime') return
     refreshRuntimeStatus().catch(() => { /* ignore */ })
   }, [activeTab, refreshRuntimeStatus])
+
+  useEffect(() => {
+    return host.runtime.onChanged(() => {
+      if (activeTab !== 'runtime' || runtimeInstallingTool !== null || runtimeClearing) return
+      void refreshRuntimeStatus({ clearError: false })
+    })
+  }, [activeTab, refreshRuntimeStatus, runtimeClearing, runtimeInstallingTool])
 
   // Check font availability on mount
   useEffect(() => {
@@ -523,20 +534,36 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
   const handleRuntimeInstall = useCallback(async (tool: RuntimeTool) => {
     setRuntimeInstallingTool(tool)
     setRuntimeError(null)
+    setRuntimeNotice(null)
+    void host.debug.log('[SettingsPanel] Runtime install started', {
+      tool,
+      target: isRemoteProfile ? 'remote' : 'local',
+      remoteOrigin,
+    })
     try {
       const result = await host.runtime.install(tool) as RuntimeInstallResult
-      if (!result.ok && result.message) {
-        setRuntimeError(result.message)
+      setRuntimeStatus(current => current ? { ...current, [tool]: result.status } : current)
+      if (result.ok) {
+        setRuntimeNotice(result.message || t('settings.runtimeInstalled', 'Managed runtime is ready.'))
+      } else {
+        setRuntimeError(result.message || t('settings.runtimeInstallFailed', 'Managed runtime installation failed.'))
       }
-      await refreshRuntimeStatus()
+      void host.debug.log('[SettingsPanel] Runtime install finished', {
+        tool,
+        ok: result.ok,
+        state: result.status?.state,
+        source: result.status?.source,
+        message: result.message,
+      })
+      await refreshRuntimeStatus({ clearError: false })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       setRuntimeError(message)
-      host.debug.log?.('[SettingsPanel] Failed to install runtime:', tool, message)
+      void host.debug.log('[SettingsPanel] Failed to install runtime:', tool, message)
     } finally {
       setRuntimeInstallingTool(null)
     }
-  }, [refreshRuntimeStatus])
+  }, [isRemoteProfile, refreshRuntimeStatus, remoteOrigin, t])
 
   const handleOpenRuntimeFolder = useCallback(() => {
     Promise.resolve(host.runtime.openRuntimeFolder()).catch(error => {
@@ -549,14 +576,19 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
   const handleClearManagedRuntimes = useCallback(async () => {
     const confirmed = confirm(t('settings.runtimeClearManagedConfirm', 'Clear managed runtimes?'))
     if (!confirmed) return
+    setRuntimeClearing(true)
     setRuntimeError(null)
+    setRuntimeNotice(null)
     try {
       await host.runtime.clearManaged()
-      await refreshRuntimeStatus()
+      setRuntimeNotice(t('settings.runtimeCleared', 'Managed runtimes were cleared.'))
+      await refreshRuntimeStatus({ clearError: false })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       setRuntimeError(message)
-      host.debug.log?.('[SettingsPanel] Failed to clear managed runtimes:', message)
+      void host.debug.log('[SettingsPanel] Failed to clear managed runtimes:', message)
+    } finally {
+      setRuntimeClearing(false)
     }
   }, [refreshRuntimeStatus, t])
 
@@ -1469,19 +1501,32 @@ Reference: https://github.com/ind-igo/cx`
             <>
               <div className="settings-section">
                 <h3>{t('settings.runtimeManager', 'Runtime Manager')}</h3>
+                <p className="settings-hint runtime-target-hint">
+                  {isRemoteProfile
+                    ? t('settings.runtimeTargetRemote', { target: remoteOrigin || t('settings.remoteHost', 'remote host') })
+                    : t('settings.runtimeTargetLocal', 'Managing runtimes on this computer.')}
+                </p>
                 <div className="runtime-toolbar">
-                  <button className="statusline-template-btn" onClick={refreshRuntimeStatus} disabled={runtimeLoading || runtimeInstallingTool !== null}>
+                  <button className="statusline-template-btn" onClick={() => void refreshRuntimeStatus()} disabled={runtimeLoading || runtimeInstallingTool !== null || runtimeClearing}>
                     {runtimeLoading ? t('common.loading', 'Loading...') : t('common.refresh', 'Refresh')}
                   </button>
-                  <button className="statusline-template-btn" onClick={handleOpenRuntimeFolder}>
+                  <button
+                    className="statusline-template-btn"
+                    onClick={handleOpenRuntimeFolder}
+                    disabled={isRemoteProfile}
+                    title={isRemoteProfile ? t('settings.runtimeFolderRemoteUnavailable', 'The remote runtime folder cannot be opened on this computer.') : undefined}
+                  >
                     {t('settings.openRuntimeFolder', 'Open Runtime Folder')}
                   </button>
-                  <button className="statusline-template-btn" onClick={handleClearManagedRuntimes} disabled={runtimeInstallingTool !== null}>
-                    {t('settings.clearManagedRuntimes', 'Clear Managed')}
+                  <button className="statusline-template-btn" onClick={handleClearManagedRuntimes} disabled={runtimeInstallingTool !== null || runtimeClearing}>
+                    {runtimeClearing ? t('common.loading', 'Loading...') : t('settings.clearManagedRuntimes', 'Clear Managed')}
                   </button>
                 </div>
                 {runtimeError && (
                   <p className="runtime-error">{runtimeError}</p>
+                )}
+                {runtimeNotice && (
+                  <p className="runtime-notice">{runtimeNotice}</p>
                 )}
                 <div className="runtime-list">
                   {runtimeRows.map(item => (
@@ -1512,7 +1557,9 @@ Reference: https://github.com/ind-igo/cx`
                           >
                             {runtimeInstallingTool === item.tool
                               ? t('settings.runtimeInstalling', 'Installing...')
-                              : t('settings.runtimeInstallManaged', 'Install Managed')}
+                              : item.source === 'managed'
+                                ? t('settings.runtimeUpdateManaged', 'Update Managed')
+                                : t('settings.runtimeInstallManaged', 'Install Managed')}
                           </button>
                         )}
                       </div>

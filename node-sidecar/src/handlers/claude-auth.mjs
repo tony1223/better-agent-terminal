@@ -82,12 +82,17 @@ function managedClaudeCliPath(dataDir = resolveDataDir(), key = currentClaudeRun
   )
 }
 
-function isUsableClaudeCli(candidate) {
+function isExecutableClaudeCli(candidate) {
   try {
     accessSync(candidate, fsConstants.X_OK)
+    return true
   } catch {
     return false
   }
+}
+
+function isUsableClaudeCli(candidate) {
+  if (!isExecutableClaudeCli(candidate)) return false
   // macOS can invalidate nested signed Mach-O files while copying Tauri
   // resources. The executable bit survives, but launch exits with SIGKILL.
   // Probe once before caching a path so the SDK never receives a dead CLI.
@@ -153,7 +158,20 @@ function findOnPath(exeName) {
 
 export function resolveClaudeCliBinary() {
   if (process.env.BAT_SIDECAR_CLAUDE_BIN) return process.env.BAT_SIDECAR_CLAUDE_BIN
-  if (_claudeCliPathCache !== undefined) return _claudeCliPathCache
+  const managed = managedClaudeCliPath()
+  if (typeof _claudeCliPathCache === 'string') {
+    // Runtime Manager installs/clears this path in the Rust host while the
+    // sidecar process stays alive. Prefer a newly appeared managed binary over
+    // a cached bundled/system fallback, and drop a cached path that disappeared.
+    if (_claudeCliPathCache !== managed && isExecutableClaudeCli(managed) && isUsableClaudeCli(managed)) {
+      _claudeCliPathCache = managed
+      return managed
+    }
+    if (isExecutableClaudeCli(_claudeCliPathCache)) return _claudeCliPathCache
+    _claudeCliPathCache = undefined
+  }
+  // Do not permanently cache `null`: an external Runtime Manager install can
+  // make the managed path appear without restarting the sidecar.
   // Probe the SDK-bundled binding directory siblings — there's at most
   // one per install (the package matches host platform/arch via npm
   // optionalDependencies), so the first match wins.
@@ -166,7 +184,6 @@ export function resolveClaudeCliBinary() {
     'claude-agent-sdk-linux-arm64',
   ]
   const exeName = claudeExeName()
-  const managed = managedClaudeCliPath()
   if (isUsableClaudeCli(managed)) {
     _claudeCliPathCache = managed
     return managed

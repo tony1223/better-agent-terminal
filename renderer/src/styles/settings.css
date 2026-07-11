@@ -167,6 +167,10 @@
   margin-bottom: 12px;
 }
 
+.runtime-target-hint {
+  margin: -2px 0 10px;
+}
+
 .runtime-list {
   display: flex;
   flex-direction: column;
@@ -249,6 +253,14 @@
   margin-top: 6px;
   font-size: 11px;
   line-height: 1.35;
+}
+
+.runtime-notice {
+  margin: 0 0 10px;
+  color: #3fb950;
+  font-size: 11px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 .runtime-row-meta {

@@ -1359,7 +1359,11 @@ export default function App() {
         )
       })()}
       {showSettings && (
-        <SettingsPanel onClose={() => setShowSettings(false)} />
+        <SettingsPanel
+          onClose={() => setShowSettings(false)}
+          isRemoteProfile={activeProfileIsRemote}
+          remoteOrigin={activeRemoteOrigin}
+        />
       )}
       {folderPickerOpen && (
         <FolderPicker

@@ -45,7 +45,7 @@ jobs:
         if: env.RUN_RELEASE_VERIFICATION == 'true'
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'pnpm'
           cache-dependency-path: |
             pnpm-lock.yaml
@@ -210,7 +210,7 @@ jobs:
         if: env.BUILD_MATRIX_ENTRY == 'true'
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'pnpm'
           cache-dependency-path: |
             pnpm-lock.yaml
@@ -597,7 +597,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Download desktop release artifacts
         uses: actions/download-artifact@v4
@@ -841,7 +841,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'pnpm'
           cache-dependency-path: |
             pnpm-lock.yaml

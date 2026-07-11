@@ -157,6 +157,8 @@ fn legacy_v1_param_keys(channel: &str) -> Option<&'static [&'static str]> {
     match canonical.as_str() {
         "app:get-version" => Some(&[]),
         "app:new-window" => Some(&["profileId"]),
+        "runtime:get-status" => Some(&[]),
+        "runtime:install" | "runtime:clear-managed" => Some(&["tool"]),
         "agent:get-supported-session-types" | "agent:list-presets" => Some(&[]),
         "settings:save" => Some(&["data"]),
         "settings:get-shell-path" => Some(&["shellType"]),
@@ -428,6 +430,7 @@ pub fn event_params_to_legacy_v1_args(channel: &str, params: &Value) -> Vec<Valu
         | "workspace:detached"
         | "workspace:reattached"
         | "workspace:reload"
+        | "runtime:changed"
         | "system:resume" => vec![params.clone()],
         _ => vec![params.clone()],
     }
@@ -474,6 +477,7 @@ pub fn legacy_v1_event_args_to_params(channel: &str, args: &[Value]) -> Value {
         | "workspace:detached"
         | "workspace:reattached"
         | "workspace:reload"
+        | "runtime:changed"
         | "system:resume" => args.first().cloned().unwrap_or(Value::Null),
         _ => json!({ "args": args }),
     }
@@ -524,6 +528,7 @@ pub fn is_proxied_remote_event(channel: &str) -> bool {
             | "workspace:detached"
             | "workspace:reattached"
             | "workspace:reload"
+            | "runtime:changed"
             | "system:resume"
     )
 }
@@ -547,6 +552,26 @@ mod tests {
         );
         assert_eq!(negotiate_remote_protocol(&["unknown".into()]), None);
         assert_eq!(RemoteProtocol::V2.as_str(), REMOTE_PROTOCOL_V2);
+    }
+
+    #[test]
+    fn runtime_channels_keep_legacy_params_and_changed_events() {
+        assert_eq!(
+            legacy_v1_args_to_params("runtime:install", &[json!("claude")]),
+            json!({ "tool": "claude" })
+        );
+        assert_eq!(
+            legacy_v1_args_to_params("runtime:clear-managed", &[json!("codex")]),
+            json!({ "tool": "codex" })
+        );
+        assert!(is_proxied_remote_event("runtime:changed"));
+        assert_eq!(
+            legacy_v1_event_args_to_params(
+                "runtime:changed",
+                &[json!({ "tool": "claude", "ok": true })]
+            ),
+            json!({ "tool": "claude", "ok": true })
+        );
     }
 
     #[test]

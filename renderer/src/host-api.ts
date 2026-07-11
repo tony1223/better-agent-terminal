@@ -494,6 +494,8 @@ function createTauriHost(): BatAppAPI {
       openRuntimeFolder: () => getInvoke()<void>('runtime_open_runtime_folder'),
       clearManaged: (tool?: string) =>
         getInvoke()<void>('runtime_clear_managed', tool ? { tool } : {}),
+      onChanged: (callback: (payload: unknown) => void) =>
+        listenAdapter<unknown>('runtime:changed', callback),
     },
     shell: {
       openExternal: (url: string) => getInvoke()<void>('shell_open_external', { url }),

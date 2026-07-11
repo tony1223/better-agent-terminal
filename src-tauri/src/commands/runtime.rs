@@ -5,23 +5,42 @@
 // `--version` check so setup never logs in, calls model APIs, or starts an
 // agent protocol session.
 
-use crate::app_data;
+use crate::host_context::HostContext;
+#[cfg(feature = "desktop")]
+use crate::remote_client::RustRemoteClientState;
 use crate::runtime_catalog;
 use crate::subprocess::hide_console_window;
+#[cfg(feature = "desktop")]
+use crate::window_registry;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use flate2::read::GzDecoder;
 use serde::Serialize;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256, Sha512};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Manager};
+#[cfg(feature = "desktop")]
+use tauri::{AppHandle, State, WebviewWindow};
+#[cfg(feature = "desktop")]
 use tauri_plugin_opener::OpenerExt;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+
+#[cfg(feature = "desktop")]
+const REMOTE_RUNTIME_STATUS_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(feature = "desktop")]
+const REMOTE_RUNTIME_MUTATION_TIMEOUT: Duration = Duration::from_secs(300);
+
+static RUNTIME_MUTATION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn runtime_mutation_lock() -> &'static Mutex<()> {
+    RUNTIME_MUTATION_LOCK.get_or_init(|| Mutex::new(()))
+}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -51,37 +70,130 @@ pub struct RuntimeInstallResult {
     message: Option<String>,
 }
 
-#[tauri::command]
-pub async fn runtime_get_status(app: AppHandle) -> Result<RuntimeStatus, String> {
-    crate::async_rt::spawn_blocking(move || runtime_status_impl(&app))
-        .await
-        .map_err(|err| format!("runtime.getStatus worker failed: {err}"))?
+#[cfg(feature = "desktop")]
+fn is_remote_profile_window(app: &AppHandle, window: &WebviewWindow) -> bool {
+    let Some(profile_id) = window_registry::profile_id_for_window(app, window.label()) else {
+        return false;
+    };
+    super::profile::profile_get(app.clone(), profile_id)
+        .map(|profile| profile.kind == "remote")
+        .unwrap_or(false)
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
-pub async fn runtime_install(app: AppHandle, tool: String) -> Result<RuntimeInstallResult, String> {
-    crate::async_rt::spawn_blocking(move || runtime_install_impl(&app, &tool))
+pub async fn runtime_get_status(
+    app: AppHandle,
+    window: WebviewWindow,
+    client_state: State<'_, RustRemoteClientState>,
+) -> Result<Value, String> {
+    let client = (*client_state).clone();
+    if is_remote_profile_window(&app, &window) {
+        let window_label = window.label().to_string();
+        return crate::async_rt::spawn_blocking(move || {
+            client.invoke(
+                &window_label,
+                "runtime:get-status",
+                Vec::new(),
+                REMOTE_RUNTIME_STATUS_TIMEOUT,
+            )
+        })
         .await
-        .map_err(|err| format!("runtime.install worker failed: {err}"))?
+        .map_err(|err| format!("remote runtime.getStatus worker failed: {err}"))?;
+    }
+
+    let ctx = HostContext::from_app(app);
+    crate::async_rt::spawn_blocking(move || {
+        runtime_status_core(&ctx).and_then(|status| {
+            serde_json::to_value(status)
+                .map_err(|err| format!("runtime.getStatus serialization failed: {err}"))
+        })
+    })
+    .await
+    .map_err(|err| format!("runtime.getStatus worker failed: {err}"))?
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
-pub async fn runtime_open_runtime_folder(app: AppHandle) -> Result<(), String> {
-    let dir = runtimes_dir(&app)?;
+pub async fn runtime_install(
+    app: AppHandle,
+    window: WebviewWindow,
+    client_state: State<'_, RustRemoteClientState>,
+    tool: String,
+) -> Result<Value, String> {
+    let client = (*client_state).clone();
+    if is_remote_profile_window(&app, &window) {
+        let window_label = window.label().to_string();
+        return crate::async_rt::spawn_blocking(move || {
+            client.invoke(
+                &window_label,
+                "runtime:install",
+                vec![json!({ "tool": tool })],
+                REMOTE_RUNTIME_MUTATION_TIMEOUT,
+            )
+        })
+        .await
+        .map_err(|err| format!("remote runtime.install worker failed: {err}"))?;
+    }
+
+    let ctx = HostContext::from_app(app);
+    crate::async_rt::spawn_blocking(move || {
+        runtime_install_core(&ctx, &tool).and_then(|result| {
+            serde_json::to_value(result)
+                .map_err(|err| format!("runtime.install serialization failed: {err}"))
+        })
+    })
+    .await
+    .map_err(|err| format!("runtime.install worker failed: {err}"))?
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn runtime_open_runtime_folder(
+    app: AppHandle,
+    window: WebviewWindow,
+) -> Result<(), String> {
+    if is_remote_profile_window(&app, &window) {
+        return Err("Opening the runtime folder is unavailable for a remote host".to_string());
+    }
+    let dir = runtimes_dir(&HostContext::from_app(app.clone()))?;
     fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
     app.opener()
         .open_path(dir.to_string_lossy().to_string(), None::<&str>)
         .map_err(|err| err.to_string())
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
-pub async fn runtime_clear_managed(app: AppHandle, tool: Option<String>) -> Result<(), String> {
-    crate::async_rt::spawn_blocking(move || runtime_clear_managed_impl(&app, tool.as_deref()))
+pub async fn runtime_clear_managed(
+    app: AppHandle,
+    window: WebviewWindow,
+    client_state: State<'_, RustRemoteClientState>,
+    tool: Option<String>,
+) -> Result<(), String> {
+    let client = (*client_state).clone();
+    if is_remote_profile_window(&app, &window) {
+        let window_label = window.label().to_string();
+        crate::async_rt::spawn_blocking(move || {
+            client.invoke(
+                &window_label,
+                "runtime:clear-managed",
+                vec![json!({ "tool": tool })],
+                REMOTE_RUNTIME_MUTATION_TIMEOUT,
+            )
+        })
+        .await
+        .map_err(|err| format!("remote runtime.clearManaged worker failed: {err}"))??;
+        return Ok(());
+    }
+
+    let ctx = HostContext::from_app(app);
+    crate::async_rt::spawn_blocking(move || runtime_clear_managed_core(&ctx, tool.as_deref()))
         .await
         .map_err(|err| format!("runtime.clearManaged worker failed: {err}"))?
 }
 
-fn runtime_status_impl(app: &AppHandle) -> Result<RuntimeStatus, String> {
+pub(crate) fn runtime_status_core(app: &HostContext) -> Result<RuntimeStatus, String> {
     Ok(RuntimeStatus {
         node: resolve_node_status(app)?,
         codex: resolve_codex_status(app)?,
@@ -89,8 +201,14 @@ fn runtime_status_impl(app: &AppHandle) -> Result<RuntimeStatus, String> {
     })
 }
 
-fn runtime_install_impl(app: &AppHandle, tool: &str) -> Result<RuntimeInstallResult, String> {
-    match normalize_tool(tool).as_deref() {
+pub(crate) fn runtime_install_core(
+    app: &HostContext,
+    tool: &str,
+) -> Result<RuntimeInstallResult, String> {
+    let _mutation = runtime_mutation_lock()
+        .lock()
+        .map_err(|_| "runtime mutation lock is poisoned".to_string())?;
+    let result = match normalize_tool(tool).as_deref() {
         Some("node") => {
             let result = install_managed_node(app);
             let status = resolve_node_status(app)?;
@@ -147,14 +265,30 @@ fn runtime_install_impl(app: &AppHandle, tool: &str) -> Result<RuntimeInstallRes
         }
         Some(other) => Err(format!("unsupported runtime tool: {other}")),
         None => Err(format!("unsupported runtime tool: {tool}")),
+    }?;
+    if let Ok(payload) = serde_json::to_value(&result) {
+        app.emit("runtime:changed", payload);
     }
+    Ok(result)
 }
 
-fn runtime_clear_managed_impl(app: &AppHandle, tool: Option<&str>) -> Result<(), String> {
+pub(crate) fn runtime_clear_managed_core(
+    app: &HostContext,
+    tool: Option<&str>,
+) -> Result<(), String> {
+    let _mutation = runtime_mutation_lock()
+        .lock()
+        .map_err(|_| "runtime mutation lock is poisoned".to_string())?;
     let runtimes = runtimes_dir(app)?;
-    match tool.and_then(normalize_tool) {
+    let normalized_tool = match tool {
         Some(tool) => {
-            let dir_name = match tool.as_str() {
+            Some(normalize_tool(tool).ok_or_else(|| format!("unsupported runtime tool: {tool}"))?)
+        }
+        None => None,
+    };
+    match normalized_tool.as_deref() {
+        Some(tool) => {
+            let dir_name = match tool {
                 "claude" => "claude-agent-sdk",
                 other => other,
             };
@@ -172,11 +306,17 @@ fn runtime_clear_managed_impl(app: &AppHandle, tool: Option<&str>) -> Result<(),
             }
         }
     }
+    clear_runtime_manifest(app, normalized_tool.as_deref())?;
+    app.emit(
+        "runtime:changed",
+        json!({ "action": "clear", "tool": normalized_tool }),
+    );
     Ok(())
 }
 
-fn runtimes_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    Ok(app_data::app_data_dir(app)
+fn runtimes_dir(app: &HostContext) -> Result<PathBuf, String> {
+    Ok(app
+        .data_dir()
         .map_err(|err| format!("could not resolve app data dir: {err}"))?
         .join("runtimes"))
 }
@@ -357,7 +497,7 @@ fn version_dir_sort_key(name: &str) -> Vec<u64> {
 /// here flips the status to `missing` so the auto-installer replaces them with
 /// the full package layout.
 fn scan_managed_runtime(
-    app: &AppHandle,
+    app: &HostContext,
     family: &str,
     pinned_version: &str,
     exe_names: &[String],
@@ -412,7 +552,19 @@ fn scan_managed_runtime(
     None
 }
 
-fn resolve_node_status(app: &AppHandle) -> Result<RuntimeItemStatus, String> {
+fn managed_runtime_is_current(
+    app: &HostContext,
+    family: &str,
+    pinned_version: &str,
+    path: &Path,
+) -> bool {
+    runtimes_dir(app)
+        .ok()
+        .map(|root| path.starts_with(root.join(family).join(pinned_version)))
+        .unwrap_or(false)
+}
+
+fn resolve_node_status(app: &HostContext) -> Result<RuntimeItemStatus, String> {
     let exe = exe_name("node");
     let exe_names = vec![exe.clone()];
     let can_install = node_catalog_entry().is_some();
@@ -424,12 +576,14 @@ fn resolve_node_status(app: &AppHandle) -> Result<RuntimeItemStatus, String> {
         &["", "bin"],
         &["--version"],
     ) {
+        let can_replace = can_install
+            && !managed_runtime_is_current(app, "node", runtime_catalog::node_version(), &path);
         return Ok(ready_status(
             "node",
             "managed",
             path,
             &["--version"],
-            can_install,
+            can_replace,
         ));
     }
     if let Some(path) = bundled_node_candidate(app) {
@@ -453,10 +607,8 @@ fn resolve_node_status(app: &AppHandle) -> Result<RuntimeItemStatus, String> {
     Ok(missing_status("node", can_install, None))
 }
 
-fn bundled_node_candidate(app: &AppHandle) -> Option<PathBuf> {
-    app.path()
-        .resource_dir()
-        .ok()
+fn bundled_node_candidate(app: &HostContext) -> Option<PathBuf> {
+    app.resource_dir()
         .and_then(|dir| bundled_node_candidate_in_base(&dir))
         .or_else(|| {
             let cwd = std::env::current_dir().ok()?;
@@ -487,7 +639,7 @@ fn bundled_node_candidate_in_base(base: &Path) -> Option<PathBuf> {
     candidate_is_ready(&flat, &["--version"]).then_some(flat)
 }
 
-fn resolve_codex_status(app: &AppHandle) -> Result<RuntimeItemStatus, String> {
+fn resolve_codex_status(app: &HostContext) -> Result<RuntimeItemStatus, String> {
     let exe = exe_name("codex");
     let exe_names = vec![exe.clone()];
     let can_install = codex_catalog_entry().is_some();
@@ -499,12 +651,14 @@ fn resolve_codex_status(app: &AppHandle) -> Result<RuntimeItemStatus, String> {
         &["bin"],
         &["--version"],
     ) {
+        let can_replace = can_install
+            && !managed_runtime_is_current(app, "codex", runtime_catalog::codex_version(), &path);
         return Ok(ready_status(
             "codex",
             "managed",
             path,
             &["--version"],
-            can_install,
+            can_replace,
         ));
     }
     if let Some(path) = first_ready(path_candidates(&exe_names), &["--version"]) {
@@ -552,8 +706,8 @@ fn codex_platform_package() -> Option<&'static str> {
     }
 }
 
-fn bundled_codex_candidate(app: &AppHandle) -> Option<PathBuf> {
-    let resource = app.path().resource_dir().ok();
+fn bundled_codex_candidate(app: &HostContext) -> Option<PathBuf> {
+    let resource = app.resource_dir();
     let cwd = std::env::current_dir().ok();
     resource
         .iter()
@@ -605,7 +759,7 @@ fn bundled_codex_candidate_in_base(base: &Path) -> Option<PathBuf> {
     first_ready(candidates, &["--version"])
 }
 
-fn resolve_claude_status(app: &AppHandle) -> Result<RuntimeItemStatus, String> {
+fn resolve_claude_status(app: &HostContext) -> Result<RuntimeItemStatus, String> {
     let exe = exe_name("claude");
     let exe_names = vec![exe.clone()];
     if let Some(path) = managed_claude_cli_path(app) {
@@ -615,7 +769,7 @@ fn resolve_claude_status(app: &AppHandle) -> Result<RuntimeItemStatus, String> {
                 "managed",
                 path,
                 &["--version"],
-                true,
+                false,
             ));
         }
     }
@@ -634,7 +788,7 @@ fn resolve_claude_status(app: &AppHandle) -> Result<RuntimeItemStatus, String> {
     Ok(missing_status("claude", true, None))
 }
 
-fn managed_claude_cli_path(app: &AppHandle) -> Option<PathBuf> {
+fn managed_claude_cli_path(app: &HostContext) -> Option<PathBuf> {
     Some(
         runtimes_dir(app)
             .ok()?
@@ -645,8 +799,8 @@ fn managed_claude_cli_path(app: &AppHandle) -> Option<PathBuf> {
     )
 }
 
-fn bundled_claude_candidate(app: &AppHandle) -> Option<PathBuf> {
-    let resource = app.path().resource_dir().ok();
+fn bundled_claude_candidate(app: &HostContext) -> Option<PathBuf> {
+    let resource = app.resource_dir();
     let cwd = std::env::current_dir().ok();
     resource
         .iter()
@@ -654,7 +808,7 @@ fn bundled_claude_candidate(app: &AppHandle) -> Option<PathBuf> {
         .find_map(|base| bundled_claude_candidate_in_base(app, base))
 }
 
-fn bundled_claude_candidate_in_base(app: &AppHandle, base: &Path) -> Option<PathBuf> {
+fn bundled_claude_candidate_in_base(app: &HostContext, base: &Path) -> Option<PathBuf> {
     let package = &claude_catalog_entry()?.package_name;
     let exe = exe_name("claude");
     let candidates = [
@@ -681,13 +835,18 @@ fn bundled_claude_candidate_in_base(app: &AppHandle, base: &Path) -> Option<Path
     None
 }
 
-fn extract_compressed_claude_cli(app: &AppHandle, compressed: &Path, exe: &str) -> Option<PathBuf> {
+fn extract_compressed_claude_cli(
+    app: &HostContext,
+    compressed: &Path,
+    exe: &str,
+) -> Option<PathBuf> {
     if !compressed.is_file() {
         return None;
     }
     let bytes = fs::read(compressed).ok()?;
     let cache_key = sha512_hex_prefix(&bytes);
-    let out_dir = app_data::app_data_dir(app)
+    let out_dir = app
+        .data_dir()
         .ok()?
         .join("bin")
         .join("claude-agent-sdk")
@@ -718,7 +877,7 @@ fn node_catalog_entry() -> Option<&'static runtime_catalog::NodePlatform> {
     runtime_catalog::node_platform(runtime_key()?)
 }
 
-fn managed_node_runtime_dir(app: &AppHandle) -> Option<PathBuf> {
+fn managed_node_runtime_dir(app: &HostContext) -> Option<PathBuf> {
     Some(
         runtimes_dir(app)
             .ok()?
@@ -728,12 +887,12 @@ fn managed_node_runtime_dir(app: &AppHandle) -> Option<PathBuf> {
     )
 }
 
-fn managed_node_cli_path(app: &AppHandle) -> Option<PathBuf> {
+fn managed_node_cli_path(app: &HostContext) -> Option<PathBuf> {
     let entry = node_catalog_entry()?;
     Some(managed_node_runtime_dir(app)?.join(&entry.exe_path))
 }
 
-fn install_managed_node(app: &AppHandle) -> Result<PathBuf, String> {
+fn install_managed_node(app: &HostContext) -> Result<PathBuf, String> {
     let entry = node_catalog_entry().ok_or_else(|| {
         format!(
             "Node managed install is not available for {}-{}",
@@ -802,7 +961,7 @@ fn codex_catalog_entry() -> Option<&'static runtime_catalog::CodexPlatform> {
     runtime_catalog::codex_platform(runtime_key()?)
 }
 
-fn install_managed_codex(app: &AppHandle) -> Result<PathBuf, String> {
+fn install_managed_codex(app: &HostContext) -> Result<PathBuf, String> {
     let entry = codex_catalog_entry().ok_or_else(|| {
         format!(
             "Codex managed install is not available for {}-{}",
@@ -827,7 +986,7 @@ fn claude_catalog_entry() -> Option<&'static runtime_catalog::ClaudePlatform> {
     runtime_catalog::claude_platform(runtime_key()?)
 }
 
-fn install_managed_claude_cli(app: &AppHandle) -> Result<PathBuf, String> {
+fn install_managed_claude_cli(app: &HostContext) -> Result<PathBuf, String> {
     let entry = claude_catalog_entry().ok_or_else(|| {
         format!(
             "Claude managed install is not available for {}-{}",
@@ -1082,7 +1241,7 @@ fn install_nonce() -> String {
 }
 
 fn write_runtime_manifest(
-    app: &AppHandle,
+    app: &HostContext,
     tool: &str,
     version: &str,
     url: &str,
@@ -1091,24 +1250,98 @@ fn write_runtime_manifest(
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|err| err.to_string())?;
     }
-    let manifest = serde_json::json!({
-        "runtimes": {
-            tool: {
-                "version": version,
-                "source": "managed",
-                "url": url,
-                "installedAt": SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map(|duration| duration.as_millis())
-                    .unwrap_or_default(),
-            }
-        }
-    });
+    let existing = fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .unwrap_or_else(|| json!({ "runtimes": {} }));
+    let manifest = merge_runtime_manifest_value(
+        existing,
+        tool,
+        version,
+        url,
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis())
+            .unwrap_or_default(),
+    );
     fs::write(
         &path,
         serde_json::to_string_pretty(&manifest).unwrap_or_default(),
     )
     .map_err(|err| err.to_string())
+}
+
+fn merge_runtime_manifest_value(
+    mut manifest: Value,
+    tool: &str,
+    version: &str,
+    url: &str,
+    installed_at: u128,
+) -> Value {
+    if !manifest.is_object() {
+        manifest = json!({});
+    }
+    let root = manifest
+        .as_object_mut()
+        .expect("manifest normalized to object");
+    let runtimes = root
+        .entry("runtimes".to_string())
+        .or_insert_with(|| json!({}));
+    if !runtimes.is_object() {
+        *runtimes = json!({});
+    }
+    runtimes
+        .as_object_mut()
+        .expect("runtimes normalized to object")
+        .insert(
+            tool.to_string(),
+            json!({
+                "version": version,
+                "source": "managed",
+                "url": url,
+                "installedAt": installed_at,
+            }),
+        );
+    manifest
+}
+
+fn clear_runtime_manifest(app: &HostContext, tool: Option<&str>) -> Result<(), String> {
+    let path = runtimes_dir(app)?.join("manifest.json");
+    if !path.is_file() {
+        return Ok(());
+    }
+    let existing = fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .unwrap_or_else(|| json!({ "runtimes": {} }));
+    let manifest = clear_runtime_manifest_value(existing, tool);
+    fs::write(
+        &path,
+        serde_json::to_string_pretty(&manifest).unwrap_or_default(),
+    )
+    .map_err(|err| err.to_string())
+}
+
+fn clear_runtime_manifest_value(mut manifest: Value, tool: Option<&str>) -> Value {
+    if !manifest.is_object() {
+        return json!({ "runtimes": {} });
+    }
+    let root = manifest.as_object_mut().expect("manifest is an object");
+    let runtimes = root
+        .entry("runtimes".to_string())
+        .or_insert_with(|| json!({}));
+    if !runtimes.is_object() {
+        *runtimes = json!({});
+    }
+    if let Some(tool) = tool {
+        runtimes
+            .as_object_mut()
+            .expect("runtimes normalized to object")
+            .remove(tool);
+    } else {
+        *runtimes = json!({});
+    }
+    manifest
 }
 
 #[cfg(test)]
@@ -1129,5 +1362,35 @@ mod tests {
         let integrity = format!("sha512-{}", B64.encode(Sha512::digest(bytes)));
         assert!(verify_sri_sha512(bytes, &integrity).is_ok());
         assert!(verify_sri_sha512(b"other", &integrity).is_err());
+    }
+
+    #[test]
+    fn runtime_manifest_merge_preserves_other_tools() {
+        let manifest = merge_runtime_manifest_value(
+            json!({ "runtimes": { "codex": { "version": "1" } } }),
+            "claude",
+            "2",
+            "https://example.test/claude.tgz",
+            42,
+        );
+        assert_eq!(manifest["runtimes"]["codex"]["version"], json!("1"));
+        assert_eq!(manifest["runtimes"]["claude"]["version"], json!("2"));
+        assert_eq!(manifest["runtimes"]["claude"]["installedAt"], json!(42));
+    }
+
+    #[test]
+    fn runtime_manifest_clear_is_scoped_or_global() {
+        let manifest = json!({
+            "runtimes": {
+                "codex": { "version": "1" },
+                "claude": { "version": "2" },
+            }
+        });
+        let scoped = clear_runtime_manifest_value(manifest.clone(), Some("claude"));
+        assert!(scoped["runtimes"].get("claude").is_none());
+        assert_eq!(scoped["runtimes"]["codex"]["version"], json!("1"));
+
+        let cleared = clear_runtime_manifest_value(manifest, None);
+        assert_eq!(cleared["runtimes"], json!({}));
     }
 }

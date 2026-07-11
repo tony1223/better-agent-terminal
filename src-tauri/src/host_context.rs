@@ -83,6 +83,11 @@ impl HostContext {
     }
 
     #[allow(dead_code)]
+    pub fn resource_dir(&self) -> Option<PathBuf> {
+        self.app.path().resource_dir().ok()
+    }
+
+    #[allow(dead_code)]
     pub fn home_dir(&self) -> Option<PathBuf> {
         self.app.path().home_dir().ok()
     }
@@ -189,6 +194,11 @@ impl HostContext {
     #[allow(dead_code)]
     pub fn data_dir_opt(&self) -> Option<PathBuf> {
         self.inner.data_dir.clone()
+    }
+
+    #[allow(dead_code)]
+    pub fn resource_dir(&self) -> Option<PathBuf> {
+        None
     }
 
     #[allow(dead_code)]
