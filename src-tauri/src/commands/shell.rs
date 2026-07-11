@@ -40,10 +40,21 @@ pub async fn shell_open_external(app: tauri::AppHandle, url: String) -> Result<(
 // default handler (Finder/Explorer for folders, default app for files).
 // Empty strings are rejected so we don't accidentally open the cwd.
 #[tauri::command]
-pub async fn shell_open_path(app: tauri::AppHandle, path: String) -> Result<(), CommandError> {
+pub async fn shell_open_path(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    path: String,
+) -> Result<(), CommandError> {
     if path.trim().is_empty() {
         return Err(CommandError {
             message: "shell_open_path requires a non-empty path".into(),
+        });
+    }
+    if crate::commands::fs::is_remote_profile_window(&app, &window) {
+        return Err(CommandError {
+            message:
+                "Cannot open a remote file with this computer's default app. Download it first."
+                    .into(),
         });
     }
     app.opener()

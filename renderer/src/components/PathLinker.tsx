@@ -212,6 +212,7 @@ export function FilePreviewModal({ filePath: rawFilePath, onClose }: FilePreview
   const [content, setContent] = useState<string | null>(null)
   const [imageUrl, setImageUrl] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [openError, setOpenError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [copied, setCopied] = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
@@ -226,6 +227,7 @@ export function FilePreviewModal({ filePath: rawFilePath, onClose }: FilePreview
     setContent(null)
     setImageUrl(null)
     setError(null)
+    setOpenError(null)
     setLoading(true)
     const ext = getExt(filePath)
     if (IMAGE_EXTS.has(ext)) {
@@ -254,6 +256,23 @@ export function FilePreviewModal({ filePath: rawFilePath, onClose }: FilePreview
       setCopied(true)
       setTimeout(() => setCopied(false), 1500)
     })
+  }, [filePath])
+
+  const handleOpenPath = useCallback(async () => {
+    setOpenError(null)
+    try {
+      await host.shell.openPath(filePath)
+    } catch (openPathError) {
+      const message = openPathError instanceof Error
+        ? openPathError.message
+        : typeof openPathError === 'string'
+          ? openPathError
+          : openPathError && typeof openPathError === 'object' && 'message' in openPathError
+            ? String((openPathError as { message: unknown }).message)
+            : 'Unable to open file'
+      setOpenError(message)
+      void host.debug.log(`[FilePreview] openPath failed: ${message}`)
+    }
   }, [filePath])
 
   // Search: highlight matches and navigate
@@ -358,8 +377,8 @@ export function FilePreviewModal({ filePath: rawFilePath, onClose }: FilePreview
           </button>
           <button
             className="path-preview-btn"
-            onClick={() => host.shell.openPath(filePath)}
-            title="Open with system default app"
+            onClick={() => { void handleOpenPath() }}
+            title="Open with this computer's default app"
           >
             &#8599;
           </button>
@@ -393,6 +412,7 @@ export function FilePreviewModal({ filePath: rawFilePath, onClose }: FilePreview
         )}
         <div className="path-preview-body" ref={bodyRef}>
           {loading && <div className="path-preview-status">Loading...</div>}
+          {openError && <div className="path-preview-status">{openError}</div>}
           {error && <div className="path-preview-status">{error}</div>}
           {imageUrl && (
             <div className="path-preview-image">

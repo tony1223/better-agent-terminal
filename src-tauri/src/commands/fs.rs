@@ -60,7 +60,7 @@ const RESOLVE_TEXT_EXTS: &[&str] = &[
 const REMOTE_FS_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[cfg(feature = "desktop")]
-fn is_remote_profile_window(app: &AppHandle, window: &WebviewWindow) -> bool {
+pub(crate) fn is_remote_profile_window(app: &AppHandle, window: &WebviewWindow) -> bool {
     let Some(profile_id) = window_registry::profile_id_for_window(app, window.label()) else {
         return false;
     };
@@ -70,7 +70,7 @@ fn is_remote_profile_window(app: &AppHandle, window: &WebviewWindow) -> bool {
 }
 
 #[cfg(feature = "desktop")]
-async fn remote_invoke_for_window(
+pub(crate) async fn remote_invoke_for_window(
     app: &AppHandle,
     window: &WebviewWindow,
     channel: &'static str,
@@ -733,7 +733,13 @@ pub(crate) fn fs_quick_locations_native(app: &HostContext) -> Vec<QuickLocation>
 const SEARCH_MAX_DEPTH: usize = 8;
 const SEARCH_MAX_RESULTS: usize = 100;
 
-fn search_walk(dir: &Path, lower_query: &str, depth: usize, results: &mut Vec<FsEntry>) {
+fn search_walk(
+    dir: &Path,
+    lower_query: &str,
+    files_only: bool,
+    depth: usize,
+    results: &mut Vec<FsEntry>,
+) {
     if depth > SEARCH_MAX_DEPTH || results.len() >= SEARCH_MAX_RESULTS {
         return;
     }
@@ -758,7 +764,7 @@ fn search_walk(dir: &Path, lower_query: &str, depth: usize, results: &mut Vec<Fs
             continue;
         }
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        if name.to_lowercase().contains(lower_query) {
+        if name.to_lowercase().contains(lower_query) && (!files_only || !is_dir) {
             results.push(FsEntry {
                 name: name.clone(),
                 path: p_str,
@@ -766,19 +772,19 @@ fn search_walk(dir: &Path, lower_query: &str, depth: usize, results: &mut Vec<Fs
             });
         }
         if is_dir {
-            search_walk(&p, lower_query, depth + 1, results);
+            search_walk(&p, lower_query, files_only, depth + 1, results);
         }
     }
 }
 
-pub(crate) fn fs_search_impl(dir_path: String, query: String) -> Vec<FsEntry> {
+pub(crate) fn fs_search_impl(dir_path: String, query: String, files_only: bool) -> Vec<FsEntry> {
     let abs = match std::path::absolute(&dir_path) {
         Ok(p) => p,
         Err(_) => return vec![],
     };
     let mut results: Vec<FsEntry> = Vec::new();
     let lower = query.to_lowercase();
-    search_walk(&abs, &lower, 0, &mut results);
+    search_walk(&abs, &lower, files_only, 0, &mut results);
     results.sort_by(entry_sort_key);
     results
 }
@@ -790,20 +796,26 @@ pub async fn fs_search(
     window: WebviewWindow,
     dir_path: String,
     query: String,
-) -> Vec<FsEntry> {
+    files_only: Option<bool>,
+) -> Result<Vec<FsEntry>, String> {
+    let files_only = files_only.unwrap_or(false);
     if let Some(result) = remote_invoke_for_window(
         &app,
         &window,
         "fs:search",
-        vec![json!(dir_path.clone()), json!(query.clone())],
+        vec![
+            json!(dir_path.clone()),
+            json!(query.clone()),
+            json!(files_only),
+        ],
     )
     .await
     {
-        return result.and_then(from_remote_value).unwrap_or_default();
+        return result.and_then(from_remote_value);
     }
-    crate::async_rt::spawn_blocking(move || fs_search_impl(dir_path, query))
+    crate::async_rt::spawn_blocking(move || fs_search_impl(dir_path, query, files_only))
         .await
-        .unwrap_or_default()
+        .map_err(|err| err.to_string())
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2109,11 +2121,18 @@ mod tests {
         let nested = dir.join("a/b/c/hello-deep.txt");
         fs::create_dir_all(nested.parent().unwrap()).unwrap();
         fs::write(&nested, b"x").unwrap();
-        let result = fs_search_impl(dir.to_string_lossy().into(), "hello".into());
+        fs::create_dir_all(dir.join("hello-directory")).unwrap();
+        let result = fs_search_impl(dir.to_string_lossy().into(), "hello".into(), false);
         let names: Vec<&str> = result.iter().map(|e| e.name.as_str()).collect();
         assert!(names.iter().any(|n| n.contains("hello-deep.txt")));
+        assert!(names.contains(&"hello-directory"));
         assert!(result.len() >= 4);
         assert!(result.len() <= SEARCH_MAX_RESULTS);
+        let files_only = fs_search_impl(dir.to_string_lossy().into(), "hello".into(), true);
+        assert!(files_only.iter().all(|entry| !entry.is_directory));
+        assert!(!files_only
+            .iter()
+            .any(|entry| entry.name == "hello-directory"));
         let _ = fs::remove_dir_all(&dir);
     }
 

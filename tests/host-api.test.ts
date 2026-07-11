@@ -338,6 +338,8 @@ async function run() {
     assert.deepEqual(ql, [{ name: 'Home', path: '/home/me', kind: 'home' }])
     const found = await mod.host.fs.search('/x', 'hit')
     assert.deepEqual(found, [{ name: 'hit.txt', path: '/x/hit.txt', isDirectory: false }])
+    const filesOnly = await mod.host.fs.search('/x', 'hit', true)
+    assert.deepEqual(filesOnly, [{ name: 'hit.txt', path: '/x/hit.txt', isDirectory: false }])
     assert.deepEqual(await mod.host.fs.resolvePathLinks('/x', ['src/main.ts:3']), [
       { rawPath: 'src/main.ts:3', path: '/x/src/main.ts', exists: true, line: 3 },
     ])
@@ -749,6 +751,7 @@ async function run() {
       { cmd: 'fs_delete_path', args: { targetPath: '/x/foo' } },
       { cmd: 'fs_quick_locations', args: undefined },
       { cmd: 'fs_search', args: { dirPath: '/x', query: 'hit' } },
+      { cmd: 'fs_search', args: { dirPath: '/x', query: 'hit', filesOnly: true } },
       { cmd: 'fs_resolve_path_links', args: { cwd: '/x', rawPaths: ['src/main.ts:3'] } },
       { cmd: 'fs_watch', args: { dirPath: '/x' } },
       { cmd: 'fs_unwatch', args: { dirPath: '/x' } },

@@ -564,10 +564,10 @@ function createTauriHost(): BatAppAPI {
         getInvoke()<{ name: string; path: string; kind: 'home' | 'drive' | 'volume' | 'root' }[]>(
           'fs_quick_locations',
         ),
-      search: (dirPath: string, query: string) =>
+      search: (dirPath: string, query: string, filesOnly = false) =>
         getInvoke()<{ name: string; path: string; isDirectory: boolean }[]>(
           'fs_search',
-          { dirPath, query },
+          { dirPath, query, ...(filesOnly ? { filesOnly: true } : {}) },
         ),
       // Path-link resolution and file watching are native Rust routes.
       // They keep the renderer-facing path/result/event contract intact.

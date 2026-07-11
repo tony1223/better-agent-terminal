@@ -13,6 +13,8 @@ use serde::Serialize;
 use std::fs;
 use std::path::PathBuf;
 #[cfg(feature = "desktop")]
+use tauri::{AppHandle, WebviewWindow};
+#[cfg(feature = "desktop")]
 use tauri_plugin_dialog::DialogExt;
 
 const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
@@ -110,10 +112,8 @@ fn decode_image_data_url(data_url: &str) -> Result<(String, Vec<u8>), CommandErr
     Ok((mime.to_ascii_lowercase(), bytes))
 }
 
-// Called directly by the remote dispatch (pure args), so it must compile in
-// the headless build — apply the tauri::command wrapper only on desktop.
-#[cfg_attr(feature = "desktop", tauri::command)]
-pub async fn image_read_as_data_url(path: String) -> Result<String, CommandError> {
+// Pure host-side implementation used by both local Tauri and bat-server.
+pub(crate) fn image_read_as_data_url_impl(path: String) -> Result<String, CommandError> {
     let abs = match std::path::absolute(&path) {
         Ok(p) => p,
         Err(e) => {
@@ -146,6 +146,36 @@ pub async fn image_read_as_data_url(path: String) -> Result<String, CommandError
     let mime = mime_for_extension(&ext);
     let encoded = B64.encode(bytes);
     Ok(format!("data:{mime};base64,{encoded}"))
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn image_read_as_data_url(
+    app: AppHandle,
+    window: WebviewWindow,
+    path: String,
+) -> Result<String, CommandError> {
+    if let Some(result) = crate::commands::fs::remote_invoke_for_window(
+        &app,
+        &window,
+        "image:read-as-data-url",
+        vec![serde_json::json!(path.clone())],
+    )
+    .await
+    {
+        let value = result.map_err(|message| CommandError { message })?;
+        return value
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| CommandError {
+                message: "remote image response was not a data URL".into(),
+            });
+    }
+    crate::async_rt::spawn_blocking(move || image_read_as_data_url_impl(path))
+        .await
+        .map_err(|err| CommandError {
+            message: err.to_string(),
+        })?
 }
 
 #[cfg(feature = "desktop")]
@@ -217,8 +247,7 @@ mod tests {
             let mut f = fs::File::create(&path).unwrap();
             f.write_all(&bytes).unwrap();
         }
-        let url = crate::async_rt::block_on(image_read_as_data_url(path.to_string_lossy().into()))
-            .unwrap();
+        let url = image_read_as_data_url_impl(path.to_string_lossy().into()).unwrap();
         assert!(url.starts_with("data:image/png;base64,"));
         // Round-trip check: payload after the prefix should decode back to
         // the source bytes.
@@ -278,7 +307,7 @@ mod tests {
             }
             f.write_all(&[0u8]).unwrap();
         }
-        let err = crate::async_rt::block_on(image_read_as_data_url(path.to_string_lossy().into()))
+        let err = image_read_as_data_url_impl(path.to_string_lossy().into())
             .err()
             .unwrap();
         assert!(err.message.starts_with("Image too large"));

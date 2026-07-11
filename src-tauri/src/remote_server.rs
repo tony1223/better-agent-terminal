@@ -2538,7 +2538,8 @@ fn invoke_rust_for_remote(
                 Ok(value) => value,
                 Err(_) => return Some(Ok(Value::Array(Vec::new()))),
             };
-            to_json_value(channel, fs_cmd::fs_search_impl(dir_path, query))
+            let files_only = bool_param(params, "filesOnly", false);
+            to_json_value(channel, fs_cmd::fs_search_impl(dir_path, query, files_only))
         }
         "fs:resolve-path-links" => string_param(params, "cwd", channel).and_then(|cwd| {
             string_vec_param(params, "rawPaths", channel).and_then(|raw_paths| {
@@ -2679,7 +2680,7 @@ fn invoke_rust_for_remote(
         }),
         "image:read-as-data-url" => string_param_any(params, &["path", "filePath"], channel)
             .and_then(|path| {
-                crate::async_rt::block_on(image_cmd::image_read_as_data_url(path))
+                image_cmd::image_read_as_data_url_impl(path)
                     .map(Value::String)
                     .map_err(|err| err.to_string())
             }),

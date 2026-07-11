@@ -36,6 +36,7 @@ import type { AttachedFile, AttachedImage, CodexAccountEntry, CodexAgentPanelPro
 import { CodexTodoChecklist } from './CodexTodoChecklist'
 import { ReasoningSummary } from './ReasoningSummary'
 import { usePanelActivation, usePanelActiveEffect, type PanelActivation } from '../utils/panel-activation'
+import { prepareFilePickerResults, type FilePickerSearchEntry } from '../utils/file-picker-search'
 
 function clearRuntimeStatusMeta(meta: SessionMeta | null): SessionMeta | null {
   if (!meta?.runtimeStatus && !meta?.runtimeMessage && !meta?.runtimeStatusStartedAt) return meta
@@ -541,8 +542,11 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
   const [showFilePicker, setShowFilePicker] = useState(false)
   const [filePickerMode, setFilePickerMode] = useState<'preview' | 'attach'>('preview')
   const [filePickerQuery, setFilePickerQuery] = useState('')
-  const [filePickerResults, setFilePickerResults] = useState<{ name: string; path: string; isDirectory: boolean }[]>([])
+  const [filePickerResults, setFilePickerResults] = useState<FilePickerSearchEntry[]>([])
   const [filePickerIndex, setFilePickerIndex] = useState(0)
+  const [filePickerLoading, setFilePickerLoading] = useState(false)
+  const [filePickerError, setFilePickerError] = useState<string | null>(null)
+  const filePickerSearchRequestRef = useRef(0)
   const [filePickerPreview, setFilePickerPreview] = useState<string | null>(null)
   const filePickerInputRef = useRef<HTMLInputElement>(null)
   const runtimeWaitMessage = useMemo(
@@ -2010,22 +2014,45 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
 
   // File picker: debounced search
   useEffect(() => {
-    if (!showFilePicker) return
-    if (!filePickerQuery.trim()) {
+    const requestId = ++filePickerSearchRequestRef.current
+    const query = filePickerQuery.trim()
+    if (!showFilePicker || !query) {
       setFilePickerResults([])
       setFilePickerIndex(0)
+      setFilePickerLoading(false)
+      setFilePickerError(null)
       return
     }
+    setFilePickerResults([])
+    setFilePickerIndex(0)
+    setFilePickerLoading(true)
+    setFilePickerError(null)
     const timer = setTimeout(() => {
-      host.fs.search(cwd, filePickerQuery.trim()).then((results: { name: string; path: string; isDirectory: boolean }[]) => {
-        setFilePickerResults(results || [])
+      const startedAt = performance.now()
+      host.fs.search(cwd, query, true).then((results: FilePickerSearchEntry[]) => {
+        if (filePickerSearchRequestRef.current !== requestId) return
+        const prepared = prepareFilePickerResults(results, query)
+        setFilePickerResults(prepared)
         setFilePickerIndex(0)
-      }).catch(() => {
+        if (host.debug.isDebugMode === true) {
+          void host.debug.log(`[Codex:${sessionId.slice(0, 8)}] Ctrl+P search ok remote=${isRemoteConnected} results=${prepared.length} elapsedMs=${Math.round(performance.now() - startedAt)}`)
+        }
+      }).catch((error) => {
+        if (filePickerSearchRequestRef.current !== requestId) return
+        const message = formatUnknownError(error)
         setFilePickerResults([])
+        const label = isRemoteConnected ? 'Remote file search failed' : 'File search failed'
+        setFilePickerError(`${label}: ${message}`)
+        void host.debug.log(`[Codex:${sessionId.slice(0, 8)}] Ctrl+P search failed remote=${isRemoteConnected} error=${message}`)
+      }).finally(() => {
+        if (filePickerSearchRequestRef.current === requestId) setFilePickerLoading(false)
       })
-    }, 150)
-    return () => clearTimeout(timer)
-  }, [filePickerQuery, showFilePicker, cwd])
+    }, isRemoteConnected ? 250 : 150)
+    return () => {
+      clearTimeout(timer)
+      if (filePickerSearchRequestRef.current === requestId) filePickerSearchRequestRef.current += 1
+    }
+  }, [filePickerQuery, showFilePicker, cwd, isRemoteConnected, sessionId])
 
   // Focus textarea when active without reconciling the full message timeline.
   const focusActiveTextarea = useCallback(() => {
@@ -3090,6 +3117,8 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
         setFilePickerQuery('')
         setFilePickerResults([])
         setFilePickerIndex(0)
+        setFilePickerLoading(false)
+        setFilePickerError(null)
         setTimeout(() => filePickerInputRef.current?.focus(), 50)
         return
       }
@@ -3405,6 +3434,8 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
     setFilePickerQuery('')
     setFilePickerResults([])
     setFilePickerIndex(0)
+    setFilePickerLoading(false)
+    setFilePickerError(null)
     setTimeout(() => filePickerInputRef.current?.focus(), 50)
   }, [])
 
@@ -4653,13 +4684,13 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
               ref={filePickerInputRef}
               className="claude-file-picker-input"
               type="text"
-              placeholder={filePickerMode === 'attach' ? 'Search host files to attach...' : 'Search files by name...'}
+              placeholder={filePickerMode === 'attach' ? 'Search host files to attach...' : t('claude.searchFilesByName')}
               value={filePickerQuery}
               onChange={e => setFilePickerQuery(e.target.value)}
               onKeyDown={e => {
                 if (e.key === 'ArrowDown') {
                   e.preventDefault()
-                  setFilePickerIndex(prev => Math.min(prev + 1, filePickerResults.length - 1))
+                  setFilePickerIndex(prev => filePickerResults.length > 0 ? Math.min(prev + 1, filePickerResults.length - 1) : 0)
                 } else if (e.key === 'ArrowUp') {
                   e.preventDefault()
                   setFilePickerIndex(prev => Math.max(prev - 1, 0))
@@ -4677,10 +4708,16 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
             />
             <div className="claude-file-picker-list">
               {!filePickerQuery.trim() && (
-                <div className="claude-file-picker-empty">{filePickerMode === 'attach' ? 'Type to search host files...' : 'Type to search files...'}</div>
+                <div className="claude-file-picker-empty">{filePickerMode === 'attach' ? 'Type to search host files...' : t('claude.typeToSearchFiles')}</div>
               )}
-              {filePickerQuery.trim() && filePickerResults.length === 0 && (
-                <div className="claude-file-picker-empty">No files found</div>
+              {filePickerQuery.trim() && filePickerLoading && (
+                <div className="claude-file-picker-empty">{t('common.loading')}</div>
+              )}
+              {filePickerQuery.trim() && filePickerError && (
+                <div className="claude-file-picker-empty">{filePickerError}</div>
+              )}
+              {filePickerQuery.trim() && !filePickerLoading && !filePickerError && filePickerResults.length === 0 && (
+                <div className="claude-file-picker-empty">{t('claude.noFilesFound')}</div>
               )}
               {filePickerResults.slice(0, 20).map((item, i) => {
                 const relPath = item.path.startsWith(cwd)

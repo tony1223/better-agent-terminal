@@ -251,7 +251,7 @@ fn legacy_v1_param_keys(channel: &str) -> Option<&'static [&'static str]> {
         "git:diff-files" => Some(&["cwd", "commitHash"]),
         "fs:readdir" | "fs:isDirectory" | "fs:search" | "fs:watch" | "fs:unwatch"
         | "fs:list-dirs" => match channel {
-            "fs:search" => Some(&["dirPath", "query"]),
+            "fs:search" => Some(&["dirPath", "query", "filesOnly"]),
             "fs:list-dirs" => Some(&["dirPath", "includeHidden"]),
             "fs:isDirectory" => Some(&["path"]),
             _ => Some(&["dirPath"]),
@@ -571,6 +571,18 @@ mod tests {
                 &[json!({ "tool": "claude", "ok": true })]
             ),
             json!({ "tool": "claude", "ok": true })
+        );
+    }
+
+    #[test]
+    fn quick_open_channels_keep_remote_search_and_image_params() {
+        assert_eq!(
+            legacy_v1_args_to_params("fs:search", &[json!("/repo"), json!("main"), json!(true)],),
+            json!({ "dirPath": "/repo", "query": "main", "filesOnly": true })
+        );
+        assert_eq!(
+            legacy_v1_args_to_params("image:read-as-data-url", &[json!("/repo/logo.png")]),
+            json!({ "filePath": "/repo/logo.png" })
         );
     }
 
