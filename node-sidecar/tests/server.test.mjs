@@ -2047,6 +2047,10 @@ async function inProcess() {
       // Existing session → re-emit history read-only, same record (not rebuilt).
       ccCaptured.length = 0
       const existingRef = mod.sessions.get('cc-1')
+      // Model a renderer-LRU remount whose live snapshot no longer carries the
+      // transcript. clientResume must repopulate both the event and idle
+      // sidecar state without replacing the session object.
+      existingRef.messages = []
       const existedReply = await dispatch({ jsonrpc: '2.0', id: 701, method: 'claude.clientResume',
         params: { sessionId: 'cc-1', sdkSessionId: 'sdk-cc-1', options: { cwd: ccCwd } } })
       assert.equal(existedReply.result.existed, true)
@@ -2056,6 +2060,8 @@ async function inProcess() {
       assert.deepEqual(existedHistory.payload.items.map(i => `${i.role}:${i.content}`), ['user:hi', 'assistant:hello'])
       assert.strictEqual(mod.sessions.get('cc-1'), existingRef, 'clientResume must not rebuild an existing session record')
       assert.equal(mod.sessions.get('cc-1').sdkSessionId, 'sdk-cc-1')
+      assert.deepEqual(existingRef.messages.map(i => `${i.role}:${i.content}`), ['user:hi', 'assistant:hello'],
+        'clientResume must refill an empty idle session snapshot from its transcript')
 
       // A second client may have neither the SDK id nor the host's current cwd
       // in its workspace snapshot. The live host session is authoritative.

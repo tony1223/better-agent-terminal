@@ -37,6 +37,16 @@ async function main() {
     true,
     'Codex /sac should gate retries through the configured trigger',
   )
+  assert.equal(
+    source.includes("window.addEventListener('codex-account-switched'"),
+    false,
+    'Codex account changes are backend-owned and must not make panels clear their timelines',
+  )
+  assert.equal(
+    source.includes('reset after Codex account switch failed'),
+    false,
+    'Codex account changes must not trigger a second destructive renderer reset',
+  )
   assert.match(
     source,
     /const resumeResult = await host\.claude\.resumeSession\([\s\S]*effectiveModel \|\| savedModel[\s\S]*permissionMode,\s*effectiveEffort[\s\S]*\) as \{ stale\?: boolean \} \| null/,
@@ -49,13 +59,18 @@ async function main() {
   )
   assert.match(
     claudeSource,
-    /const hostMeta = await host\.claude\.getSessionMeta\(sessionId\)[\s\S]*const remoteSdkSessionId = hostMeta\?\.sdkSessionId \|\| savedSdkSessionId \|\| ''[\s\S]*host\.claude\.clientResume\([\s\S]*remoteSdkSessionId,[\s\S]*remoteCwd,/,
-    'Claude remote attach should recover host-owned metadata before requesting history',
+    /const shouldReplayHistory = isRemoteConnected\s*\|\| \(!isCodexSession && existingMessages\.length === 0\)[\s\S]*const hostMeta = await host\.claude\.getSessionMeta\(sessionId\)[\s\S]*const historySdkSessionId = hostMeta\?\.sdkSessionId \|\| savedSdkSessionId \|\| ''[\s\S]*host\.claude\.clientResume\([\s\S]*historySdkSessionId,[\s\S]*historyCwd,/,
+    'Claude attach should recover host-owned metadata and replay empty local snapshots as well as remote history',
   )
   assert.match(
     claudeSource,
-    /if \(!isRemoteConnected \|\| remoteHistoryAttachedRef\.current\) return/,
-    'Claude reconnect should replay remote history once even when session startup is already cached',
+    /const historyAttached = isRemoteConnected\s*\? remoteHistoryAttachedRef\.current\s*:\s*localHistoryAttachedRef\.current\s*if \(historyAttached\) return/,
+    'Claude remounts should inspect history once even when session startup is already cached',
+  )
+  assert.equal(
+    claudeSource.includes('existingMessages.length > 0 || (messageCountRef.current === 0 && !isRemoteConnected)'),
+    false,
+    'Claude mount hydration must not let an empty local snapshot erase replayed history',
   )
   assert.equal(
     normalizeReasoningSummary('**Step A**\n\n<!-- -->\n\n**Step B**'),

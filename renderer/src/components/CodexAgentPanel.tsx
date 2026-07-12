@@ -431,21 +431,6 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
   useEffect(() => {
     if (showResumeList) void refreshResumeSessions()
   }, [showResumeList, refreshResumeSessions])
-  useEffect(() => {
-    if (!isCodexSession) return
-    const handleAccountSwitch = () => {
-      setMessages([])
-      setSessionMeta(null)
-      setStreamingText('')
-      setStreamingThinking('')
-      workspaceStore.setTerminalSdkSessionId(sessionId, undefined)
-      void host.claude.resetSession(sessionId).catch((error: unknown) => {
-        host.debug.log?.(`[CodexAgentPanel] reset after Codex account switch failed: ${error instanceof Error ? error.message : String(error)}`)
-      })
-    }
-    window.addEventListener('codex-account-switched', handleAccountSwitch)
-    return () => window.removeEventListener('codex-account-switched', handleAccountSwitch)
-  }, [sessionId, isCodexSession, setStreamingText, setStreamingThinking])
   const effortOptions = useMemo(
     () => includeCurrentOption(isCodexSession ? availableEfforts : CLAUDE_EFFORT_MODES, effortLevel),
     [availableEfforts, effortLevel, isCodexSession],

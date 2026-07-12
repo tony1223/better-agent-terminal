@@ -606,6 +606,11 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
   // whenever the connection/session changes so reconnecting asks the host to
   // replay history once, without replaying it before every sendMessage call.
   const remoteHistoryAttachedRef = useRef(false)
+  // Local panels can also be unmounted by the bounded terminal LRU. Their
+  // renderer-only history disappears with the component, so a newly mounted
+  // panel must inspect/replay an empty host snapshot once before taking the
+  // fast path used by subsequent sends.
+  const localHistoryAttachedRef = useRef(false)
   const inputHistoryRef = useRef<string[]>([])
   const inputHistoryIndexRef = useRef(-1)
   const inputDraftRef = useRef('')
@@ -615,6 +620,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
 
   useEffect(() => {
     remoteHistoryAttachedRef.current = false
+    localHistoryAttachedRef.current = false
   }, [sessionId, isRemoteConnected])
 
   useEffect(() => {
@@ -1730,13 +1736,12 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
         const existingMessages = (existingState.messages || []) as MessageItem[]
         historyLoadedRef.current = true
         setIsResumingHistory(false)
-        // On remote, getSessionState returns the host's empty in-memory buffer
-        // even when a transcript exists; the real history arrives via the
-        // claude:history event that clientResume (in ensureSessionStarted)
-        // triggers. Don't apply an empty snapshot here — it would clobber that
-        // history (or flash blank before it lands). onHistory owns the remote
-        // case; local keeps applying getSessionState directly.
-        if (existingMessages.length > 0 || (messageCountRef.current === 0 && !isRemoteConnected)) {
+        // clientResume can emit claude:history while getSessionState remains
+        // empty (for example when an idle persistent SDK query is still live).
+        // Never apply that empty snapshot: depending on event scheduling it can
+        // land just after onHistory and erase the recovered local/remote view.
+        // Fresh sessions already initialize with an empty messages array.
+        if (existingMessages.length > 0) {
           setMessages(existingMessages)
         } else if (host.debug.isDebugMode === true) {
           dlog(`${stag} skip empty getSessionState messages; preserving rendered history count=${messageCountRef.current} remote=${isRemoteConnected}`)
@@ -1797,10 +1802,14 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
     const existingStart = startedSessionPromises.get(sessionId)
     if (existingStart) {
       await existingStart
-      // A reconnect keeps the same mounted panel and module-level start
-      // promise. Continue once so the newly connected remote client can ask
-      // the host to replay history; ordinary sends still take the fast return.
-      if (!isRemoteConnected || remoteHistoryAttachedRef.current) return
+      // A reconnect or a bounded-LRU remount can keep the module-level start
+      // promise while creating a new panel with no renderer history. Continue
+      // once per mounted panel so it can inspect/replay the transcript;
+      // ordinary sends still take the fast return.
+      const historyAttached = isRemoteConnected
+        ? remoteHistoryAttachedRef.current
+        : localHistoryAttachedRef.current
+      if (historyAttached) return
     }
 
     const startPromise = (async () => {
@@ -1820,30 +1829,35 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
 
       const existingState = await host.claude.getSessionState(sessionId).catch(() => null)
       if (existingState) {
-        // On a remote window the host can report a session as "existing" while
-        // its in-memory getSessionState carries no messages — the transcript is
-        // only streamed via claude:history on (re)attach. A bare return here
-        // leaves the panel blank. Ask the host to re-emit history
-        // non-destructively (clientResume: read-only when the session is live,
-        // a real resume only when it's absent), so onHistory repopulates the
-        // view without disturbing an in-flight host turn. Local windows keep the
-        // existing short-circuit (their getSessionState already has messages).
-        if (isRemoteConnected) {
-          // The host's live metadata is authoritative. A session created by a
-          // different client (or by headless bat-server) may never have written
-          // its SDK id into this client's workspace snapshot, even though the
-          // host already captured it from claude:status. Ask for that metadata
-          // before attaching; an empty id remains valid for a live Claude
-          // session because clientResume can derive it host-side.
+        const existingMessages = Array.isArray(existingState.messages) ? existingState.messages : []
+        // Remote clients always request a host replay on (re)attach. Local
+        // clients normally hydrate from getSessionState, but an idle panel may
+        // have been evicted by the bounded terminal LRU while its sidecar only
+        // retains the SDK identity. In that empty-snapshot case, replay the
+        // persisted transcript non-destructively instead of rendering blank.
+        const shouldReplayHistory = isRemoteConnected
+          || (!isCodexSession && existingMessages.length === 0)
+        if (shouldReplayHistory) {
+          // The host's live metadata is authoritative. Another client (or an
+          // earlier renderer mount) may know an SDK id that was never written
+          // into this workspace snapshot.
           const hostMeta = await host.claude.getSessionMeta(sessionId).catch(() => null) as SessionMeta | null
-          const remoteSdkSessionId = hostMeta?.sdkSessionId || savedSdkSessionId || ''
-          const remoteCwd = hostMeta?.cwd || cwd
-          dlog(`${stag} ensureSessionStarted: existing remote session; clientResume for history sdkSessionId=${remoteSdkSessionId ? remoteSdkSessionId.slice(0, 8) : 'host-owned'}`)
+          const historySdkSessionId = hostMeta?.sdkSessionId || savedSdkSessionId || ''
+          const historyCwd = hostMeta?.cwd || cwd
+          // A remote live session can derive its SDK id host-side. A local
+          // brand-new session with no id has no transcript to replay.
+          if (!isRemoteConnected && !historySdkSessionId) {
+            localHistoryAttachedRef.current = true
+            dlog(`${stag} ensureSessionStarted: existing empty local session has no transcript id`)
+            return
+          }
+          const attachKind = isRemoteConnected ? 'remote attach' : 'local remount'
+          dlog(`${stag} ensureSessionStarted: ${attachKind}; clientResume for history sdkSessionId=${historySdkSessionId ? historySdkSessionId.slice(0, 8) : 'host-owned'}`)
           try {
             await host.claude.clientResume(
               sessionId,
-              remoteSdkSessionId,
-              remoteCwd,
+              historySdkSessionId,
+              historyCwd,
               hostMeta?.model || effectiveModel || savedModel,
               apiVersion,
               useWorktree ? true : undefined,
@@ -1856,15 +1870,20 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
               effectiveEffort,
               effectiveUltracode ? true : undefined,
             )
-            remoteHistoryAttachedRef.current = true
-            if (remoteSdkSessionId && remoteSdkSessionId !== savedSdkSessionId) {
-              workspaceStore.setTerminalSdkSessionId(sessionId, remoteSdkSessionId)
+            if (isRemoteConnected) {
+              remoteHistoryAttachedRef.current = true
+            } else {
+              localHistoryAttachedRef.current = true
+            }
+            if (historySdkSessionId && historySdkSessionId !== savedSdkSessionId) {
+              workspaceStore.setTerminalSdkSessionId(sessionId, historySdkSessionId)
             }
           } catch (err: unknown) {
             dlog(`${stag} clientResume failed: ${err instanceof Error ? err.message : String(err)}`)
           }
           return
         }
+        localHistoryAttachedRef.current = true
         dlog(`${stag} ensureSessionStarted: existing session`)
         return
       }
@@ -1895,7 +1914,11 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
             getAutoCompactWindowForModel(effectiveModel || savedModel, settingsStore.getSettings().autoCompactWindow),
           ) as ResumeSessionResult | null
           if (!resumeResult?.stale) {
-            if (isRemoteConnected) remoteHistoryAttachedRef.current = true
+            if (isRemoteConnected) {
+              remoteHistoryAttachedRef.current = true
+            } else {
+              localHistoryAttachedRef.current = true
+            }
             return
           }
           dlog(`${stag} ensureSessionStarted: stale sdkSessionId=${savedSdkSessionId.slice(0, 8)}; starting fresh session`)
@@ -1916,7 +1939,11 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
         ...(useWorktree ? { useWorktree: true, worktreePath: terminalState?.worktreePath, worktreeBranch: terminalState?.worktreeBranch } : {}),
         ...(getAutoCompactWindowForModel(effectiveModel, globalSettings.autoCompactWindow) ? { autoCompactWindow: getAutoCompactWindowForModel(effectiveModel, globalSettings.autoCompactWindow)! } : {}),
       })
-      if (isRemoteConnected) remoteHistoryAttachedRef.current = true
+      if (isRemoteConnected) {
+        remoteHistoryAttachedRef.current = true
+      } else {
+        localHistoryAttachedRef.current = true
+      }
     })().catch((err: unknown) => {
       clearStartedSessionTracking(sessionId)
       throw err
