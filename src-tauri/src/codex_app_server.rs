@@ -283,6 +283,13 @@ struct CodexSession {
     input_tokens: u64,
     output_tokens: u64,
     cache_read_tokens: u64,
+    // App-server tokenUsage.total is lifetime cumulative usage, while
+    // tokenUsage.last is the latest request/context-window footprint.
+    // Keep both: existing metadata consumers use the cumulative fields, but
+    // context percentage must never divide lifetime usage by one window.
+    last_input_tokens: u64,
+    last_output_tokens: u64,
+    last_cache_read_tokens: u64,
     num_turns: u64,
     last_turn_started_at: Option<Instant>,
     last_turn_first_token_ms: Option<u64>,
@@ -302,9 +309,10 @@ struct CodexSession {
 
 impl CodexSession {
     fn metadata(&self) -> Value {
-        // cached input is a subset of input tokens in the Codex app-server
+        // Cached input is a subset of input tokens in the Codex app-server
         // protocol, so adding it again would double-count context usage.
-        let context_tokens = self.input_tokens + self.output_tokens;
+        // `last`, not lifetime `total`, represents the active context window.
+        let context_tokens = self.last_input_tokens + self.last_output_tokens;
         json!({
             "model": self.model,
             "sdkSessionId": self.thread_id,
@@ -4011,6 +4019,9 @@ impl CodexAppServerState {
             input_tokens: 0,
             output_tokens: 0,
             cache_read_tokens: 0,
+            last_input_tokens: 0,
+            last_output_tokens: 0,
+            last_cache_read_tokens: 0,
             num_turns: 0,
             last_turn_started_at: None,
             last_turn_first_token_ms: None,
@@ -4183,6 +4194,9 @@ impl CodexAppServerState {
             input_tokens: 0,
             output_tokens: 0,
             cache_read_tokens: 0,
+            last_input_tokens: 0,
+            last_output_tokens: 0,
+            last_cache_read_tokens: 0,
             num_turns: 0,
             last_turn_started_at: None,
             last_turn_first_token_ms: None,
@@ -4828,6 +4842,9 @@ impl CodexAppServerState {
             session.input_tokens = 0;
             session.output_tokens = 0;
             session.cache_read_tokens = 0;
+            session.last_input_tokens = 0;
+            session.last_output_tokens = 0;
+            session.last_cache_read_tokens = 0;
             session.num_turns = 0;
             session.last_turn_started_at = None;
             session.last_turn_first_token_ms = None;
@@ -4925,7 +4942,7 @@ impl CodexAppServerState {
     pub fn get_context_usage(&self, session_id: &str) -> Option<Value> {
         let sessions = self.inner.sessions.lock().expect("codex sessions lock");
         let session = sessions.get(session_id)?;
-        let total_tokens = session.input_tokens + session.output_tokens;
+        let total_tokens = session.last_input_tokens + session.last_output_tokens;
         if total_tokens == 0 {
             return None;
         }
@@ -4942,10 +4959,10 @@ impl CodexAppServerState {
             "percentage": percentage,
             "model": session.model,
             "apiUsage": {
-                "input_tokens": session.input_tokens,
-                "output_tokens": session.output_tokens,
+                "input_tokens": session.last_input_tokens,
+                "output_tokens": session.last_output_tokens,
                 "cache_creation_input_tokens": 0,
-                "cache_read_input_tokens": session.cache_read_tokens,
+                "cache_read_input_tokens": session.last_cache_read_tokens,
             },
         }))
     }
@@ -6059,13 +6076,62 @@ fn handle_usage_updated(
 fn update_session_usage(session: &mut CodexSession, params: &Value) {
     let usage = params
         .get("tokenUsage")
+        .or_else(|| params.get("token_usage"))
         .or_else(|| params.get("usage"))
         .unwrap_or(params);
-    if let Some(v) = read_usage_u64(usage, &["inputTokens", "input_tokens", "input"]) {
+    let cumulative_usage = usage_section(
+        usage,
+        &[
+            "total",
+            "cumulative",
+            "totalTokenUsage",
+            "total_token_usage",
+        ],
+    )
+    .unwrap_or(usage);
+    let last_usage = usage_section(usage, &["last", "lastTokenUsage", "last_token_usage"])
+        .unwrap_or(cumulative_usage);
+
+    if let Some(v) = read_usage_u64(cumulative_usage, &["inputTokens", "input_tokens", "input"]) {
         session.input_tokens = v;
     }
-    if let Some(v) = read_usage_u64(usage, &["outputTokens", "output_tokens", "output"]) {
+    if let Some(v) = read_usage_u64(
+        cumulative_usage,
+        &["outputTokens", "output_tokens", "output"],
+    ) {
         session.output_tokens = v;
+    }
+    if let Some(v) = read_usage_u64(
+        cumulative_usage,
+        &[
+            "cacheReadTokens",
+            "cachedInputTokens",
+            "cached_input_tokens",
+            "cache_read_tokens",
+        ],
+    ) {
+        session.cache_read_tokens = v;
+    }
+    update_session_last_usage(session, last_usage);
+    if let Some(v) = read_usage_u64(usage, &["modelContextWindow", "model_context_window"])
+        .filter(|value| *value > 0)
+    {
+        session.context_window = v;
+    }
+}
+
+fn usage_section<'a>(usage: &'a Value, keys: &[&str]) -> Option<&'a Value> {
+    keys.iter()
+        .find_map(|key| usage.get(*key))
+        .filter(|value| value.is_object())
+}
+
+fn update_session_last_usage(session: &mut CodexSession, usage: &Value) {
+    if let Some(v) = read_usage_u64(usage, &["inputTokens", "input_tokens", "input"]) {
+        session.last_input_tokens = v;
+    }
+    if let Some(v) = read_usage_u64(usage, &["outputTokens", "output_tokens", "output"]) {
+        session.last_output_tokens = v;
     }
     if let Some(v) = read_usage_u64(
         usage,
@@ -6076,12 +6142,7 @@ fn update_session_usage(session: &mut CodexSession, params: &Value) {
             "cache_read_tokens",
         ],
     ) {
-        session.cache_read_tokens = v;
-    }
-    if let Some(v) = read_usage_u64(usage, &["modelContextWindow", "model_context_window"])
-        .filter(|value| *value > 0)
-    {
-        session.context_window = v;
+        session.last_cache_read_tokens = v;
     }
 }
 
@@ -6129,21 +6190,13 @@ fn handle_turn_completed(
         cleanup_session_temp_images(session);
         session.command_outputs.clear();
         if let Some(usage) = turn.get("usage") {
-            if let Some(v) = read_usage_u64(usage, &["inputTokens", "input_tokens", "input"]) {
-                session.input_tokens = v;
-            }
-            if let Some(v) = read_usage_u64(usage, &["outputTokens", "output_tokens", "output"]) {
-                session.output_tokens = v;
-            }
-            if let Some(v) = read_usage_u64(
-                usage,
-                &[
-                    "cacheReadTokens",
-                    "cached_input_tokens",
-                    "cache_read_tokens",
-                ],
-            ) {
-                session.cache_read_tokens = v;
+            // turn.completed.usage is per-turn, not lifetime cumulative. It is
+            // a fallback for app-server versions that omit tokenUsage.last.
+            update_session_last_usage(session, usage);
+            if session.input_tokens == 0 && session.output_tokens == 0 {
+                session.input_tokens = session.last_input_tokens;
+                session.output_tokens = session.last_output_tokens;
+                session.cache_read_tokens = session.last_cache_read_tokens;
             }
         }
         if let Some(started_at) = session.last_turn_started_at {
@@ -6720,6 +6773,9 @@ mod tests {
             input_tokens: 100,
             output_tokens: 50,
             cache_read_tokens: 25,
+            last_input_tokens: 100,
+            last_output_tokens: 50,
+            last_cache_read_tokens: 25,
             num_turns: 1,
             last_turn_started_at: None,
             last_turn_first_token_ms: None,
@@ -6762,6 +6818,9 @@ mod tests {
             input_tokens: 0,
             output_tokens: 0,
             cache_read_tokens: 0,
+            last_input_tokens: 0,
+            last_output_tokens: 0,
+            last_cache_read_tokens: 0,
             num_turns: 0,
             last_turn_started_at: None,
             last_turn_first_token_ms: None,
@@ -6812,6 +6871,9 @@ mod tests {
             input_tokens: 0,
             output_tokens: 0,
             cache_read_tokens: 0,
+            last_input_tokens: 0,
+            last_output_tokens: 0,
+            last_cache_read_tokens: 0,
             num_turns: 1,
             last_turn_started_at: None,
             last_turn_first_token_ms: None,
@@ -6834,20 +6896,20 @@ mod tests {
                 "threadId": "thread-1",
                 "turnId": "turn-1",
                 "tokenUsage": {
-                    "modelContextWindow": 353_400,
+                    "modelContextWindow": 258_400,
                     "last": {
-                        "inputTokens": 25,
-                        "cachedInputTokens": 5,
-                        "outputTokens": 10,
-                        "reasoningOutputTokens": 2,
-                        "totalTokens": 35
+                        "inputTokens": 189_143,
+                        "cachedInputTokens": 186_112,
+                        "outputTokens": 2_721,
+                        "reasoningOutputTokens": 2_527,
+                        "totalTokens": 191_864
                     },
                     "total": {
-                        "inputTokens": 150,
-                        "cachedInputTokens": 100,
-                        "outputTokens": 30,
-                        "reasoningOutputTokens": 10,
-                        "totalTokens": 180
+                        "inputTokens": 306_762_694,
+                        "cachedInputTokens": 299_112_704,
+                        "outputTokens": 773_851,
+                        "reasoningOutputTokens": 380_197,
+                        "totalTokens": 307_536_545
                     }
                 }
             }),
@@ -6860,14 +6922,18 @@ mod tests {
             .insert("s-1".to_string(), session);
 
         let usage = state.get_context_usage("s-1").expect("usage");
-        assert_eq!(usage["totalTokens"], 180);
-        assert_eq!(usage["maxTokens"], 353_400);
-        assert_eq!(usage["percentage"], 0);
+        assert_eq!(usage["totalTokens"], 191_864);
+        assert_eq!(usage["maxTokens"], 258_400);
+        assert_eq!(usage["percentage"], 74);
         assert_eq!(usage["model"], "gpt-5.6-sol");
-        assert_eq!(usage["apiUsage"]["input_tokens"], 150);
-        assert_eq!(usage["apiUsage"]["output_tokens"], 30);
-        assert_eq!(usage["apiUsage"]["cache_read_input_tokens"], 100);
+        assert_eq!(usage["apiUsage"]["input_tokens"], 189_143);
+        assert_eq!(usage["apiUsage"]["output_tokens"], 2_721);
+        assert_eq!(usage["apiUsage"]["cache_read_input_tokens"], 186_112);
         assert_eq!(usage["categories"][0]["name"], "Context");
+        let meta = state.get_session_meta("s-1").expect("meta");
+        assert_eq!(meta["contextTokens"], 191_864);
+        assert_eq!(meta["inputTokens"], 306_762_694);
+        assert_eq!(meta["outputTokens"], 773_851);
         assert_eq!(state.get_context_usage("missing"), None);
     }
 
