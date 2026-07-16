@@ -1,6 +1,7 @@
 import * as assert from 'node:assert/strict'
 import { createPanelActivation } from '../renderer/src/utils/panel-activation.ts'
 import { touchBoundedLru } from '../renderer/src/utils/bounded-lru.ts'
+import { rememberMountedWorkspace } from '../renderer/src/utils/workspace-mounts.ts'
 
 const activation = createPanelActivation(false)
 const changes: boolean[] = []
@@ -23,13 +24,23 @@ unsubscribe()
 activation.set(true)
 assert.deepEqual(changes, [true, false], 'unsubscribed panels must not receive activation work')
 
-let mounted = new Set<string>()
-mounted = touchBoundedLru(mounted, 'one', 2)
-mounted = touchBoundedLru(mounted, 'two', 2)
-mounted = touchBoundedLru(mounted, 'three', 2)
-assert.deepEqual([...mounted], ['two', 'three'], 'old inactive panels should be released')
+let mountedWorkspaces = new Set<string>()
+mountedWorkspaces = rememberMountedWorkspace(mountedWorkspaces, 'one')
+mountedWorkspaces = rememberMountedWorkspace(mountedWorkspaces, 'two')
+mountedWorkspaces = rememberMountedWorkspace(mountedWorkspaces, 'three')
+assert.deepEqual(
+  [...mountedWorkspaces],
+  ['one', 'two', 'three'],
+  'visited workspace views must remain mounted so their text state survives switching',
+)
 
-mounted = touchBoundedLru(mounted, 'four', 2, new Set(['two']))
-assert.deepEqual([...mounted], ['two', 'four'], 'running or prompting panels must remain mounted')
+let mountedTerminals = new Set<string>()
+mountedTerminals = touchBoundedLru(mountedTerminals, 'one', 2)
+mountedTerminals = touchBoundedLru(mountedTerminals, 'two', 2)
+mountedTerminals = touchBoundedLru(mountedTerminals, 'three', 2)
+assert.deepEqual([...mountedTerminals], ['two', 'three'], 'old inactive terminal panels should be released')
+
+mountedTerminals = touchBoundedLru(mountedTerminals, 'four', 2, new Set(['two']))
+assert.deepEqual([...mountedTerminals], ['two', 'four'], 'running or prompting terminal panels must remain mounted')
 
 console.log('workspace switch activation regression: passed')

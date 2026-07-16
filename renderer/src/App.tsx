@@ -25,10 +25,8 @@ import {
   profileChangeMatchesRemoteOrigin,
   type ProfileEntryLike,
 } from './utils/remote-profile-events'
-import { touchBoundedLru } from './utils/bounded-lru'
+import { rememberMountedWorkspace } from './utils/workspace-mounts'
 import type { AppState, EnvVariable, TerminalInstance } from './types'
-
-const MAX_MOUNTED_WORKSPACES = 2
 
 // Panel settings interface
 interface PanelSettings {
@@ -178,21 +176,6 @@ export default function App() {
   const [detachedIds, setDetachedIds] = useState<Set<string>>(new Set())
   // Track workspaces that have been visited (for lazy mounting)
   const [mountedWorkspaces, setMountedWorkspaces] = useState<Set<string>>(new Set())
-  const pinnedWorkspaceKey = state.terminals
-    .filter(terminal => (
-      terminal.isAgentRunning
-      || terminal.hasPendingAction
-      || !!terminal.procfilePath
-      || terminal.agentPreset === 'claude-channel'
-      || terminal.agentPreset === 'claude-cli-agent'
-    ))
-    .map(terminal => terminal.workspaceId)
-    .sort()
-    .join('\0')
-  const pinnedWorkspaceIds = useMemo(
-    () => new Set(pinnedWorkspaceKey ? pinnedWorkspaceKey.split('\0') : []),
-    [pinnedWorkspaceKey],
-  )
   const lastRenderSummaryRef = useRef<string>('')
   const [currentWindowId, setCurrentWindowId] = useState<string | null>(null)
   const currentWindowIdRef = useRef<string | null>(null)
@@ -297,18 +280,14 @@ export default function App() {
     host.app.setTitle(title).catch(() => {})
   }, [activeProfileName, windowIndex, activeProfileIsRemote])
 
-  // Keep the active/recent workspace views warm, but release older WebViews'
-  // xterm/message DOM. Live turns and pending prompts stay pinned so their
-  // renderer handlers remain attached until the backend turn settles.
+  // Once visited, keep a workspace view mounted. Agent drafts/message state and
+  // xterm's rendered buffer live inside the view, so evicting the oldest view
+  // when a third workspace is opened makes its text disappear on return.
+  // Individual panels still gate background work through their isActive state.
   useEffect(() => {
     if (!state.activeWorkspaceId) return
-    setMountedWorkspaces(previous => touchBoundedLru(
-      previous,
-      state.activeWorkspaceId!,
-      MAX_MOUNTED_WORKSPACES,
-      pinnedWorkspaceIds,
-    ))
-  }, [state.activeWorkspaceId, pinnedWorkspaceIds])
+    setMountedWorkspaces(previous => rememberMountedWorkspace(previous, state.activeWorkspaceId!))
+  }, [state.activeWorkspaceId])
 
   // Handle sidebar resize
   const handleSidebarResize = useCallback((delta: number) => {
