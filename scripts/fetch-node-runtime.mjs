@@ -2,8 +2,8 @@
 // Download a portable Node binary into node-sidecar/runtime/<plat>-<arch>/
 // so the Tauri release bundle ships a self-contained Node interpreter.
 //
-// Defaults to Node v20.18.1 (current LTS) and the current host platform/arch.
-// Pass --version=v22.x or --target=darwin-aarch64 to override; --all fetches
+// Defaults to Node v24.18.0 (current LTS) and the current host platform/arch.
+// Pass --version=v24.18.0 or --target=darwin-aarch64 to override; --all fetches
 // every supported triple in one go. By default the script prunes other known
 // runtime triples so stale cross-platform runtimes are not bundled by Tauri;
 // pass --keep-other-targets to preserve them.
@@ -30,7 +30,7 @@ const here = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(here, '..')
 const runtimeRoot = join(repoRoot, 'node-sidecar', 'runtime')
 
-export const DEFAULT_VERSION = 'v20.20.2'
+export const DEFAULT_VERSION = 'v24.18.0'
 
 // Map our internal triple (platform-arch, using Rust-style arch names that
 // match std::env::consts::ARCH on the Rust side) to Node.org distribution
@@ -97,7 +97,7 @@ async function extract(archivePath, destDir, ext) {
 }
 
 async function findExtractedRoot(parent) {
-  // Node archives extract to a single root dir like node-v20.18.1-win-x64/.
+  // Node archives extract to a single root dir like node-v24.18.0-win-x64/.
   // Find it (the one non-archive entry under parent).
   const entries = await readdir(parent)
   for (const e of entries) {
