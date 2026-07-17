@@ -5457,7 +5457,7 @@ fn handle_notification(
     if method == "account/rateLimits/updated" {
         // Usage telemetry surfaces in the desktop status line only.
         #[cfg(feature = "desktop")]
-        crate::claude_usage::publish_codex_usage(app.app(), &params);
+        crate::claude_usage::publish_codex_usage_update(app.app(), &params);
         #[cfg(not(feature = "desktop"))]
         let _ = &params;
         return;

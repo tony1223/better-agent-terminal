@@ -21,7 +21,7 @@ import { extractInterruptedContinuation } from '../utils/interrupted-prompt'
 import { isTauriNativeDropInside, listenTauriNativeDrop } from '../utils/tauri-native-drop'
 import { useRemoteDropUpload } from '../utils/remote-drop-upload'
 import { RemoteUploadConfirmDialog } from './RemoteUploadConfirmDialog'
-import { getHostUsageSnapshot, subscribeHostUsage } from '../utils/claude-usage-cache'
+import { getHostUsageSnapshot, rateLimitsFromHostUsage, subscribeHostUsage } from '../utils/claude-usage-cache'
 import { autoCompactWindowForClaudeSelection, displayNameForClaudeSelection, normalizeClaudeModelSelection, sdkModelForClaudeSelection } from '../utils/claude-model-presets'
 import { shouldNavigateInputHistoryFromTextarea } from '../utils/input-history-navigation'
 import { buildSnippetContextPrompt, parseSnippetSlashCommand, type SnippetForContext } from '../utils/snippet-command'
@@ -364,18 +364,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
     const apply = () => {
       const snap = getHostUsageSnapshot(isCodexSession ? 'codex' : 'claude')
       if (!snap) return
-      setRateLimits(prev => {
-        const next = { ...prev }
-        for (const [key, win] of [['five_hour', snap.fiveHour], ['seven_day', snap.sevenDay]] as const) {
-          if (!win) continue
-          next[key] = {
-            resetsAt: win.resetsAt ?? prev[key]?.resetsAt ?? Date.now(),
-            utilization: win.utilization,
-            isUsingOverage: prev[key]?.isUsingOverage ?? false,
-          }
-        }
-        return next
-      })
+      setRateLimits(prev => rateLimitsFromHostUsage(snap, prev))
     }
     apply()
     return subscribeHostUsage(apply)

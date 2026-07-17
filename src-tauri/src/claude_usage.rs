@@ -229,6 +229,10 @@ fn store_and_publish(app: &AppHandle, provider: &str, snapshot: Value) {
             .insert(provider.to_string(), snapshot.clone())
             .is_none()
     };
+    publish_stored_snapshot(app, provider, snapshot, first);
+}
+
+fn publish_stored_snapshot(app: &AppHandle, provider: &str, snapshot: Value, first: bool) {
     if first {
         // One success line per provider per app run, so logs can distinguish
         // "polled fine but nobody was listening" from "never ran".
@@ -240,6 +244,20 @@ fn store_and_publish(app: &AppHandle, provider: &str, snapshot: Value) {
         json!({ "payload": snapshot }),
         "rust-usage-poller",
     );
+}
+
+fn merge_and_publish_codex_update(app: &AppHandle, update: Value) {
+    let (snapshot, first) = {
+        let Ok(mut store) = snapshot_store().lock() else {
+            return;
+        };
+        let snapshot = merge_codex_usage_snapshot(store.get("codex"), &update);
+        let first = store
+            .insert("codex".to_string(), snapshot.clone())
+            .is_none();
+        (snapshot, first)
+    };
+    publish_stored_snapshot(app, "codex", snapshot, first);
 }
 
 /// Pull path for the renderer cache: last snapshot per provider, or empty.
@@ -317,11 +335,20 @@ pub async fn agent_usage_peek(account_id: String) -> Value {
 // ---- Codex (one account, one poll — same principle) ------------------------
 //
 // Codex exposes an OFFICIAL v2 app-server RPC, `account/rateLimits/read`,
-// returning { rateLimits: { primary, secondary, planType, ... } } where
-// primary is the 5h window and secondary the weekly window, each
-// { usedPercent (0-100), windowDurationMins, resetsAt }. The same snapshot
-// also arrives as the account/rateLimits/updated notification during turns.
-// Both shapes funnel through publish_codex_usage.
+// returning { rateLimits: { primary, secondary, planType, ... } }. `primary`
+// and `secondary` are slots, not stable duration labels: either slot may be
+// absent, and current servers can put the weekly window in `primary` when no
+// 5h window applies. Classify by windowDurationMins; position is only a
+// compatibility fallback for older servers that omitted the duration.
+
+const CODEX_FIVE_HOUR_MINUTES: u64 = 5 * 60;
+const CODEX_SEVEN_DAY_MINUTES: u64 = 7 * 24 * 60;
+
+#[derive(Clone, Copy)]
+enum CodexWindowKind {
+    FiveHour,
+    SevenDay,
+}
 
 // resetsAt units are not spelled out in the schema; epoch SECONDS is the
 // codex-rs convention. Anything that already looks like milliseconds (>=1e12)
@@ -334,14 +361,44 @@ fn epoch_to_ms(value: f64) -> u64 {
     }
 }
 
-fn normalize_codex_window(window: Option<&Value>) -> Option<Value> {
-    let obj = window?.as_object()?;
-    let used_percent = obj.get("usedPercent").and_then(Value::as_f64)?;
-    let resets_at = obj.get("resetsAt").and_then(Value::as_f64).map(epoch_to_ms);
-    Some(json!({
-        "utilization": used_percent / 100.0,
-        "resetsAt": resets_at,
-    }))
+fn codex_number(obj: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<f64> {
+    keys.iter()
+        .find_map(|key| obj.get(*key).and_then(Value::as_f64))
+}
+
+fn codex_window_duration(obj: &serde_json::Map<String, Value>) -> Option<u64> {
+    codex_number(obj, &["windowDurationMins", "window_minutes"])
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .map(|value| value as u64)
+}
+
+// Outer None means malformed/unusable. Inner None means a valid window with
+// an explicit duration BAT does not label as 5h or 7d.
+fn normalize_codex_window(
+    window: &Value,
+    positional_fallback: CodexWindowKind,
+) -> Option<(Option<CodexWindowKind>, Value)> {
+    let obj = window.as_object()?;
+    let used_percent = codex_number(obj, &["usedPercent", "used_percent"]);
+    let resets_at = codex_number(obj, &["resetsAt", "resets_at"]).map(epoch_to_ms);
+    if used_percent.is_none() && resets_at.is_none() {
+        return None;
+    }
+    let duration = codex_window_duration(obj);
+    let kind = match duration {
+        Some(CODEX_FIVE_HOUR_MINUTES) => Some(CodexWindowKind::FiveHour),
+        Some(CODEX_SEVEN_DAY_MINUTES) => Some(CodexWindowKind::SevenDay),
+        Some(_) => None,
+        None => Some(positional_fallback),
+    };
+    Some((
+        kind,
+        json!({
+            "utilization": used_percent.map(|value| value / 100.0),
+            "resetsAt": resets_at,
+            "windowDurationMins": duration,
+        }),
+    ))
 }
 
 /// Pure; unit-tested. Accepts either the read response or the updated
@@ -349,29 +406,99 @@ fn normalize_codex_window(window: Option<&Value>) -> Option<Value> {
 pub fn normalize_codex_rate_limits(raw: &Value) -> Option<Value> {
     let snapshot = raw.get("rateLimits").unwrap_or(raw);
     let obj = snapshot.as_object()?;
-    let five_hour = normalize_codex_window(obj.get("primary"));
-    let seven_day = normalize_codex_window(obj.get("secondary"));
-    if five_hour.is_none() && seven_day.is_none() {
+    if !obj.contains_key("primary") && !obj.contains_key("secondary") {
+        return None;
+    }
+    let mut five_hour = None;
+    let mut seven_day = None;
+    let mut saw_valid_slot = false;
+    for (key, fallback) in [
+        ("primary", CodexWindowKind::FiveHour),
+        ("secondary", CodexWindowKind::SevenDay),
+    ] {
+        let Some(window) = obj.get(key) else {
+            continue;
+        };
+        if window.is_null() {
+            saw_valid_slot = true;
+            continue;
+        }
+        let Some((kind, normalized)) = normalize_codex_window(window, fallback) else {
+            continue;
+        };
+        saw_valid_slot = true;
+        match kind {
+            Some(CodexWindowKind::FiveHour) => five_hour = Some(normalized),
+            Some(CodexWindowKind::SevenDay) => seven_day = Some(normalized),
+            None => {}
+        }
+    }
+    if !saw_valid_slot {
         return None;
     }
     Some(json!({
         "provider": "codex",
         "fiveHour": five_hour,
         "sevenDay": seven_day,
-        "planType": obj.get("planType").and_then(Value::as_str),
+        "planType": obj
+            .get("planType")
+            .or_else(|| obj.get("plan_type"))
+            .and_then(Value::as_str),
     }))
+}
+
+// `account/rateLimits/updated` is a sparse rolling update. Non-null windows
+// replace the matching duration from the last authoritative read; absent or
+// null windows keep their prior value. A later full read still replaces the
+// whole provider snapshot and clears windows that no longer apply.
+fn merge_codex_usage_snapshot(previous: Option<&Value>, update: &Value) -> Value {
+    let Some(previous) = previous.and_then(Value::as_object) else {
+        return update.clone();
+    };
+    let Some(update) = update.as_object() else {
+        return Value::Object(previous.clone());
+    };
+    let mut merged = previous.clone();
+    for key in ["fiveHour", "sevenDay"] {
+        if let Some(value) = update.get(key).filter(|value| !value.is_null()) {
+            merged.insert(key.to_string(), value.clone());
+        }
+    }
+    for key in ["provider", "fetchedAt"] {
+        if let Some(value) = update.get(key) {
+            merged.insert(key.to_string(), value.clone());
+        }
+    }
+    if let Some(plan_type) = update.get("planType").filter(|value| !value.is_null()) {
+        merged.insert("planType".to_string(), plan_type.clone());
+    }
+    Value::Object(merged)
+}
+
+fn timestamped_codex_snapshot(raw: &Value) -> Option<Value> {
+    let mut snapshot = normalize_codex_rate_limits(raw)?;
+    if let Some(obj) = snapshot.as_object_mut() {
+        obj.insert("fetchedAt".into(), json!(now_ms()));
+    }
+    Some(snapshot)
 }
 
 /// Publish a codex rate-limit snapshot (from poll or push notification) as an
 /// agent:usage event. Quietly drops unusable payloads.
 pub fn publish_codex_usage(app: &AppHandle, raw: &Value) {
-    let Some(mut snapshot) = normalize_codex_rate_limits(raw) else {
+    let Some(snapshot) = timestamped_codex_snapshot(raw) else {
         return;
     };
-    if let Some(obj) = snapshot.as_object_mut() {
-        obj.insert("fetchedAt".into(), json!(now_ms()));
-    }
     store_and_publish(app, "codex", snapshot);
+}
+
+/// Merge a sparse `account/rateLimits/updated` notification without reviving
+/// positional assumptions or clearing windows omitted by the notification.
+pub fn publish_codex_usage_update(app: &AppHandle, raw: &Value) {
+    let Some(update) = timestamped_codex_snapshot(raw) else {
+        return;
+    };
+    merge_and_publish_codex_update(app, update);
 }
 
 // Poll codex through the EXISTING shared app-server connection (one process,
@@ -487,6 +614,90 @@ mod tests {
         );
         assert_eq!(out["sevenDay"]["utilization"].as_f64(), Some(0.08));
         assert_eq!(out["planType"].as_str(), Some("plus"));
+    }
+
+    #[test]
+    fn classifies_codex_weekly_only_primary_by_duration() {
+        // Current Pro responses can move the weekly bucket into `primary`
+        // when no 5h bucket applies. This is the shape that exposed the BAT
+        // positional-mapping bug in production.
+        let out = normalize_codex_rate_limits(&json!({
+            "rateLimits": {
+                "limitId": "codex",
+                "primary": {
+                    "usedPercent": 10.0,
+                    "windowDurationMins": 10_080,
+                    "resetsAt": 1_784_784_810
+                },
+                "secondary": null,
+                "planType": "pro"
+            }
+        }))
+        .expect("weekly-only snapshot");
+        assert!(out["fiveHour"].is_null());
+        assert_eq!(out["sevenDay"]["utilization"].as_f64(), Some(0.1));
+        assert_eq!(out["sevenDay"]["windowDurationMins"].as_u64(), Some(10_080));
+    }
+
+    #[test]
+    fn classifies_codex_windows_independently_of_slot_and_case() {
+        let out = normalize_codex_rate_limits(&json!({
+            "primary": {
+                "used_percent": 17.0,
+                "window_minutes": 10_080,
+                "resets_at": 1_784_784_810
+            },
+            "secondary": {
+                "used_percent": 8.0,
+                "window_minutes": 300,
+                "resets_at": 1_784_400_000
+            },
+            "plan_type": "pro"
+        }))
+        .expect("reordered snapshot");
+        assert_eq!(out["fiveHour"]["utilization"].as_f64(), Some(0.08));
+        assert_eq!(out["sevenDay"]["utilization"].as_f64(), Some(0.17));
+        assert_eq!(out["planType"].as_str(), Some("pro"));
+    }
+
+    #[test]
+    fn explicit_unknown_codex_window_clears_named_windows() {
+        let out = normalize_codex_rate_limits(&json!({
+            "rateLimits": {
+                "primary": {
+                    "usedPercent": 25.0,
+                    "windowDurationMins": 15,
+                    "resetsAt": 1_784_400_000
+                },
+                "secondary": null
+            }
+        }))
+        .expect("valid unsupported duration");
+        assert!(out["fiveHour"].is_null());
+        assert!(out["sevenDay"].is_null());
+    }
+
+    #[test]
+    fn sparse_codex_updates_preserve_unmentioned_windows() {
+        let previous = json!({
+            "provider": "codex",
+            "fiveHour": { "utilization": 0.2, "resetsAt": 1000 },
+            "sevenDay": { "utilization": 0.3, "resetsAt": 2000 },
+            "planType": "plus",
+            "fetchedAt": 1
+        });
+        let update = json!({
+            "provider": "codex",
+            "fiveHour": null,
+            "sevenDay": { "utilization": 0.4, "resetsAt": 3000 },
+            "planType": null,
+            "fetchedAt": 2
+        });
+        let merged = merge_codex_usage_snapshot(Some(&previous), &update);
+        assert_eq!(merged["fiveHour"]["utilization"].as_f64(), Some(0.2));
+        assert_eq!(merged["sevenDay"]["utilization"].as_f64(), Some(0.4));
+        assert_eq!(merged["planType"].as_str(), Some("plus"));
+        assert_eq!(merged["fetchedAt"].as_u64(), Some(2));
     }
 
     #[test]

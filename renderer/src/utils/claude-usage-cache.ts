@@ -30,6 +30,34 @@ export interface HostUsageSnapshot {
   fetchedAt: number
 }
 
+export interface HostRateLimitStateWindow {
+  resetsAt: number
+  utilization: number | null
+  isUsingOverage: boolean
+}
+
+export type HostRateLimitState = Record<string, HostRateLimitStateWindow>
+
+// Host snapshots are authoritative for which named windows currently exist.
+// Build a fresh state object so a weekly-only Codex response cannot leave an
+// older 5h/7d value visible. Per-turn overage/reset details remain compatible
+// when the same window is still present.
+export function rateLimitsFromHostUsage(
+  snapshot: HostUsageSnapshot,
+  previous: HostRateLimitState,
+): HostRateLimitState {
+  const next: HostRateLimitState = {}
+  for (const [key, window] of [['five_hour', snapshot.fiveHour], ['seven_day', snapshot.sevenDay]] as const) {
+    if (!window) continue
+    next[key] = {
+      resetsAt: window.resetsAt ?? previous[key]?.resetsAt ?? Date.now(),
+      utilization: window.utilization,
+      isUsingOverage: previous[key]?.isUsingOverage ?? false,
+    }
+  }
+  return next
+}
+
 const lastSnapshots: Partial<Record<UsageProvider, HostUsageSnapshot>> = {}
 const listeners = new Set<() => void>()
 let started = false
@@ -58,7 +86,11 @@ function ingest(payload: unknown): boolean {
   const provider: UsageProvider = p.provider === 'codex' ? 'codex' : 'claude'
   const fiveHour = normalizeWindow(p.fiveHour)
   const sevenDay = normalizeWindow(p.sevenDay)
-  if (!fiveHour && !sevenDay) return false
+  const hasExplicitWindows = Object.prototype.hasOwnProperty.call(p, 'fiveHour')
+    || Object.prototype.hasOwnProperty.call(p, 'sevenDay')
+  // A full Codex read can validly contain only unsupported/absent windows.
+  // Accept its explicit nulls so stale 5h/7d values are cleared.
+  if (!fiveHour && !sevenDay && !(provider === 'codex' && hasExplicitWindows)) return false
   lastSnapshots[provider] = {
     provider,
     fiveHour,

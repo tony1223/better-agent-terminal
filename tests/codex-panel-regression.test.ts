@@ -1,5 +1,6 @@
 import * as assert from 'assert'
 import { readFile } from 'fs/promises'
+import { rateLimitsFromHostUsage, type HostUsageSnapshot } from '../renderer/src/utils/claude-usage-cache'
 import { normalizeReasoningSummary } from '../renderer/src/utils/reasoning-summary'
 
 async function main() {
@@ -47,6 +48,33 @@ async function main() {
     false,
     'Codex account changes must not trigger a second destructive renderer reset',
   )
+  const weeklyOnlySnapshot: HostUsageSnapshot = {
+    provider: 'codex',
+    fiveHour: null,
+    sevenDay: { utilization: 0.1, resetsAt: 3_000 },
+    extraUsage: null,
+    planType: 'pro',
+    accountEmail: null,
+    fetchedAt: 2,
+  }
+  const mappedRateLimits = rateLimitsFromHostUsage(weeklyOnlySnapshot, {
+    five_hour: { utilization: 0.25, resetsAt: 1_000, isUsingOverage: false },
+    seven_day: { utilization: 0.3, resetsAt: 2_000, isUsingOverage: true },
+  })
+  assert.deepEqual(
+    Object.keys(mappedRateLimits),
+    ['seven_day'],
+    'An authoritative weekly-only snapshot must clear a stale 5h window',
+  )
+  assert.equal(mappedRateLimits.seven_day.utilization, 0.1)
+  assert.equal(mappedRateLimits.seven_day.isUsingOverage, true)
+  for (const [name, panelSource] of [['Codex', source], ['Claude', claudeSource]] as const) {
+    assert.equal(
+      panelSource.includes('setRateLimits(prev => rateLimitsFromHostUsage(snap, prev))'),
+      true,
+      `${name} panels must replace stale window membership from host snapshots`,
+    )
+  }
   assert.match(
     source,
     /const resumeResult = await host\.claude\.resumeSession\([\s\S]*effectiveModel \|\| savedModel[\s\S]*permissionMode,\s*effectiveEffort[\s\S]*\) as \{ stale\?: boolean \} \| null/,
