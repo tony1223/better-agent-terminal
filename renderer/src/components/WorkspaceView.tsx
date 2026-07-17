@@ -20,6 +20,7 @@ import {
   type RemoteAuthCapabilities,
 } from '../utils/remote-auth'
 import { touchBoundedLru } from '../utils/bounded-lru'
+import { shouldKeepTerminalPanelMounted } from '../utils/workspace-mounts'
 
 // Lazy load heavy components (xterm.js, Claude SDK, etc.)
 const MainPanel = lazy(() => import('./MainPanel').then(m => ({ default: m.MainPanel })))
@@ -1171,13 +1172,7 @@ export const WorkspaceView = memo(function WorkspaceView({ workspace, terminals,
   const mainTerminalId = mainTerminal?.id
   const [mountedTerminalIds, setMountedTerminalIds] = useState<Set<string>>(new Set())
   const pinnedTerminalKey = terminals
-    .filter(terminal => (
-      terminal.isAgentRunning
-      || terminal.hasPendingAction
-      || !!terminal.procfilePath
-      || terminal.agentPreset === 'claude-channel'
-      || terminal.agentPreset === 'claude-cli-agent'
-    ))
+    .filter(shouldKeepTerminalPanelMounted)
     .map(terminal => terminal.id)
     .sort()
     .join('\0')
