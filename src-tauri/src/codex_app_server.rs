@@ -35,6 +35,8 @@ use crate::host_context::HostContext;
 const DEFAULT_CODEX_MODEL: &str = "gpt-5.6-sol";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const TURN_START_TIMEOUT: Duration = Duration::from_secs(60);
+const PENDING_TURN_INTERRUPT_TIMEOUT: Duration = Duration::from_secs(30);
+const PENDING_TURN_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const MSG_BUFFER_CAP: usize = 300;
 const DEFAULT_CODEX_CONTEXT_WINDOW: u64 = 1_000_000;
 const GPT_5_6_CONTEXT_WINDOW_FALLBACK: u64 = 353_400;
@@ -225,6 +227,9 @@ struct CodexInner {
     last_connection_activity: Mutex<Option<Instant>>,
     idle_reaper_running: AtomicBool,
     sessions: Mutex<HashMap<String, CodexSession>>,
+    // Serialize send/replace/abort operations per session without blocking
+    // independent agents. Notifications intentionally do not take this lock.
+    turn_operation_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     thread_to_session: Mutex<HashMap<String, String>>,
     // Keyed by the synthetic toolUseId surfaced to the renderer
     // (claude:permission-request events).
@@ -278,6 +283,10 @@ struct CodexSession {
     start_time: Instant,
     active_turn_id: Option<String>,
     active_turn_key: Option<String>,
+    // turn/start can return an id several seconds before turn/started arrives.
+    // Keep that protocol gap explicit so replacement waits instead of treating
+    // "no active turn" as proof that the returned turn is stale.
+    active_turn_started: bool,
     assistant_text: String,
     thinking_text: String,
     input_tokens: u64,
@@ -306,6 +315,21 @@ struct CodexSession {
     abort_requested: bool,
     ignored_turn_ids: Vec<String>,
     warned_stale_turn_ids: Vec<String>,
+    stale_turn_event_counts: HashMap<String, u64>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum LocalTurnState {
+    PendingStart,
+    Started,
+    Finished,
+    Different(String),
+}
+
+#[derive(Debug)]
+struct TurnInterruptResolution {
+    ignored_turn_ids: Vec<String>,
+    interrupted_turn_id: Option<String>,
 }
 
 impl CodexSession {
@@ -366,6 +390,21 @@ fn clear_runtime_status_if_set(session: &mut CodexSession) -> bool {
     had_status
 }
 
+fn apply_turn_start_response(
+    session: &mut CodexSession,
+    local_turn_key: &str,
+    turn_id: &str,
+) -> bool {
+    let response_matches_pending = session.is_running
+        && (session.active_turn_key.as_deref() == Some(local_turn_key)
+            || session.active_turn_id.as_deref() == Some(turn_id));
+    if response_matches_pending {
+        session.active_turn_id = Some(turn_id.to_string());
+        session.active_turn_key = Some(turn_id.to_string());
+    }
+    response_matches_pending
+}
+
 fn remember_ignored_turn(session: &mut CodexSession, turn_id: String) {
     if !session.ignored_turn_ids.iter().any(|id| id == &turn_id) {
         session.ignored_turn_ids.push(turn_id);
@@ -383,7 +422,13 @@ fn remember_warned_stale_turn(session: &mut CodexSession, turn_id: &str) -> bool
     session.warned_stale_turn_ids.push(turn_id.to_string());
     if session.warned_stale_turn_ids.len() > 16 {
         let drop_count = session.warned_stale_turn_ids.len() - 16;
-        session.warned_stale_turn_ids.drain(0..drop_count);
+        let dropped = session
+            .warned_stale_turn_ids
+            .drain(0..drop_count)
+            .collect::<Vec<_>>();
+        for dropped_turn_id in dropped {
+            session.stale_turn_event_counts.remove(&dropped_turn_id);
+        }
     }
     true
 }
@@ -2836,6 +2881,7 @@ impl CodexAppServerState {
                 session.thread_id = None;
                 session.active_turn_id = None;
                 session.active_turn_key = None;
+                session.active_turn_started = false;
                 session.is_running = false;
                 session.is_resting = false;
                 session.abort_requested = false;
@@ -3439,6 +3485,7 @@ impl CodexAppServerState {
                 session.thread_id = None;
                 session.active_turn_id = None;
                 session.active_turn_key = None;
+                session.active_turn_started = false;
                 session.is_running = false;
                 session.is_resting = false;
                 session.abort_requested = false;
@@ -3586,20 +3633,58 @@ impl CodexAppServerState {
         None
     }
 
-    fn take_stale_turn_warning_message(&self, session_id: &str, turn_id: &str) -> Option<Value> {
+    fn update_stale_turn_warning_message(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        method: &str,
+    ) -> Option<Value> {
         let mut sessions = self.inner.sessions.lock().expect("codex sessions lock");
         let session = sessions.get_mut(session_id)?;
-        if !remember_warned_stale_turn(session, turn_id) {
-            return None;
-        }
+        let first_event = remember_warned_stale_turn(session, turn_id);
+        let count = session
+            .stale_turn_event_counts
+            .entry(turn_id.to_string())
+            .and_modify(|count| *count = count.saturating_add(1))
+            .or_insert(1);
+        let count = *count;
+        let message_id = format!("sys-stale-turn-{turn_id}");
+        let existing_timestamp = session
+            .messages
+            .iter()
+            .find(|message| message.get("id").and_then(Value::as_str) == Some(&message_id))
+            .and_then(|message| message.get("timestamp"))
+            .cloned();
+        let event_word = if count == 1 { "event" } else { "events" };
         let mut message = make_system_message(
             session_id,
-            "An older Codex turn produced late output after it was no longer active. BAT ignored that stale output to keep the conversation consistent."
-                .to_string(),
+            format!(
+                "BAT ignored {count} late {event_word} from an older Codex turn. The older turn may still be finishing or flushing buffered output."
+            ),
         );
+        message["id"] = json!(message_id);
         message["kind"] = json!("stale-turn-warning");
-        push_session_item(session, message.clone());
-        Some(message)
+        message["staleTurnId"] = json!(turn_id);
+        message["staleEventCount"] = json!(count);
+        message["lastStaleEvent"] = json!(method);
+        if let Some(timestamp) = existing_timestamp {
+            message["timestamp"] = timestamp;
+        }
+        if let Some(existing) = session
+            .messages
+            .iter_mut()
+            .find(|item| item.get("id").and_then(Value::as_str) == Some(&message_id))
+        {
+            *existing = message.clone();
+        } else {
+            push_session_item(session, message.clone());
+        }
+
+        // Streaming deltas can arrive hundreds of times per second. Update the
+        // visible aggregate at exponential milestones and always on terminal
+        // events, while retaining the exact count in session history.
+        let terminal_event = matches!(method, "turn/completed" | "error");
+        (first_event || count.is_power_of_two() || terminal_event).then_some(message)
     }
 
     fn take_thread_ownership(
@@ -3655,6 +3740,7 @@ impl CodexAppServerState {
                 session.abort_requested = false;
                 session.active_turn_id = None;
                 session.active_turn_key = None;
+                session.active_turn_started = false;
                 let had_runtime_status = clear_runtime_status_if_set(session);
 
                 if was_active || had_runtime_status {
@@ -3686,6 +3772,82 @@ impl CodexAppServerState {
         remote_turns_to_interrupt
     }
 
+    fn turn_operation_lock(&self, session_id: &str) -> Arc<Mutex<()>> {
+        let mut locks = self
+            .inner
+            .turn_operation_locks
+            .lock()
+            .expect("codex turn operation locks");
+        locks
+            .entry(session_id.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
+    fn local_turn_state(&self, session_id: &str, turn_id: &str) -> LocalTurnState {
+        let sessions = self.inner.sessions.lock().expect("codex sessions lock");
+        let Some(session) = sessions.get(session_id) else {
+            return LocalTurnState::Finished;
+        };
+        if !session.is_running {
+            return LocalTurnState::Finished;
+        }
+        match session.active_turn_id.as_deref() {
+            Some(active_turn_id) if active_turn_id == turn_id => {
+                if session.active_turn_started {
+                    LocalTurnState::Started
+                } else {
+                    LocalTurnState::PendingStart
+                }
+            }
+            Some(active_turn_id) => LocalTurnState::Different(active_turn_id.to_string()),
+            None => LocalTurnState::PendingStart,
+        }
+    }
+
+    fn wait_for_pending_turn_start(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+    ) -> Result<LocalTurnState, String> {
+        let started = Instant::now();
+        loop {
+            let state = self.local_turn_state(session_id, turn_id);
+            if state != LocalTurnState::PendingStart {
+                return Ok(state);
+            }
+            if started.elapsed() >= PENDING_TURN_INTERRUPT_TIMEOUT {
+                return Err(format!(
+                    "timed out waiting for Codex turn {turn_id} to become interruptible"
+                ));
+            }
+            std::thread::sleep(PENDING_TURN_POLL_INTERVAL);
+        }
+    }
+
+    fn wait_for_active_turn_id(&self, session_id: &str) -> Result<Option<String>, String> {
+        let started = Instant::now();
+        loop {
+            let state = {
+                let sessions = self.inner.sessions.lock().expect("codex sessions lock");
+                let Some(session) = sessions.get(session_id) else {
+                    return Ok(None);
+                };
+                if let Some(turn_id) = session.active_turn_id.clone() {
+                    return Ok(Some(turn_id));
+                }
+                session.is_running
+            };
+            if !state {
+                return Ok(None);
+            }
+            if started.elapsed() >= PENDING_TURN_INTERRUPT_TIMEOUT {
+                return Err("timed out waiting for Codex to return an active turn id".to_string());
+            }
+            std::thread::sleep(PENDING_TURN_POLL_INTERVAL);
+        }
+    }
+
     fn interrupt_turn_for_replacement(
         &self,
         app: &HostContext,
@@ -3693,10 +3855,11 @@ impl CodexAppServerState {
         session_id: &str,
         thread_id: &str,
         turn_id: &str,
-    ) -> Result<Vec<String>, String> {
+    ) -> Result<TurnInterruptResolution, String> {
         let mut turns_to_ignore = vec![turn_id.to_string()];
         let mut turn_to_interrupt = turn_id.to_string();
         let mut retried_found_turn = false;
+        let mut retried_started_turn = 0_u8;
 
         loop {
             match connection.request_logged(
@@ -3712,7 +3875,10 @@ impl CodexAppServerState {
                         session_id,
                         format!("replacement turn/interrupt ok turn={turn_to_interrupt}"),
                     );
-                    break;
+                    return Ok(TurnInterruptResolution {
+                        ignored_turn_ids: turns_to_ignore,
+                        interrupted_turn_id: Some(turn_to_interrupt),
+                    });
                 }
                 Err(err) => {
                     if !retried_found_turn {
@@ -3733,21 +3899,69 @@ impl CodexAppServerState {
                         }
                     }
                     if is_no_active_turn_interrupt_error(&err) {
-                        log_codex(
-                            app,
-                            session_id,
-                            format!(
-                                "replacement turn/interrupt found no active remote turn; continuing after clearing stale local turn={turn_to_interrupt}"
-                            ),
-                        );
-                        break;
+                        match self.local_turn_state(session_id, &turn_to_interrupt) {
+                            LocalTurnState::PendingStart => {
+                                log_codex(
+                                    app,
+                                    session_id,
+                                    format!(
+                                        "turn/interrupt found pending turn; waiting for turn/started turn={turn_to_interrupt}"
+                                    ),
+                                );
+                                match self
+                                    .wait_for_pending_turn_start(session_id, &turn_to_interrupt)?
+                                {
+                                    LocalTurnState::Started => continue,
+                                    LocalTurnState::Finished => {
+                                        return Ok(TurnInterruptResolution {
+                                            ignored_turn_ids: turns_to_ignore,
+                                            interrupted_turn_id: None,
+                                        });
+                                    }
+                                    LocalTurnState::Different(active_turn_id) => {
+                                        return Err(format!(
+                                            "Codex active turn changed from {turn_to_interrupt} to {active_turn_id} while waiting to interrupt"
+                                        ));
+                                    }
+                                    LocalTurnState::PendingStart => {
+                                        unreachable!("pending turn wait must resolve or time out")
+                                    }
+                                }
+                            }
+                            LocalTurnState::Started if retried_started_turn < 3 => {
+                                retried_started_turn += 1;
+                                std::thread::sleep(Duration::from_millis(50));
+                                continue;
+                            }
+                            LocalTurnState::Started => {
+                                return Err(format!(
+                                    "Codex reported no active turn after turn/started for {turn_to_interrupt}"
+                                ));
+                            }
+                            LocalTurnState::Finished => {
+                                log_codex(
+                                    app,
+                                    session_id,
+                                    format!(
+                                        "turn/interrupt found no active remote turn after local completion turn={turn_to_interrupt}"
+                                    ),
+                                );
+                                return Ok(TurnInterruptResolution {
+                                    ignored_turn_ids: turns_to_ignore,
+                                    interrupted_turn_id: None,
+                                });
+                            }
+                            LocalTurnState::Different(active_turn_id) => {
+                                return Err(format!(
+                                    "Codex active turn changed from {turn_to_interrupt} to {active_turn_id} before interrupt"
+                                ));
+                            }
+                        }
                     }
                     return Err(err);
                 }
             }
         }
-
-        Ok(turns_to_ignore)
     }
 
     fn remove_thread_owner_if_session(&self, thread_id: &str, session_id: &str) {
@@ -4039,6 +4253,7 @@ impl CodexAppServerState {
             start_time: Instant::now(),
             active_turn_id: None,
             active_turn_key: None,
+            active_turn_started: false,
             assistant_text: String::new(),
             thinking_text: String::new(),
             input_tokens: 0,
@@ -4063,6 +4278,7 @@ impl CodexAppServerState {
             abort_requested: false,
             ignored_turn_ids: Vec::new(),
             warned_stale_turn_ids: Vec::new(),
+            stale_turn_event_counts: HashMap::new(),
         };
         self.inner
             .sessions
@@ -4215,6 +4431,7 @@ impl CodexAppServerState {
             start_time: Instant::now(),
             active_turn_id: None,
             active_turn_key: None,
+            active_turn_started: false,
             assistant_text: String::new(),
             thinking_text: String::new(),
             input_tokens: 0,
@@ -4239,6 +4456,7 @@ impl CodexAppServerState {
             abort_requested: false,
             ignored_turn_ids: Vec::new(),
             warned_stale_turn_ids: Vec::new(),
+            stale_turn_event_counts: HashMap::new(),
         };
         self.inner
             .sessions
@@ -4255,7 +4473,9 @@ impl CodexAppServerState {
                 &sdk_session_id,
                 &turn_id,
             ) {
-                Ok(turns_to_ignore) => takeover_turns_to_remember.extend(turns_to_ignore),
+                Ok(resolution) => {
+                    takeover_turns_to_remember.extend(resolution.ignored_turn_ids)
+                }
                 Err(err) => log_codex(
                     app,
                     &session_id,
@@ -4350,6 +4570,10 @@ impl CodexAppServerState {
             log_codex(app, &session_id, "send_message rejected: empty prompt");
             return Ok(json!({ "ok": false, "error": "empty prompt" }));
         }
+        let turn_operation_lock = self.turn_operation_lock(&session_id);
+        let _turn_operation_guard = turn_operation_lock
+            .lock()
+            .map_err(|_| bridge_error("Codex turn operation lock poisoned"))?;
         let (input, mut temp_image_paths) = match build_turn_input(&prompt, images) {
             Ok(input) => input,
             Err(err) => {
@@ -4448,7 +4672,7 @@ impl CodexAppServerState {
                 &thread_id,
                 &turn_id,
             ) {
-                Ok(turns_to_ignore) => turns_to_remember.extend(turns_to_ignore),
+                Ok(resolution) => turns_to_remember.extend(resolution.ignored_turn_ids),
                 Err(err) => {
                     cleanup_temp_images(temp_image_paths);
                     log_codex(
@@ -4471,7 +4695,7 @@ impl CodexAppServerState {
                 &interrupt_thread_id,
                 &interrupt_turn_id,
             ) {
-                Ok(turns_to_ignore) => turns_to_remember.extend(turns_to_ignore),
+                Ok(resolution) => turns_to_remember.extend(resolution.ignored_turn_ids),
                 Err(err) => {
                     cleanup_temp_images(temp_image_paths);
                     log_codex(
@@ -4494,7 +4718,7 @@ impl CodexAppServerState {
                 }
             }
         }
-        {
+        let local_turn_key = {
             let mut sessions = self.inner.sessions.lock().expect("codex sessions lock");
             let Some(session) = sessions.get_mut(&session_id) else {
                 cleanup_temp_images(temp_image_paths);
@@ -4511,11 +4735,10 @@ impl CodexAppServerState {
             session.is_running = true;
             session.is_resting = false;
             session.active_turn_id = None;
+            session.active_turn_started = false;
             session.num_turns += 1;
-            session.active_turn_key = Some(format!(
-                "local-{}-{}",
-                session.session_id, session.num_turns
-            ));
+            let local_turn_key = format!("local-{}-{}", session.session_id, session.num_turns);
+            session.active_turn_key = Some(local_turn_key.clone());
             session.last_turn_started_at = Some(Instant::now());
             session.last_turn_first_token_ms = None;
             session.last_turn_duration_ms = None;
@@ -4538,7 +4761,8 @@ impl CodexAppServerState {
                 "meta",
                 session.metadata(),
             );
-        }
+            local_turn_key
+        };
         log_codex(
             app,
             &session_id,
@@ -4661,21 +4885,32 @@ impl CodexAppServerState {
             .and_then(|v| v.get("id"))
             .and_then(Value::as_str)
         {
-            if let Some(session) = self
+            let applied = if let Some(session) = self
                 .inner
                 .sessions
                 .lock()
                 .expect("codex sessions lock")
                 .get_mut(&session_id)
             {
-                session.active_turn_id = Some(turn_id.to_string());
-                session.active_turn_key = Some(turn_id.to_string());
+                apply_turn_start_response(session, &local_turn_key, turn_id)
+            } else {
+                false
+            };
+            if applied {
+                log_codex(
+                    app,
+                    &session_id,
+                    format!("turn/start ok activeTurn={turn_id}"),
+                );
+            } else {
+                log_codex(
+                    app,
+                    &session_id,
+                    format!(
+                        "turn/start response ignored after local turn state advanced turn={turn_id} localKey={local_turn_key}"
+                    ),
+                );
             }
-            log_codex(
-                app,
-                &session_id,
-                format!("turn/start ok activeTurn={turn_id}"),
-            );
         } else {
             log_codex(
                 app,
@@ -4704,6 +4939,7 @@ impl CodexAppServerState {
                 session.is_running = false;
                 session.active_turn_id = None;
                 session.active_turn_key = None;
+                session.active_turn_started = false;
                 clear_runtime_status(session);
                 if let Some(started_at) = session.last_turn_started_at {
                     session.last_turn_duration_ms = Some(started_at.elapsed().as_millis() as u64);
@@ -4734,12 +4970,16 @@ impl CodexAppServerState {
         session_id: String,
     ) -> Result<Value, BridgeError> {
         log_codex(app, &session_id, "abort_session requested");
+        let turn_operation_lock = self.turn_operation_lock(&session_id);
+        let _turn_operation_guard = turn_operation_lock
+            .lock()
+            .map_err(|_| bridge_error("Codex turn operation lock poisoned"))?;
         // Answer any approval prompt with "cancel" first so a pending approval
         // cannot keep the turn (and the interrupt below) blocked.
         self.cancel_pending_approvals(app, &session_id);
-        let (thread_id, interrupt_turn_id, turn_end_id) = {
-            let mut sessions = self.inner.sessions.lock().expect("codex sessions lock");
-            let Some(session) = sessions.get_mut(&session_id) else {
+        let (thread_id, mut interrupt_turn_id, is_running) = {
+            let sessions = self.inner.sessions.lock().expect("codex sessions lock");
+            let Some(session) = sessions.get(&session_id) else {
                 log_codex(app, &session_id, "abort_session ignored: session not found");
                 return Ok(json!({ "ok": true }));
             };
@@ -4753,61 +4993,116 @@ impl CodexAppServerState {
                     session.thread_id.as_deref().unwrap_or("none")
                 ),
             );
-            let thread_id = session.thread_id.clone();
-            let interrupt_turn_id = session.active_turn_id.clone();
-            let turn_end_id = session
-                .active_turn_id
-                .clone()
-                .or_else(|| session.active_turn_key.clone());
-            if let Some(turn_id) = interrupt_turn_id.clone() {
-                remember_ignored_turn(session, turn_id);
-            }
-            session.abort_requested = true;
-            session.is_running = false;
-            session.active_turn_id = None;
-            session.active_turn_key = None;
-            cleanup_session_temp_images(session);
-            session.command_outputs.clear();
-            session.command_output_last_emit.clear();
-            (thread_id, interrupt_turn_id, turn_end_id)
+            (
+                session.thread_id.clone(),
+                session.active_turn_id.clone(),
+                session.is_running,
+            )
         };
-        if let (Some(thread_id), Some(turn_id)) = (thread_id.clone(), interrupt_turn_id.clone()) {
-            let connection = self.ensure_connection(app).map_err(bridge_error)?;
-            match connection.request_logged(
-                app,
-                &session_id,
-                "turn/interrupt",
-                json!({ "threadId": thread_id, "turnId": turn_id }),
-                REQUEST_TIMEOUT,
-            ) {
-                Ok(_) => log_codex(app, &session_id, "turn/interrupt ok"),
-                Err(err) => log_codex(app, &session_id, format!("turn/interrupt failed: {err}")),
-            }
-        } else {
+
+        if !is_running && interrupt_turn_id.is_none() {
+            log_codex(app, &session_id, "abort_session ignored: no running turn");
+            return Ok(json!({ "ok": true, "alreadyStopped": true }));
+        }
+        if interrupt_turn_id.is_none() {
+            interrupt_turn_id = match self.wait_for_active_turn_id(&session_id) {
+                Ok(turn_id) => turn_id,
+                Err(err) => {
+                    log_codex(
+                        app,
+                        &session_id,
+                        format!("abort_session could not resolve pending turn: {err}"),
+                    );
+                    return Ok(json!({ "ok": false, "error": err }));
+                }
+            };
+        }
+        let (Some(thread_id), Some(turn_id)) = (thread_id, interrupt_turn_id) else {
             log_codex(
                 app,
                 &session_id,
-                "abort_session has no active turn to interrupt",
+                "abort_session completed while waiting for an active turn id",
             );
-        }
+            return Ok(json!({ "ok": true, "alreadyFinished": true }));
+        };
+        let connection = self.ensure_connection(app).map_err(bridge_error)?;
+        let resolution = match self.interrupt_turn_for_replacement(
+            app,
+            &connection,
+            &session_id,
+            &thread_id,
+            &turn_id,
+        ) {
+            Ok(resolution) => resolution,
+            Err(err) => {
+                log_codex(
+                    app,
+                    &session_id,
+                    format!(
+                        "abort_session turn/interrupt failed without clearing local state: {err}"
+                    ),
+                );
+                return Ok(json!({ "ok": false, "error": err }));
+            }
+        };
+        let Some(interrupted_turn_id) = resolution.interrupted_turn_id else {
+            log_codex(
+                app,
+                &session_id,
+                "abort_session observed that the turn had already finished",
+            );
+            return Ok(json!({ "ok": true, "alreadyFinished": true }));
+        };
+        let meta = {
+            let mut sessions = self.inner.sessions.lock().expect("codex sessions lock");
+            let Some(session) = sessions.get_mut(&session_id) else {
+                return Ok(json!({ "ok": true, "alreadyFinished": true }));
+            };
+            if !session.is_running
+                || !resolution
+                    .ignored_turn_ids
+                    .iter()
+                    .any(|turn_id| session.active_turn_id.as_deref() == Some(turn_id.as_str()))
+            {
+                return Ok(json!({ "ok": true, "alreadyFinished": true }));
+            }
+            for ignored_turn_id in resolution.ignored_turn_ids {
+                remember_ignored_turn(session, ignored_turn_id);
+            }
+            session.abort_requested = false;
+            session.is_running = false;
+            session.active_turn_id = None;
+            session.active_turn_key = None;
+            session.active_turn_started = false;
+            clear_runtime_status(session);
+            cleanup_session_temp_images(session);
+            session.command_outputs.clear();
+            session.command_output_last_emit.clear();
+            session.metadata()
+        };
+        emit(app, "claude:status", &session_id, "meta", meta);
         emit(
             app,
             "claude:turn-end",
             &session_id,
             "payload",
-            json!({ "reason": "aborted", "turnId": turn_end_id }),
+            json!({ "reason": "aborted", "turnId": interrupted_turn_id, "sdkSessionId": thread_id }),
         );
         Ok(json!({ "ok": true }))
     }
 
     pub fn stop_session(&self, session_id: String) -> Value {
+        let turn_operation_lock = self.turn_operation_lock(&session_id);
+        let turn_operation_guard = turn_operation_lock
+            .lock()
+            .expect("codex turn operation lock");
         let removed = self
             .inner
             .sessions
             .lock()
             .expect("codex sessions lock")
             .remove(&session_id);
-        if let Some(mut session) = removed {
+        let result = if let Some(mut session) = removed {
             cleanup_session_temp_images(&mut session);
             if let Some(thread_id) = session.thread_id {
                 self.remove_thread_owner_if_session(&thread_id, &session_id);
@@ -4815,7 +5110,14 @@ impl CodexAppServerState {
             json!({ "ok": true, "existed": true })
         } else {
             json!({ "ok": true, "existed": false })
-        }
+        };
+        drop(turn_operation_guard);
+        self.inner
+            .turn_operation_locks
+            .lock()
+            .expect("codex turn operation locks")
+            .remove(&session_id);
+        result
     }
 
     pub fn reset_session(
@@ -4823,6 +5125,10 @@ impl CodexAppServerState {
         app: &HostContext,
         session_id: String,
     ) -> Result<Value, BridgeError> {
+        let turn_operation_lock = self.turn_operation_lock(&session_id);
+        let _turn_operation_guard = turn_operation_lock
+            .lock()
+            .map_err(|_| bridge_error("Codex turn operation lock poisoned"))?;
         let (model, cwd, approval_policy, sandbox_mode, thread_id) = {
             let sessions = self.inner.sessions.lock().expect("codex sessions lock");
             let session = sessions
@@ -4864,6 +5170,7 @@ impl CodexAppServerState {
             session.thread_id = Some(new_thread_id.clone());
             session.active_turn_id = None;
             session.active_turn_key = None;
+            session.active_turn_started = false;
             session.assistant_text.clear();
             session.thinking_text.clear();
             session.input_tokens = 0;
@@ -4878,6 +5185,7 @@ impl CodexAppServerState {
             session.last_turn_duration_ms = None;
             session.messages.clear();
             session.warned_stale_turn_ids.clear();
+            session.stale_turn_event_counts.clear();
             cleanup_session_temp_images(session);
             session.command_outputs.clear();
             session.command_output_last_emit.clear();
@@ -4910,6 +5218,7 @@ impl CodexAppServerState {
         session.is_running = false;
         session.active_turn_id = None;
         session.active_turn_key = None;
+        session.active_turn_started = false;
         session.abort_requested = false;
         let msg = make_system_message(
             session_id,
@@ -5146,7 +5455,7 @@ impl CodexAppServerState {
         if let Some((turn_id, active_turn_id)) =
             self.stale_turn_notification(&session_id, method, &params)
         {
-            warn_stale_turn_once(
+            update_stale_turn_warning(
                 app,
                 self,
                 &session_id,
@@ -5510,7 +5819,7 @@ fn handle_notification(
     if let Some((turn_id, active_turn_id)) =
         state.stale_turn_notification(&session_id, method, &params)
     {
-        let warning_emitted = warn_stale_turn_once(
+        let warning_emitted = update_stale_turn_warning(
             app,
             state,
             &session_id,
@@ -5585,6 +5894,7 @@ fn handle_notification(
                         session.is_running = false;
                         session.active_turn_id = None;
                         session.active_turn_key = None;
+                        session.active_turn_started = false;
                         clear_runtime_status_if_set(session);
                         return session.thread_id.clone().zip(turn_id.clone());
                     }
@@ -5599,6 +5909,7 @@ fn handle_notification(
                     session.active_turn_id = turn_id.clone();
                     if turn_id.is_some() {
                         session.active_turn_key = turn_id.clone();
+                        session.active_turn_started = true;
                     }
                     None
                 })
@@ -5699,7 +6010,7 @@ fn handle_notification(
     }
 }
 
-fn warn_stale_turn_once(
+fn update_stale_turn_warning(
     app: &HostContext,
     state: &CodexAppServerState,
     session_id: &str,
@@ -5707,13 +6018,17 @@ fn warn_stale_turn_once(
     turn_id: &str,
     active_turn_id: Option<&str>,
 ) -> bool {
-    let Some(message) = state.take_stale_turn_warning_message(session_id, turn_id) else {
+    let Some(message) = state.update_stale_turn_warning_message(session_id, turn_id, method) else {
         return false;
     };
+    let count = message
+        .get("staleEventCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(1);
     app_cmd::log_tauri(
         app,
         &format!(
-            "[codex-app-server:{}] WARNING: {method} ignored for stale turn={turn_id} activeTurn={}",
+            "[codex-app-server:{}] WARNING: {method} ignored for stale turn={turn_id} activeTurn={} staleEvents={count}",
             short_session_id(session_id),
             active_turn_id.unwrap_or("none")
         ),
@@ -6287,6 +6602,7 @@ fn handle_turn_completed(
         session.is_running = false;
         session.active_turn_id = None;
         session.active_turn_key = None;
+        session.active_turn_started = false;
         session.abort_requested = false;
         clear_runtime_status(session);
         cleanup_session_temp_images(session);
@@ -6383,6 +6699,7 @@ mod tests {
             start_time: Instant::now(),
             active_turn_id: Some("turn-1".to_string()),
             active_turn_key: Some("turn-1".to_string()),
+            active_turn_started: true,
             assistant_text: String::new(),
             thinking_text: String::new(),
             input_tokens: 0,
@@ -6407,6 +6724,7 @@ mod tests {
             abort_requested: false,
             ignored_turn_ids: Vec::new(),
             warned_stale_turn_ids: Vec::new(),
+            stale_turn_event_counts: HashMap::new(),
         }
     }
 
@@ -6454,7 +6772,73 @@ mod tests {
     }
 
     #[test]
-    fn stale_turn_warning_is_recorded_once_per_turn() {
+    fn turn_start_response_only_applies_to_the_matching_live_local_turn() {
+        let mut session = test_codex_session();
+        session.active_turn_id = None;
+        session.active_turn_key = Some("local-session-1-2".to_string());
+        session.active_turn_started = false;
+        assert!(apply_turn_start_response(
+            &mut session,
+            "local-session-1-2",
+            "turn-2"
+        ));
+        assert_eq!(session.active_turn_id.as_deref(), Some("turn-2"));
+
+        session.is_running = false;
+        session.active_turn_id = None;
+        session.active_turn_key = None;
+        session.active_turn_started = false;
+        assert!(!apply_turn_start_response(
+            &mut session,
+            "local-session-1-2",
+            "turn-2"
+        ));
+        assert_eq!(session.active_turn_id, None);
+    }
+
+    #[test]
+    fn local_turn_state_distinguishes_pending_started_and_finished_turns() {
+        let state = CodexAppServerState::default();
+        let mut session = test_codex_session();
+        session.active_turn_started = false;
+        state
+            .inner
+            .sessions
+            .lock()
+            .expect("codex sessions lock")
+            .insert("session-1".to_string(), session);
+
+        assert_eq!(
+            state.local_turn_state("session-1", "turn-1"),
+            LocalTurnState::PendingStart
+        );
+        {
+            let mut sessions = state.inner.sessions.lock().expect("codex sessions lock");
+            sessions
+                .get_mut("session-1")
+                .expect("session")
+                .active_turn_started = true;
+        }
+        assert_eq!(
+            state.local_turn_state("session-1", "turn-1"),
+            LocalTurnState::Started
+        );
+        assert_eq!(
+            state.local_turn_state("session-1", "another-turn"),
+            LocalTurnState::Different("turn-1".to_string())
+        );
+        {
+            let mut sessions = state.inner.sessions.lock().expect("codex sessions lock");
+            sessions.get_mut("session-1").expect("session").is_running = false;
+        }
+        assert_eq!(
+            state.local_turn_state("session-1", "turn-1"),
+            LocalTurnState::Finished
+        );
+    }
+
+    #[test]
+    fn stale_turn_warning_is_aggregated_per_turn() {
         let state = CodexAppServerState::default();
         state
             .inner
@@ -6464,17 +6848,31 @@ mod tests {
             .insert("session-1".to_string(), test_codex_session());
 
         let warning = state
-            .take_stale_turn_warning_message("session-1", "old-turn")
+            .update_stale_turn_warning_message("session-1", "old-turn", "item/started")
             .expect("first warning");
         assert_eq!(warning["kind"], "stale-turn-warning");
+        assert_eq!(warning["staleEventCount"], 1);
         assert!(state
-            .take_stale_turn_warning_message("session-1", "old-turn")
+            .update_stale_turn_warning_message("session-1", "old-turn", "item/completed")
+            .is_some());
+        assert!(state
+            .update_stale_turn_warning_message("session-1", "old-turn", "item/started")
+            .is_none());
+        let terminal = state
+            .update_stale_turn_warning_message("session-1", "old-turn", "turn/completed")
+            .expect("terminal aggregate update");
+        assert_eq!(terminal["staleEventCount"], 4);
+        assert_eq!(terminal["lastStaleEvent"], "turn/completed");
+        assert!(state
+            .update_stale_turn_warning_message("session-1", "old-turn", "item/started")
             .is_none());
 
         let sessions = state.inner.sessions.lock().expect("codex sessions lock");
         let session = sessions.get("session-1").expect("session");
         assert_eq!(session.warned_stale_turn_ids, vec!["old-turn"]);
+        assert_eq!(session.stale_turn_event_counts.get("old-turn"), Some(&5));
         assert_eq!(session.messages.len(), 1);
+        assert_eq!(session.messages[0]["staleEventCount"], 5);
     }
 
     #[test]
@@ -6977,6 +7375,7 @@ mod tests {
             start_time: Instant::now(),
             active_turn_id: None,
             active_turn_key: None,
+            active_turn_started: false,
             assistant_text: String::new(),
             thinking_text: String::new(),
             input_tokens: 100,
@@ -7001,6 +7400,7 @@ mod tests {
             abort_requested: false,
             ignored_turn_ids: Vec::new(),
             warned_stale_turn_ids: Vec::new(),
+            stale_turn_event_counts: HashMap::new(),
         };
 
         let meta = session.metadata();
@@ -7023,6 +7423,7 @@ mod tests {
             start_time: Instant::now(),
             active_turn_id: None,
             active_turn_key: None,
+            active_turn_started: false,
             assistant_text: String::new(),
             thinking_text: String::new(),
             input_tokens: 0,
@@ -7047,6 +7448,7 @@ mod tests {
             abort_requested: false,
             ignored_turn_ids: Vec::new(),
             warned_stale_turn_ids: Vec::new(),
+            stale_turn_event_counts: HashMap::new(),
         };
 
         assert!(!clear_runtime_status_if_set(&mut session));
@@ -7077,6 +7479,7 @@ mod tests {
             start_time: Instant::now(),
             active_turn_id: None,
             active_turn_key: None,
+            active_turn_started: false,
             assistant_text: String::new(),
             thinking_text: String::new(),
             input_tokens: 0,
@@ -7101,6 +7504,7 @@ mod tests {
             abort_requested: false,
             ignored_turn_ids: Vec::new(),
             warned_stale_turn_ids: Vec::new(),
+            stale_turn_event_counts: HashMap::new(),
         };
         update_session_usage(
             &mut session,

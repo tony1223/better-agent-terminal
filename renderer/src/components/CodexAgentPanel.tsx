@@ -57,6 +57,15 @@ function formatUnknownError(error: unknown): string {
   }
 }
 
+function abortResultError(result: unknown): string | null {
+  if (!result || typeof result !== 'object' || !('ok' in result)) return null
+  const response = result as { ok?: unknown; error?: unknown }
+  if (response.ok !== false) return null
+  return typeof response.error === 'string' && response.error.trim()
+    ? response.error
+    : 'Codex did not confirm that the turn was interrupted.'
+}
+
 // The remote client dropped (idle socket reaped) before this invoke reached the
 // host. The message never left this machine, so we restore the user's text and
 // let the app's background auto-reconnect re-establish the session rather than
@@ -1142,7 +1151,15 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
               Math.abs((m as ClaudeMessage).timestamp - finalMsg.timestamp) < 10000
             ))
             : prev
-          if (nextPrev.some(m => m.id === finalMsg.id)) return nextPrev
+          const existingMessageIndex = nextPrev.findIndex(m => m.id === finalMsg.id)
+          if (existingMessageIndex >= 0) {
+            if (finalMsg.kind === 'stale-turn-warning') {
+              const copy = [...nextPrev]
+              copy[existingMessageIndex] = finalMsg
+              return copy
+            }
+            return nextPrev
+          }
           // Dedup user messages: a matching local user message within 5s is the
           // optimistic echo. When the host echoes the message back (proof it was
           // received) solidify it by clearing its 'sending'/'failed' status,
@@ -2383,26 +2400,46 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
       clearPendingAutoContinue()
       autoContinueHandledTurnKeysRef.current.clear()
       autoContinueRef.current = { ...autoContinueRef.current, enabled: false, used: 0 }
-      host.claude.abortSession(sessionId)
-      setIsStreaming(false)
-      setIsInterrupted(false)
-      setStreamingText('')
-      setStreamingThinking('')
-      setPendingPermission(null)
-      setMessages(prev => {
-        const updated = prev.map(m => {
-          if ('toolName' in m && (m as ClaudeToolCall).status === 'running') {
-            return { ...m, status: 'error', denied: true } as ClaudeToolCall
-          }
-          return m
+      void host.claude.abortSession(sessionId).then(result => {
+        const failure = abortResultError(result)
+        if (failure) {
+          setMessages(prev => [...prev, {
+            id: `err-abort-${Date.now()}`,
+            sessionId,
+            role: 'system' as const,
+            content: `Warning: ${failure}`,
+            timestamp: Date.now(),
+          }])
+          return
+        }
+        setIsStreaming(false)
+        setIsInterrupted(false)
+        setStreamingText('')
+        setStreamingThinking('')
+        setPendingPermission(null)
+        setMessages(prev => {
+          const updated = prev.map(m => {
+            if ('toolName' in m && (m as ClaudeToolCall).status === 'running') {
+              return { ...m, status: 'error', denied: true } as ClaudeToolCall
+            }
+            return m
+          })
+          return [...updated, {
+            id: `sys-abort-${Date.now()}`,
+            sessionId,
+            role: 'system' as const,
+            content: 'Session aborted.',
+            timestamp: Date.now(),
+          }]
         })
-        return [...updated, {
-          id: `sys-abort-${Date.now()}`,
+      }).catch(error => {
+        setMessages(prev => [...prev, {
+          id: `err-abort-${Date.now()}`,
           sessionId,
           role: 'system' as const,
-          content: 'Session aborted.',
+          content: `Warning: ${formatUnknownError(error)}`,
           timestamp: Date.now(),
-        }]
+        }])
       })
       return
     }
@@ -2731,11 +2768,33 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
     if (host.debug.isDebugMode === true) {
       host.debug.log(`[Codex:${sessionId.slice(0, 8)}] handleInterrupt abortSession`)
     }
-    host.claude.abortSession(sessionId)
-    setIsInterrupted(true)
-    setStreamingText('')
-    setStreamingThinking('')
-    setPendingPermission(null)
+    void host.claude.abortSession(sessionId).then(result => {
+      const failure = abortResultError(result)
+      if (failure) {
+        setIsInterrupted(false)
+        setMessages(prev => [...prev, {
+          id: `err-interrupt-${Date.now()}`,
+          sessionId,
+          role: 'system' as const,
+          content: `Warning: ${failure}`,
+          timestamp: Date.now(),
+        }])
+        return
+      }
+      setIsInterrupted(true)
+      setStreamingText('')
+      setStreamingThinking('')
+      setPendingPermission(null)
+    }).catch(error => {
+      setIsInterrupted(false)
+      setMessages(prev => [...prev, {
+        id: `err-interrupt-${Date.now()}`,
+        sessionId,
+        role: 'system' as const,
+        content: `Warning: ${formatUnknownError(error)}`,
+        timestamp: Date.now(),
+      }])
+    })
     textareaRef.current?.focus()
   }, [clearPendingAutoContinue, sessionId, isStreaming])
 
@@ -2745,27 +2804,47 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
     clearPendingAutoContinue()
     autoContinueHandledTurnKeysRef.current.clear()
     autoContinueRef.current = { ...autoContinueRef.current, enabled: false, used: 0 }
-    host.claude.abortSession(sessionId)
-    setIsStreaming(false)
-    setIsInterrupted(false)
-    setStreamingText('')
-    setStreamingThinking('')
-    setPendingPermission(null)
-    setMessages(prev => {
-      // Mark any running tool calls as interrupted (red dot)
-      const updated = prev.map(m => {
-        if ('toolName' in m && (m as ClaudeToolCall).status === 'running') {
-          return { ...m, status: 'error', denied: true } as ClaudeToolCall
-        }
-        return m
+    void host.claude.abortSession(sessionId).then(result => {
+      const failure = abortResultError(result)
+      if (failure) {
+        setMessages(prev => [...prev, {
+          id: `err-stop-${Date.now()}`,
+          sessionId,
+          role: 'system' as const,
+          content: `Warning: ${failure}`,
+          timestamp: Date.now(),
+        }])
+        return
+      }
+      setIsStreaming(false)
+      setIsInterrupted(false)
+      setStreamingText('')
+      setStreamingThinking('')
+      setPendingPermission(null)
+      setMessages(prev => {
+        // Mark any running tool calls as interrupted (red dot)
+        const updated = prev.map(m => {
+          if ('toolName' in m && (m as ClaudeToolCall).status === 'running') {
+            return { ...m, status: 'error', denied: true } as ClaudeToolCall
+          }
+          return m
+        })
+        return [...updated, {
+          id: `sys-stop-${Date.now()}`,
+          sessionId,
+          role: 'system' as const,
+          content: 'Interrupted by user. You can continue typing.',
+          timestamp: Date.now(),
+        }]
       })
-      return [...updated, {
-        id: `sys-stop-${Date.now()}`,
+    }).catch(error => {
+      setMessages(prev => [...prev, {
+        id: `err-stop-${Date.now()}`,
         sessionId,
         role: 'system' as const,
-        content: 'Interrupted by user. You can continue typing.',
+        content: `Warning: ${formatUnknownError(error)}`,
         timestamp: Date.now(),
-      }]
+      }])
     })
     // Focus textarea so user can type immediately
     textareaRef.current?.focus()

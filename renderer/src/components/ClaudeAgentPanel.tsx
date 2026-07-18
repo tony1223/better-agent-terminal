@@ -1162,7 +1162,15 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
               Math.abs((m as ClaudeMessage).timestamp - finalMsg.timestamp) < 10000
             ))
             : prev
-          if (nextPrev.some(m => m.id === finalMsg.id)) return nextPrev
+          const existingMessageIndex = nextPrev.findIndex(m => m.id === finalMsg.id)
+          if (existingMessageIndex >= 0) {
+            if (finalMsg.kind === 'stale-turn-warning') {
+              const copy = [...nextPrev]
+              copy[existingMessageIndex] = finalMsg
+              return copy
+            }
+            return nextPrev
+          }
           // Dedup user messages: a matching local user message within 5s is the
           // optimistic echo. When the host echoes the message back (proof it was
           // received) solidify it by clearing its 'sending'/'failed' status,
