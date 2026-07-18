@@ -66,11 +66,23 @@ if [[ -z "$IDENTITY" ]]; then
   exit 1
 fi
 
+# codex-code-mode-host embeds V8, which allocates JIT (MAP_JIT) memory at startup.
+# Under the hardened runtime this requires the allow-jit entitlements, otherwise
+# the host aborts with a V8 FatalProcessOutOfMemory and every Codex tool call
+# fails with "code-mode host closed its stdout".
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+JIT_ENTITLEMENTS="$SCRIPT_DIR/../build/entitlements.codex-host.plist"
+
 count=0
 for root in "${ROOTS[@]}"; do
   while IFS= read -r -d '' file_path; do
     if file "$file_path" | grep -q 'Mach-O'; then
-      codesign --force --timestamp --options runtime --sign "$IDENTITY" "$file_path"
+      if [[ "$(basename "$file_path")" == "codex-code-mode-host" ]]; then
+        codesign --force --timestamp --options runtime \
+          --entitlements "$JIT_ENTITLEMENTS" --sign "$IDENTITY" "$file_path"
+      else
+        codesign --force --timestamp --options runtime --sign "$IDENTITY" "$file_path"
+      fi
       count=$((count + 1))
     fi
   done < <(find "$root" -type f -perm -111 -print0)
