@@ -635,7 +635,9 @@
       "compacting": "Compacting context; still waiting for API response.",
       "waiting": "Still waiting for API response.",
       "preparing": "Preparing request.",
-      "queued": "Queued behind the previous request."
+      "queued": "Queued behind the previous request.",
+      "reconnecting": "Reconnecting to the Codex API.",
+      "staleTurnWarning": "Warning: BAT ignored late output from an older Codex turn because that turn is no longer active."
     }
   },
 

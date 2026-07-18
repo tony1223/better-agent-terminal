@@ -3,7 +3,7 @@ export interface ClaudeMessage {
   sessionId: string
   role: 'user' | 'assistant' | 'system'
   content: string
-  kind?: 'auto-continue'
+  kind?: 'auto-continue' | 'stale-turn-warning'
   autoContinue?: {
     used: number
     max: number

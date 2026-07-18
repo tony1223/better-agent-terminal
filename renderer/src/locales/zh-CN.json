@@ -610,7 +610,9 @@
       "compacting": "正在压缩上下文；仍在等待 API 响应。",
       "waiting": "仍在等待 API 响应。",
       "preparing": "正在准备请求。",
-      "queued": "正在排队，等待上一个请求完成。"
+      "queued": "正在排队，等待上一个请求完成。",
+      "reconnecting": "正在重新连接至 Codex API。",
+      "staleTurnWarning": "警告：旧 Codex turn 已不再是当前运行中的 turn，BAT 已忽略其延迟送达的输出。"
     }
   },
   "promptBox": {

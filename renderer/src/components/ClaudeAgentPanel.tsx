@@ -62,7 +62,7 @@ interface SessionMeta {
   lastTurnFirstTokenMs?: number
   lastTurnDurationMs?: number
   isStreaming?: boolean
-  runtimeStatus?: 'starting' | 'queued' | 'waiting_for_api' | 'compacting' | string | null
+  runtimeStatus?: 'starting' | 'queued' | 'waiting_for_api' | 'reconnecting' | 'compacting' | string | null
   runtimeMessage?: string | null
   runtimeStatusStartedAt?: number | null
 }
@@ -135,6 +135,9 @@ function runtimeWaitingMessage(t: TFunction, meta: SessionMeta | null, isStreami
   }
   if (meta.runtimeStatus === 'queued') {
     return `${translated || t('claude.runtimeStatus.queued')}${elapsed}`
+  }
+  if (meta.runtimeStatus === 'reconnecting') {
+    return `${translated || t('claude.runtimeStatus.reconnecting')}${elapsed}`
   }
   return null
 }
@@ -1096,7 +1099,9 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
         if (host.debug.isDebugMode === true) host.debug.log(`${tag} onMessage`, (msg as ClaudeMessage).id)
         workspaceStore.updateTerminalActivity(sessionId)
         const message = msg as ClaudeMessage
-        if (message.role !== 'user') setSessionMeta(prev => clearRuntimeStatusMeta(prev))
+        if (message.role !== 'user' && message.kind !== 'stale-turn-warning') {
+          setSessionMeta(prev => clearRuntimeStatusMeta(prev))
+        }
         // On restart, sys-init message arrives again — reset messages
         // But skip reset if history will be loaded (resume flow)
         if (message.id === `sys-init-${sessionId}`) {
@@ -4332,6 +4337,19 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
 
     const msg = item as ClaudeMessage
     if (msg.role === 'system') {
+      if (msg.kind === 'stale-turn-warning') {
+        return (
+          <div key={msg.id || index} className="tl-item tl-item-system tl-item-warning">
+            <div className="tl-dot dot-warning" />
+            <div className="tl-content claude-message-system claude-message-warning">
+              {t('claude.runtimeStatus.staleTurnWarning')}
+              {msg.timestamp > 0 && (
+                <span className="claude-msg-time" title={formatFullTimestamp(msg.timestamp)}>{formatTimestamp(msg.timestamp)}</span>
+              )}
+            </div>
+          </div>
+        )
+      }
       if (msg.kind === 'auto-continue') {
         const auto = msg.autoContinue
         const prompt = auto?.prompt ?? msg.content

@@ -616,7 +616,9 @@
       "compacting": "コンテキストを圧縮中。API の応答を待っています。",
       "waiting": "API の応答を待っています。",
       "preparing": "リクエストを準備中です。",
-      "queued": "前のリクエストの後ろで待機中です。"
+      "queued": "前のリクエストの後ろで待機中です。",
+      "reconnecting": "Codex API に再接続しています。",
+      "staleTurnWarning": "警告：以前の Codex turn はすでにアクティブではないため、BAT は遅れて届いた出力を無視しました。"
     }
   },
   "promptBox": {

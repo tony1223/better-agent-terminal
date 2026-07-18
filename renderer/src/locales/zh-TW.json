@@ -633,7 +633,9 @@
       "compacting": "正在壓縮上下文；仍在等待 API 回應。",
       "waiting": "仍在等待 API 回應。",
       "preparing": "正在準備請求。",
-      "queued": "正在排隊，等待前一個請求完成。"
+      "queued": "正在排隊，等待前一個請求完成。",
+      "reconnecting": "正在重新連線至 Codex API。",
+      "staleTurnWarning": "警告：舊 Codex turn 已不再是目前執行中的 turn，BAT 已忽略其延遲送達的輸出。"
     }
   },
 

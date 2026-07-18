@@ -305,6 +305,7 @@ struct CodexSession {
     is_resting: bool,
     abort_requested: bool,
     ignored_turn_ids: Vec<String>,
+    warned_stale_turn_ids: Vec<String>,
 }
 
 impl CodexSession {
@@ -373,6 +374,18 @@ fn remember_ignored_turn(session: &mut CodexSession, turn_id: String) {
         let drop_count = session.ignored_turn_ids.len() - 16;
         session.ignored_turn_ids.drain(0..drop_count);
     }
+}
+
+fn remember_warned_stale_turn(session: &mut CodexSession, turn_id: &str) -> bool {
+    if session.warned_stale_turn_ids.iter().any(|id| id == turn_id) {
+        return false;
+    }
+    session.warned_stale_turn_ids.push(turn_id.to_string());
+    if session.warned_stale_turn_ids.len() > 16 {
+        let drop_count = session.warned_stale_turn_ids.len() - 16;
+        session.warned_stale_turn_ids.drain(0..drop_count);
+    }
+    true
 }
 
 fn codex_context_window_for_model(model: &str) -> u64 {
@@ -1376,10 +1389,6 @@ fn log_codex(app: &HostContext, session_id: &str, message: impl AsRef<str>) {
             message.as_ref()
         ),
     );
-}
-
-fn is_high_frequency_delta_notification(method: &str) -> bool {
-    method.contains("Delta") || method.contains("delta")
 }
 
 fn make_user_message(session_id: &str, prompt: &str, image_count: usize) -> Value {
@@ -3577,6 +3586,22 @@ impl CodexAppServerState {
         None
     }
 
+    fn take_stale_turn_warning_message(&self, session_id: &str, turn_id: &str) -> Option<Value> {
+        let mut sessions = self.inner.sessions.lock().expect("codex sessions lock");
+        let session = sessions.get_mut(session_id)?;
+        if !remember_warned_stale_turn(session, turn_id) {
+            return None;
+        }
+        let mut message = make_system_message(
+            session_id,
+            "An older Codex turn produced late output after it was no longer active. BAT ignored that stale output to keep the conversation consistent."
+                .to_string(),
+        );
+        message["kind"] = json!("stale-turn-warning");
+        push_session_item(session, message.clone());
+        Some(message)
+    }
+
     fn take_thread_ownership(
         &self,
         app: &HostContext,
@@ -4037,6 +4062,7 @@ impl CodexAppServerState {
             is_resting: false,
             abort_requested: false,
             ignored_turn_ids: Vec::new(),
+            warned_stale_turn_ids: Vec::new(),
         };
         self.inner
             .sessions
@@ -4212,6 +4238,7 @@ impl CodexAppServerState {
             is_resting: false,
             abort_requested: false,
             ignored_turn_ids: Vec::new(),
+            warned_stale_turn_ids: Vec::new(),
         };
         self.inner
             .sessions
@@ -4850,6 +4877,7 @@ impl CodexAppServerState {
             session.last_turn_first_token_ms = None;
             session.last_turn_duration_ms = None;
             session.messages.clear();
+            session.warned_stale_turn_ids.clear();
             cleanup_session_temp_images(session);
             session.command_outputs.clear();
             session.command_output_last_emit.clear();
@@ -5118,6 +5146,14 @@ impl CodexAppServerState {
         if let Some((turn_id, active_turn_id)) =
             self.stale_turn_notification(&session_id, method, &params)
         {
+            warn_stale_turn_once(
+                app,
+                self,
+                &session_id,
+                method,
+                &turn_id,
+                active_turn_id.as_deref(),
+            );
             log_codex(
                 app,
                 &session_id,
@@ -5474,7 +5510,15 @@ fn handle_notification(
     if let Some((turn_id, active_turn_id)) =
         state.stale_turn_notification(&session_id, method, &params)
     {
-        if !is_high_frequency_delta_notification(method) {
+        let warning_emitted = warn_stale_turn_once(
+            app,
+            state,
+            &session_id,
+            method,
+            &turn_id,
+            active_turn_id.as_deref(),
+        );
+        if !warning_emitted && matches!(method, "turn/completed" | "error") {
             log_codex(
                 app,
                 &session_id,
@@ -5655,6 +5699,29 @@ fn handle_notification(
     }
 }
 
+fn warn_stale_turn_once(
+    app: &HostContext,
+    state: &CodexAppServerState,
+    session_id: &str,
+    method: &str,
+    turn_id: &str,
+    active_turn_id: Option<&str>,
+) -> bool {
+    let Some(message) = state.take_stale_turn_warning_message(session_id, turn_id) else {
+        return false;
+    };
+    app_cmd::log_tauri(
+        app,
+        &format!(
+            "[codex-app-server:{}] WARNING: {method} ignored for stale turn={turn_id} activeTurn={}",
+            short_session_id(session_id),
+            active_turn_id.unwrap_or("none")
+        ),
+    );
+    emit(app, "claude:message", session_id, "message", message);
+    true
+}
+
 fn handle_error_notification(
     app: &HostContext,
     state: &CodexAppServerState,
@@ -5665,7 +5732,42 @@ fn handle_error_notification(
         .get("error")
         .and_then(turn_error_message_from_value)
         .unwrap_or_else(|| "Codex turn failed.".to_string());
+    if error_notification_will_retry(params) {
+        let meta = preserve_retrying_turn(state, session_id, &message);
+        log_codex(
+            app,
+            session_id,
+            format!("retryable error; preserving active turn: {message}"),
+        );
+        if let Some(meta) = meta {
+            emit(app, "claude:status", session_id, "meta", meta);
+        }
+        return;
+    }
     state.fail_turn(app, session_id, message);
+}
+
+fn error_notification_will_retry(params: &Value) -> bool {
+    params
+        .get("willRetry")
+        .or_else(|| params.get("will_retry"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn preserve_retrying_turn(
+    state: &CodexAppServerState,
+    session_id: &str,
+    message: &str,
+) -> Option<Value> {
+    let mut sessions = state.inner.sessions.lock().expect("codex sessions lock");
+    sessions.get_mut(session_id).and_then(|session| {
+        if !session.is_running || session.abort_requested {
+            return None;
+        }
+        set_runtime_status(session, "reconnecting", message);
+        Some(session.metadata())
+    })
 }
 
 fn append_stream_delta(
@@ -6268,6 +6370,113 @@ mod tests {
     use super::*;
     use std::env;
 
+    fn test_codex_session() -> CodexSession {
+        CodexSession {
+            session_id: "session-1".to_string(),
+            thread_id: Some("thread-1".to_string()),
+            cwd: "/repo".to_string(),
+            model: "gpt-5.6-sol".to_string(),
+            sandbox_mode: "workspace-write".to_string(),
+            approval_policy: "on-request".to_string(),
+            effort: "high".to_string(),
+            context_window: GPT_5_6_CONTEXT_WINDOW_FALLBACK,
+            start_time: Instant::now(),
+            active_turn_id: Some("turn-1".to_string()),
+            active_turn_key: Some("turn-1".to_string()),
+            assistant_text: String::new(),
+            thinking_text: String::new(),
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            last_input_tokens: 0,
+            last_output_tokens: 0,
+            last_cache_read_tokens: 0,
+            num_turns: 1,
+            last_turn_started_at: Some(Instant::now()),
+            last_turn_first_token_ms: None,
+            last_turn_duration_ms: None,
+            messages: Vec::new(),
+            temporary_image_paths: Vec::new(),
+            command_outputs: HashMap::new(),
+            command_output_last_emit: HashMap::new(),
+            runtime_status: None,
+            runtime_message: None,
+            runtime_status_started_at: None,
+            is_running: true,
+            is_resting: false,
+            abort_requested: false,
+            ignored_turn_ids: Vec::new(),
+            warned_stale_turn_ids: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn retryable_error_preserves_the_active_turn() {
+        let params = json!({
+            "error": { "message": "Reconnecting... 2/5" },
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "willRetry": true,
+        });
+        assert!(error_notification_will_retry(&params));
+        assert!(!error_notification_will_retry(&json!({
+            "error": { "message": "Model is at capacity" },
+            "willRetry": false,
+        })));
+
+        let state = CodexAppServerState::default();
+        state
+            .inner
+            .sessions
+            .lock()
+            .expect("codex sessions lock")
+            .insert("session-1".to_string(), test_codex_session());
+
+        let meta = preserve_retrying_turn(&state, "session-1", "Reconnecting... 2/5")
+            .expect("retrying metadata");
+        assert_eq!(meta["isStreaming"], true);
+        assert_eq!(meta["runtimeStatus"], "reconnecting");
+        assert_eq!(meta["runtimeMessage"], "Reconnecting... 2/5");
+        {
+            let sessions = state.inner.sessions.lock().expect("codex sessions lock");
+            let session = sessions.get("session-1").expect("session");
+            assert!(session.is_running);
+            assert_eq!(session.active_turn_id.as_deref(), Some("turn-1"));
+            assert_eq!(session.active_turn_key.as_deref(), Some("turn-1"));
+        }
+        assert!(state
+            .stale_turn_notification(
+                "session-1",
+                "item/completed",
+                &json!({ "turnId": "turn-1" }),
+            )
+            .is_none());
+    }
+
+    #[test]
+    fn stale_turn_warning_is_recorded_once_per_turn() {
+        let state = CodexAppServerState::default();
+        state
+            .inner
+            .sessions
+            .lock()
+            .expect("codex sessions lock")
+            .insert("session-1".to_string(), test_codex_session());
+
+        let warning = state
+            .take_stale_turn_warning_message("session-1", "old-turn")
+            .expect("first warning");
+        assert_eq!(warning["kind"], "stale-turn-warning");
+        assert!(state
+            .take_stale_turn_warning_message("session-1", "old-turn")
+            .is_none());
+
+        let sessions = state.inner.sessions.lock().expect("codex sessions lock");
+        let session = sessions.get("session-1").expect("session");
+        assert_eq!(session.warned_stale_turn_ids, vec!["old-turn"]);
+        assert_eq!(session.messages.len(), 1);
+    }
+
     #[test]
     fn idle_connection_reaper_never_interrupts_live_work() {
         let stale = CODEX_CONNECTION_IDLE_TIMEOUT + Duration::from_secs(1);
@@ -6791,6 +7000,7 @@ mod tests {
             is_resting: false,
             abort_requested: false,
             ignored_turn_ids: Vec::new(),
+            warned_stale_turn_ids: Vec::new(),
         };
 
         let meta = session.metadata();
@@ -6836,6 +7046,7 @@ mod tests {
             is_resting: false,
             abort_requested: false,
             ignored_turn_ids: Vec::new(),
+            warned_stale_turn_ids: Vec::new(),
         };
 
         assert!(!clear_runtime_status_if_set(&mut session));
@@ -6889,6 +7100,7 @@ mod tests {
             is_resting: false,
             abort_requested: false,
             ignored_turn_ids: Vec::new(),
+            warned_stale_turn_ids: Vec::new(),
         };
         update_session_usage(
             &mut session,

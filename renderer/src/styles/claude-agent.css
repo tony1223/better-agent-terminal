@@ -410,6 +410,11 @@
   opacity: 0.5;
 }
 
+.tl-dot.dot-warning {
+  background: var(--warning-color, #e8a838);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--warning-color, #e8a838) 18%, transparent);
+}
+
 .tl-dot.dot-auto-continue {
   background: var(--claude-accent);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--claude-accent) 18%, transparent);
@@ -595,6 +600,11 @@
   /* Preserve newlines so multi-line system notices (e.g. an error followed by
      the claude subprocess stderr reason) render on separate lines. */
   white-space: pre-wrap;
+}
+
+.claude-message-warning {
+  color: var(--warning-color, #e8a838);
+  font-style: normal;
 }
 
 .claude-message-auto-continue {

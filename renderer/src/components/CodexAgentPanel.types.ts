@@ -27,7 +27,7 @@ export interface SessionMeta {
   lastTurnFirstTokenMs?: number
   lastTurnDurationMs?: number
   isStreaming?: boolean
-  runtimeStatus?: 'starting' | 'queued' | 'waiting_for_api' | 'compacting' | string | null
+  runtimeStatus?: 'starting' | 'queued' | 'waiting_for_api' | 'reconnecting' | 'compacting' | string | null
   runtimeMessage?: string | null
   runtimeStatusStartedAt?: number | null
 }
