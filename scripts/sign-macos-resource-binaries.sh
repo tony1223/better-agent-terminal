@@ -66,18 +66,30 @@ if [[ -z "$IDENTITY" ]]; then
   exit 1
 fi
 
-# codex-code-mode-host embeds V8, which allocates JIT (MAP_JIT) memory at startup.
-# Under the hardened runtime this requires the allow-jit entitlements, otherwise
-# the host aborts with a V8 FatalProcessOutOfMemory and every Codex tool call
-# fails with "code-mode host closed its stdout".
+# Binaries embedding a JS engine (V8 / JavaScriptCore) allocate JIT (MAP_JIT)
+# memory. Under the hardened runtime this requires the allow-jit entitlements
+# (matching how OpenAI and Anthropic sign their own distributions of these
+# binaries). Without them:
+#   - codex-code-mode-host (V8) aborts at startup with FatalProcessOutOfMemory,
+#     so every Codex tool call fails with "code-mode host closed its stdout".
+#   - the bundled claude binary (Bun/JSC) silently disables JIT-dependent
+#     features; SharedArrayBuffer disappears and Claude Code sessions crash
+#     with "ReferenceError: SharedArrayBuffer is not defined".
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-JIT_ENTITLEMENTS="$SCRIPT_DIR/../build/entitlements.codex-host.plist"
+JIT_ENTITLEMENTS="$SCRIPT_DIR/../build/entitlements.jit.plist"
+
+needs_jit_entitlements() {
+  case "$(basename "$1")" in
+    codex-code-mode-host|claude) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
 count=0
 for root in "${ROOTS[@]}"; do
   while IFS= read -r -d '' file_path; do
     if file "$file_path" | grep -q 'Mach-O'; then
-      if [[ "$(basename "$file_path")" == "codex-code-mode-host" ]]; then
+      if needs_jit_entitlements "$file_path"; then
         codesign --force --timestamp --options runtime \
           --entitlements "$JIT_ENTITLEMENTS" --sign "$IDENTITY" "$file_path"
       else
