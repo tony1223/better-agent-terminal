@@ -17,8 +17,10 @@ use keyring_core::Entry as KeyringEntry;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(feature = "desktop")]
@@ -27,8 +29,12 @@ use tauri::{AppHandle, WebviewWindow};
 const DEFAULT_PROFILE_ID: &str = "default";
 const DEFAULT_PROFILE_NAME: &str = "Default";
 const INDEX_FILE: &str = "index.json";
+const INDEX_BACKUP_FILE: &str = "index.json.bak";
 const TOKEN_FILE: &str = "remote-tokens.enc.json";
 const REMOTE_TOKEN_KEYRING_SERVICE: &str = "better-agent-terminal:remote-profile-token";
+
+static PROFILE_INDEX_TRANSACTION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static ATOMIC_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -75,7 +81,7 @@ struct ProfileIndex {
     pub active_profile_id: Option<String>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateProfileOptions {
     #[serde(rename = "type")]
@@ -327,8 +333,86 @@ fn delete_remote_token_from_safe_store(profile_id: &str) {
     }
 }
 
-fn write_owner_only(path: &Path, content: String) -> std::io::Result<()> {
-    fs::write(path, content)?;
+fn profile_index_guard() -> std::sync::MutexGuard<'static, ()> {
+    PROFILE_INDEX_TRANSACTION_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn atomic_temp_path(path: &Path) -> PathBuf {
+    let sequence = ATOMIC_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let mut name = path
+        .file_name()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| "profile-data".into());
+    name.push(format!(".{}.{}.tmp", std::process::id(), sequence));
+    path.with_file_name(name)
+}
+
+#[cfg(windows)]
+fn replace_file(temp: &Path, destination: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let temp_wide = temp
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let destination_wide = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let moved = unsafe {
+        MoveFileExW(
+            temp_wide.as_ptr(),
+            destination_wide.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if moved == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+fn replace_file(temp: &Path, destination: &Path) -> io::Result<()> {
+    fs::rename(temp, destination)
+}
+
+fn write_owner_only(path: &Path, content: String) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let temp = atomic_temp_path(path);
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
+        file.write_all(content.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&temp, fs::Permissions::from_mode(0o600))?;
+        }
+
+        replace_file(&temp, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    result?;
+
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -413,22 +497,74 @@ fn strip_and_persist_remote_tokens(
     Ok(index)
 }
 
-fn read_index_at(dir: &Path) -> ProfileIndex {
-    let path = dir.join(INDEX_FILE);
-    let Ok(raw) = fs::read_to_string(path) else {
-        return default_index();
+fn read_index_file(path: &Path) -> io::Result<Option<ProfileIndex>> {
+    let raw = match fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err),
     };
-    let parsed = serde_json::from_str::<ProfileIndex>(&raw).unwrap_or_else(|_| default_index());
-    hydrate_remote_tokens(dir, normalize_index(parsed))
+    serde_json::from_str::<ProfileIndex>(&raw)
+        .map(Some)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
 }
 
-fn write_index_at(dir: &Path, index: ProfileIndex) -> std::io::Result<()> {
+fn read_index_for_update_unlocked(dir: &Path) -> io::Result<ProfileIndex> {
+    let primary = dir.join(INDEX_FILE);
+    let backup = dir.join(INDEX_BACKUP_FILE);
+    let parsed = match read_index_file(&primary) {
+        Ok(Some(index)) => index,
+        Ok(None) => match read_index_file(&backup)? {
+            Some(index) => index,
+            None => default_index(),
+        },
+        Err(primary_error) => match read_index_file(&backup) {
+            Ok(Some(index)) => index,
+            _ => return Err(primary_error),
+        },
+    };
+    Ok(hydrate_remote_tokens(dir, normalize_index(parsed)))
+}
+
+fn read_index_at(dir: &Path) -> ProfileIndex {
+    let _guard = profile_index_guard();
+    read_index_for_update_unlocked(dir).unwrap_or_else(|_| default_index())
+}
+
+fn backup_valid_index_unlocked(dir: &Path) -> io::Result<()> {
+    let primary = dir.join(INDEX_FILE);
+    let Ok(raw) = fs::read_to_string(&primary) else {
+        return Ok(());
+    };
+    if serde_json::from_str::<ProfileIndex>(&raw).is_err() {
+        return Ok(());
+    }
+    write_owner_only(&dir.join(INDEX_BACKUP_FILE), raw)
+}
+
+fn write_index_at_unlocked(dir: &Path, index: ProfileIndex) -> io::Result<()> {
     fs::create_dir_all(dir)?;
     let clean = strip_and_persist_remote_tokens(dir, normalize_index(index))?;
-    write_owner_only(
-        &dir.join(INDEX_FILE),
-        serde_json::to_string_pretty(&clean).unwrap_or_else(|_| "{}".into()),
-    )
+    let serialized = serde_json::to_string_pretty(&clean)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    backup_valid_index_unlocked(dir)?;
+    write_owner_only(&dir.join(INDEX_FILE), serialized)
+}
+
+#[cfg(test)]
+fn write_index_at(dir: &Path, index: ProfileIndex) -> io::Result<()> {
+    let _guard = profile_index_guard();
+    write_index_at_unlocked(dir, index)
+}
+
+fn update_index_at<T>(
+    dir: &Path,
+    update: impl FnOnce(&mut ProfileIndex) -> io::Result<T>,
+) -> io::Result<T> {
+    let _guard = profile_index_guard();
+    let mut index = read_index_for_update_unlocked(dir)?;
+    let result = update(&mut index)?;
+    write_index_at_unlocked(dir, index)?;
+    Ok(result)
 }
 
 fn list_response_at(dir: &Path) -> ProfileListResponse {
@@ -458,13 +594,16 @@ fn emit_profile_changed(app: &HostContext) {
 }
 
 fn load_profile_snapshot_at(dir: &Path, profile_id: &str, activate: bool) -> Option<Value> {
-    let mut index = read_index_at(dir);
-    if activate && !activate_profile_in_index(&mut index, profile_id) {
-        return None;
-    }
     let snapshot = read_snapshot_at(dir, profile_id)?;
     if activate {
-        let _ = write_index_at(dir, index);
+        update_index_at(dir, |index| {
+            if activate_profile_in_index(index, profile_id) {
+                Ok(())
+            } else {
+                Err(io::Error::new(io::ErrorKind::NotFound, "profile not found"))
+            }
+        })
+        .ok()?;
     }
     Some(snapshot)
 }
@@ -699,23 +838,23 @@ pub fn profile_save_workspace_for_remote(app: &HostContext, profile_id: &str, da
     let Some(dir) = profiles_dir(app) else {
         return false;
     };
-    let mut index = read_index_at(&dir);
-    let Some(profile) = index
-        .profiles
-        .iter()
-        .find(|profile| profile.id == profile_id && profile.kind == "local")
-        .cloned()
-    else {
-        return false;
-    };
     let Ok(workspace) = serde_json::from_str::<Value>(data) else {
         return false;
     };
-    let snapshot = snapshot_from_workspace(&profile, workspace);
-    let wrote = write_snapshot_at(&dir, profile_id, &snapshot).is_ok();
+    let wrote = update_index_at(&dir, |index| {
+        let profile = index
+            .profiles
+            .iter()
+            .find(|profile| profile.id == profile_id && profile.kind == "local")
+            .cloned()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "profile not found"))?;
+        let snapshot = snapshot_from_workspace(&profile, workspace);
+        write_snapshot_at(&dir, profile_id, &snapshot)?;
+        let _ = activate_profile_in_index(index, profile_id);
+        Ok(())
+    })
+    .is_ok();
     if wrote {
-        let _ = activate_profile_in_index(&mut index, profile_id);
-        let _ = write_index_at(&dir, index);
         emit_profile_changed(app);
     }
     wrote
@@ -731,14 +870,18 @@ pub fn profile_create(
     let Some(dir) = profiles_dir(&HostContext::from_app(app.clone())) else {
         return profile_from_options(DEFAULT_PROFILE_ID.into(), name, options);
     };
-    let mut index = read_index_at(&dir);
-    let id = unique_profile_id(&index, &name);
-    let entry = profile_from_options(id, name, options);
-    index.profiles.push(entry.clone());
-    if entry.kind == "local" {
-        let _ = write_snapshot_at(&dir, &entry.id, &empty_snapshot(&entry));
-    }
-    let _ = write_index_at(&dir, index);
+    let fallback = profile_from_options(DEFAULT_PROFILE_ID.into(), name.clone(), options.clone());
+    let Ok(entry) = update_index_at(&dir, |index| {
+        let id = unique_profile_id(index, &name);
+        let entry = profile_from_options(id, name, options);
+        index.profiles.push(entry.clone());
+        if entry.kind == "local" {
+            let _ = write_snapshot_at(&dir, &entry.id, &empty_snapshot(&entry));
+        }
+        Ok(entry)
+    }) else {
+        return fallback;
+    };
     emit_profile_changed(&HostContext::from_app(app.clone()));
     entry
 }
@@ -749,31 +892,28 @@ pub fn profile_save(app: AppHandle, profile_id: String) -> bool {
     let Some(dir) = profiles_dir(&HostContext::from_app(app.clone())) else {
         return false;
     };
-    let index = read_index_at(&dir);
-    let Some(profile) = index
-        .profiles
-        .iter()
-        .find(|profile| profile.id == profile_id && profile.kind == "local")
-    else {
-        return false;
-    };
     let workspace = workspace_path(&HostContext::from_app(app.clone()))
         .and_then(|path| fs::read_to_string(path).ok())
         .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
         .unwrap_or_else(empty_workspace_state);
-    let snapshot = snapshot_from_workspace(profile, workspace);
-    if write_snapshot_at(&dir, &profile_id, &snapshot).is_err() {
-        return false;
-    }
-    let mut index = index;
-    if let Some(entry) = index
-        .profiles
-        .iter_mut()
-        .find(|profile| profile.id == profile_id)
-    {
+    let saved = update_index_at(&dir, |index| {
+        let profile = index
+            .profiles
+            .iter()
+            .find(|profile| profile.id == profile_id && profile.kind == "local")
+            .cloned()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "profile not found"))?;
+        let snapshot = snapshot_from_workspace(&profile, workspace);
+        write_snapshot_at(&dir, &profile_id, &snapshot)?;
+        let entry = index
+            .profiles
+            .iter_mut()
+            .find(|profile| profile.id == profile_id)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "profile not found"))?;
         entry.updated_at = now_millis();
-    }
-    let saved = write_index_at(&dir, index).is_ok();
+        Ok(())
+    })
+    .is_ok();
     if saved {
         emit_profile_changed(&HostContext::from_app(app.clone()));
     }
@@ -819,11 +959,7 @@ pub fn profile_load(app: AppHandle, window: WebviewWindow, profile_id: String) -
             workspace,
         );
     }
-    let mut index = index;
-    if activate_profile_in_index(&mut index, &profile_id) {
-        let _ = write_index_at(&dir, index);
-        emit_profile_changed(&HostContext::from_app(app.clone()));
-    }
+    let _ = activate_profile_id(&HostContext::from_app(app.clone()), &profile_id);
     snapshot.unwrap_or_else(|| empty_snapshot(&profile))
 }
 
@@ -831,11 +967,14 @@ pub fn activate_profile_id(app: &HostContext, profile_id: &str) -> bool {
     let Some(dir) = profiles_dir(app) else {
         return false;
     };
-    let mut index = read_index_at(&dir);
-    if !activate_profile_in_index(&mut index, profile_id) {
-        return false;
-    }
-    let saved = write_index_at(&dir, index).is_ok();
+    let saved = update_index_at(&dir, |index| {
+        if activate_profile_in_index(index, profile_id) {
+            Ok(())
+        } else {
+            Err(io::Error::new(io::ErrorKind::NotFound, "profile not found"))
+        }
+    })
+    .is_ok();
     if saved {
         emit_profile_changed(app);
     }
@@ -846,12 +985,14 @@ pub fn deactivate_profile_id(app: &HostContext, profile_id: &str) -> bool {
     let Some(dir) = profiles_dir(app) else {
         return false;
     };
-    let mut index = read_index_at(&dir);
-    index.active_profile_ids.retain(|id| id != profile_id);
-    if index.active_profile_ids.is_empty() {
-        index.active_profile_ids.push(DEFAULT_PROFILE_ID.into());
-    }
-    let saved = write_index_at(&dir, index).is_ok();
+    let saved = update_index_at(&dir, |index| {
+        index.active_profile_ids.retain(|id| id != profile_id);
+        if index.active_profile_ids.is_empty() {
+            index.active_profile_ids.push(DEFAULT_PROFILE_ID.into());
+        }
+        Ok(())
+    })
+    .is_ok();
     if saved {
         emit_profile_changed(app);
     }
@@ -867,17 +1008,19 @@ pub fn profile_delete(app: AppHandle, profile_id: String) -> bool {
     let Some(dir) = profiles_dir(&HostContext::from_app(app.clone())) else {
         return false;
     };
-    let mut index = read_index_at(&dir);
-    let before = index.profiles.len();
-    index.profiles.retain(|profile| profile.id != profile_id);
-    index.active_profile_ids.retain(|id| id != &profile_id);
-    if before == index.profiles.len() {
-        return false;
-    }
-    delete_remote_token_from_safe_store(&profile_id);
-    let _ = fs::remove_file(profile_path(&dir, &profile_id));
-    let saved = write_index_at(&dir, index).is_ok();
+    let saved = update_index_at(&dir, |index| {
+        let before = index.profiles.len();
+        index.profiles.retain(|profile| profile.id != profile_id);
+        index.active_profile_ids.retain(|id| id != &profile_id);
+        if before == index.profiles.len() {
+            return Err(io::Error::new(io::ErrorKind::NotFound, "profile not found"));
+        }
+        Ok(())
+    })
+    .is_ok();
     if saved {
+        delete_remote_token_from_safe_store(&profile_id);
+        let _ = fs::remove_file(profile_path(&dir, &profile_id));
         emit_profile_changed(&HostContext::from_app(app.clone()));
     }
     saved
@@ -889,26 +1032,25 @@ pub fn profile_rename(app: AppHandle, profile_id: String, new_name: String) -> b
     let Some(dir) = profiles_dir(&HostContext::from_app(app.clone())) else {
         return false;
     };
-    let mut index = read_index_at(&dir);
-    let Some(profile) = index
-        .profiles
-        .iter_mut()
-        .find(|profile| profile.id == profile_id)
-    else {
-        return false;
+    let snapshot_name = match update_index_at(&dir, |index| {
+        let profile = index
+            .profiles
+            .iter_mut()
+            .find(|profile| profile.id == profile_id)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "profile not found"))?;
+        profile.name = new_name;
+        profile.updated_at = now_millis();
+        Ok(profile.name.clone())
+    }) {
+        Ok(name) => name,
+        Err(_) => return false,
     };
-    profile.name = new_name;
-    let snapshot_name = profile.name.clone();
-    profile.updated_at = now_millis();
     if let Some(mut snapshot) = read_snapshot_at(&dir, &profile_id) {
         snapshot["name"] = Value::String(snapshot_name);
         let _ = write_snapshot_at(&dir, &profile_id, &snapshot);
     }
-    let saved = write_index_at(&dir, index).is_ok();
-    if saved {
-        emit_profile_changed(&HostContext::from_app(app.clone()));
-    }
-    saved
+    emit_profile_changed(&HostContext::from_app(app.clone()));
+    true
 }
 
 #[cfg(feature = "desktop")]
@@ -924,37 +1066,37 @@ pub fn profile_update(
     let Some(updates) = updates else {
         return false;
     };
-    let mut index = read_index_at(&dir);
-    let Some(profile) = index
-        .profiles
-        .iter_mut()
-        .find(|profile| profile.id == profile_id)
-    else {
-        return false;
-    };
-    if let Some(value) = updates.remote_host {
-        profile.remote_host = Some(value);
-    }
-    if let Some(value) = updates.remote_port {
-        profile.remote_port = Some(value);
-    }
-    if let Some(value) = updates.remote_token {
-        profile.remote_token = Some(value);
-    }
-    if let Some(value) = updates.remote_fingerprint {
-        profile.remote_fingerprint = Some(value);
-    }
-    if updates.remote_profile_id.is_some() {
-        profile.remote_profile_id = updates.remote_profile_id;
-    }
-    if updates.remote_profile_name.is_some() {
-        profile.remote_profile_name = updates.remote_profile_name;
-    }
-    if profile.remote_host.is_some() || profile.remote_fingerprint.is_some() {
-        profile.kind = "remote".into();
-    }
-    profile.updated_at = now_millis();
-    let saved = write_index_at(&dir, index).is_ok();
+    let saved = update_index_at(&dir, |index| {
+        let profile = index
+            .profiles
+            .iter_mut()
+            .find(|profile| profile.id == profile_id)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "profile not found"))?;
+        if let Some(value) = updates.remote_host {
+            profile.remote_host = Some(value);
+        }
+        if let Some(value) = updates.remote_port {
+            profile.remote_port = Some(value);
+        }
+        if let Some(value) = updates.remote_token {
+            profile.remote_token = Some(value);
+        }
+        if let Some(value) = updates.remote_fingerprint {
+            profile.remote_fingerprint = Some(value);
+        }
+        if updates.remote_profile_id.is_some() {
+            profile.remote_profile_id = updates.remote_profile_id;
+        }
+        if updates.remote_profile_name.is_some() {
+            profile.remote_profile_name = updates.remote_profile_name;
+        }
+        if profile.remote_host.is_some() || profile.remote_fingerprint.is_some() {
+            profile.kind = "remote".into();
+        }
+        profile.updated_at = now_millis();
+        Ok(())
+    })
+    .is_ok();
     if saved {
         emit_profile_changed(&HostContext::from_app(app.clone()));
     }
@@ -969,19 +1111,23 @@ pub fn profile_duplicate(
     new_name: String,
 ) -> Option<ProfileEntry> {
     let dir = profiles_dir(&HostContext::from_app(app.clone()))?;
-    let mut index = read_index_at(&dir);
-    let source = index
-        .profiles
-        .iter()
-        .find(|profile| profile.id == profile_id)?
-        .clone();
-    let now = now_millis();
-    let mut copy = source;
-    copy.id = unique_profile_id(&index, &new_name);
-    copy.name = new_name;
-    copy.created_at = now;
-    copy.updated_at = now;
-    index.profiles.push(copy.clone());
+    let copy = update_index_at(&dir, |index| {
+        let source = index
+            .profiles
+            .iter()
+            .find(|profile| profile.id == profile_id)
+            .cloned()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "profile not found"))?;
+        let now = now_millis();
+        let mut copy = source;
+        copy.id = unique_profile_id(index, &new_name);
+        copy.name = new_name;
+        copy.created_at = now;
+        copy.updated_at = now;
+        index.profiles.push(copy.clone());
+        Ok(copy)
+    })
+    .ok()?;
     if let Some(mut snapshot) = read_snapshot_at(&dir, &profile_id) {
         snapshot["id"] = Value::String(copy.id.clone());
         snapshot["name"] = Value::String(copy.name.clone());
@@ -989,7 +1135,6 @@ pub fn profile_duplicate(
     } else if copy.kind == "local" {
         let _ = write_snapshot_at(&dir, &copy.id, &empty_snapshot(&copy));
     }
-    write_index_at(&dir, index).ok()?;
     emit_profile_changed(&HostContext::from_app(app.clone()));
     Some(copy)
 }
@@ -1009,6 +1154,7 @@ pub fn profile_deactivate(app: AppHandle, profile_id: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
 
     fn temp_profile_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -1111,6 +1257,113 @@ mod tests {
             ]
         );
         assert!(!activate_profile_in_index(&mut index, "missing"));
+    }
+
+    #[test]
+    fn concurrent_profile_updates_preserve_metadata_and_every_active_set_change() {
+        let dir = Arc::new(temp_profile_dir("concurrent-updates"));
+        let profile_ids = ["default", "lineage", "projects", "bat", "tail-hyper"];
+        write_index_at(
+            dir.as_ref(),
+            ProfileIndex {
+                profiles: profile_ids
+                    .iter()
+                    .map(|id| profile_from_options((*id).into(), (*id).into(), None))
+                    .collect(),
+                active_profile_ids: profile_ids.iter().map(|id| (*id).into()).collect(),
+                active_profile_id: None,
+            },
+        )
+        .unwrap();
+
+        let ids_to_deactivate = ["default", "projects", "bat", "tail-hyper"];
+        let barrier = Arc::new(Barrier::new(ids_to_deactivate.len()));
+        let handles = ids_to_deactivate
+            .into_iter()
+            .map(|profile_id| {
+                let dir = Arc::clone(&dir);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    update_index_at(dir.as_ref(), |index| {
+                        index.active_profile_ids.retain(|id| id != profile_id);
+                        Ok(())
+                    })
+                    .unwrap();
+                })
+            })
+            .collect::<Vec<_>>();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let index = read_index_at(dir.as_ref());
+        assert_eq!(index.profiles.len(), profile_ids.len());
+        assert_eq!(index.active_profile_ids, vec!["lineage".to_string()]);
+        assert!(serde_json::from_str::<ProfileIndex>(
+            &fs::read_to_string(dir.join(INDEX_FILE)).unwrap()
+        )
+        .is_ok());
+        fs::remove_dir_all(dir.as_ref()).ok();
+    }
+
+    #[test]
+    fn malformed_index_without_valid_backup_refuses_to_overwrite_with_default() {
+        let dir = temp_profile_dir("malformed-no-backup");
+        let malformed = r#"{"profiles":"#;
+        fs::write(dir.join(INDEX_FILE), malformed).unwrap();
+
+        let result = update_index_at(&dir, |index| {
+            index.active_profile_ids.push("lineage".into());
+            Ok(())
+        });
+
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert_eq!(fs::read_to_string(dir.join(INDEX_FILE)).unwrap(), malformed);
+        assert!(!dir.join(INDEX_BACKUP_FILE).exists());
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn malformed_primary_recovers_from_last_valid_backup() {
+        let dir = temp_profile_dir("recover-backup");
+        let lineage = profile_from_options("lineage".into(), "lineage".into(), None);
+        write_index_at(
+            &dir,
+            ProfileIndex {
+                profiles: vec![default_entry(), lineage.clone()],
+                active_profile_ids: vec![DEFAULT_PROFILE_ID.into()],
+                active_profile_id: None,
+            },
+        )
+        .unwrap();
+
+        let mut next = read_index_at(&dir);
+        next.profiles.push(profile_from_options(
+            "projects".into(),
+            "projects".into(),
+            None,
+        ));
+        write_index_at(&dir, next).unwrap();
+        fs::write(dir.join(INDEX_FILE), r#"{"profiles":"#).unwrap();
+
+        update_index_at(&dir, |index| {
+            assert!(activate_profile_in_index(index, &lineage.id));
+            Ok(())
+        })
+        .unwrap();
+
+        let recovered = read_index_at(&dir);
+        assert!(recovered
+            .profiles
+            .iter()
+            .any(|profile| profile.id == lineage.id));
+        assert!(recovered.active_profile_ids.contains(&lineage.id));
+        assert!(serde_json::from_str::<ProfileIndex>(
+            &fs::read_to_string(dir.join(INDEX_FILE)).unwrap()
+        )
+        .is_ok());
+        fs::remove_dir_all(dir).ok();
     }
 
     #[test]
