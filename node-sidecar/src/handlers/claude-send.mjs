@@ -42,6 +42,39 @@ import { LiveQuery } from '../lib/live-query.mjs'
 import { isCodexSession, sendCodexMessage, isCodexAgentPreset } from './codex.mjs'
 
 let userEchoSeq = 0
+const MAX_CLIENT_MESSAGE_REQUESTS = 256
+
+function clientMessageId(params) {
+  return typeof params?.clientMessageId === 'string' && params.clientMessageId.trim()
+    ? params.clientMessageId
+    : null
+}
+
+function pruneClientMessageRequests(session) {
+  if (!(session?.clientMessageRequests instanceof Map)) {
+    session.clientMessageRequests = new Map()
+  }
+  while (session.clientMessageRequests.size >= MAX_CLIENT_MESSAGE_REQUESTS) {
+    const completedKey = [...session.clientMessageRequests.entries()]
+      .find(([, record]) => record?.status !== 'pending')?.[0]
+    if (completedKey === undefined) break
+    session.clientMessageRequests.delete(completedKey)
+  }
+}
+
+function duplicateClientMessageResult(record) {
+  if (record?.status === 'pending') {
+    return { ok: true, duplicate: true, pending: true }
+  }
+  if (record?.status === 'rejected') {
+    throw new Error(record.error || 'previous send failed')
+  }
+  const result = record?.result
+  if (result && typeof result === 'object' && !Array.isArray(result)) {
+    return { ...result, duplicate: true }
+  }
+  return { ok: true, duplicate: true, result }
+}
 
 function batDebugEnabled() {
   return process.env.BAT_DEBUG === '1' || process.env.BAT_DEBUG === 'true'
@@ -940,6 +973,20 @@ registerHandler('claude.sendMessage', async (params) => {
     suppressUserEcho: params?.suppressUserEcho === true,
     hasExistingQueue: Boolean(s.sendQueue),
   })
+  const requestId = clientMessageId(params)
+  if (requestId) {
+    if (!(s.clientMessageRequests instanceof Map)) s.clientMessageRequests = new Map()
+    const existing = s.clientMessageRequests.get(requestId)
+    if (existing) {
+      logWarn(`claude.sendMessage(${sid}): duplicate clientMessageId ignored status=${existing.status}`)
+      return duplicateClientMessageResult(existing)
+    }
+    pruneClientMessageRequests(s)
+    s.clientMessageRequests.set(requestId, {
+      status: 'pending',
+      acceptedAt: Date.now(),
+    })
+  }
   if (!isCodexSession(sessionId)) {
     emitUserEcho(params, sessionId, prompt, images)
   }
@@ -970,6 +1017,23 @@ registerHandler('claude.sendMessage', async (params) => {
     if (s.sendQueue === queued) s.sendQueue = null
   })
   s.sendQueue = queued
+  if (requestId) {
+    const record = s.clientMessageRequests.get(requestId)
+    queued.then(
+      result => {
+        if (s.clientMessageRequests.get(requestId) !== record) return
+        record.status = 'fulfilled'
+        record.result = result
+        record.completedAt = Date.now()
+      },
+      error => {
+        if (s.clientMessageRequests.get(requestId) !== record) return
+        record.status = 'rejected'
+        record.error = error instanceof Error ? error.message : String(error)
+        record.completedAt = Date.now()
+      },
+    )
+  }
   return queued
 })
 

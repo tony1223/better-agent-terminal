@@ -31,7 +31,8 @@ use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Sender};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 #[cfg(feature = "desktop")]
@@ -134,9 +135,14 @@ pub struct CreatePtyOptions {
 }
 
 pub struct PtySession {
+    generation: u64,
     write_tx: Sender<String>,
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send + Sync>,
+    writer_done: Receiver<()>,
+    reader_done: Receiver<()>,
+    output_done: Receiver<()>,
+    exit_done: Receiver<()>,
     cwd: String,
     kind: String,
     viewport: TerminalViewportState,
@@ -145,9 +151,38 @@ pub struct PtySession {
     owner_window: Option<String>,
 }
 
+pub(crate) enum PtyEntry {
+    Starting { generation: u64 },
+    Active(PtySession),
+}
+
+impl PtyEntry {
+    #[cfg(test)]
+    fn generation(&self) -> u64 {
+        match self {
+            Self::Starting { generation } => *generation,
+            Self::Active(session) => session.generation,
+        }
+    }
+
+    fn active(&self) -> Option<&PtySession> {
+        match self {
+            Self::Active(session) => Some(session),
+            Self::Starting { .. } => None,
+        }
+    }
+
+    fn active_mut(&mut self) -> Option<&mut PtySession> {
+        match self {
+            Self::Active(session) => Some(session),
+            Self::Starting { .. } => None,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct PtyState {
-    inner: Arc<Mutex<HashMap<String, PtySession>>>,
+    inner: Arc<Mutex<HashMap<String, PtyEntry>>>,
 }
 
 impl Default for PtyState {
@@ -159,7 +194,7 @@ impl Default for PtyState {
 }
 
 impl PtyState {
-    pub(crate) fn handle(&self) -> Arc<Mutex<HashMap<String, PtySession>>> {
+    pub(crate) fn handle(&self) -> Arc<Mutex<HashMap<String, PtyEntry>>> {
         Arc::clone(&self.inner)
     }
 
@@ -171,11 +206,95 @@ impl PtyState {
         let mut map = self.inner.lock().map_err(|e| CommandError {
             message: e.to_string(),
         })?;
-        let session = map.get_mut(id).ok_or_else(|| CommandError {
-            message: format!("pty session {id} not found"),
-        })?;
+        let session = match map.get_mut(id) {
+            Some(PtyEntry::Active(session)) => session,
+            Some(PtyEntry::Starting { .. }) => {
+                return Err(CommandError {
+                    message: format!("pty session {id} is still starting"),
+                });
+            }
+            None => {
+                return Err(CommandError {
+                    message: format!("pty session {id} not found"),
+                });
+            }
+        };
         f(session)
     }
+}
+
+struct PtyStartReservation {
+    sessions: Arc<Mutex<HashMap<String, PtyEntry>>>,
+    id: String,
+    generation: u64,
+    committed: bool,
+}
+
+impl PtyStartReservation {
+    fn reserve(
+        sessions: Arc<Mutex<HashMap<String, PtyEntry>>>,
+        id: &str,
+    ) -> Result<Self, CommandError> {
+        let generation = NEXT_PTY_GENERATION.fetch_add(1, Ordering::Relaxed);
+        {
+            let mut map = sessions.lock().map_err(|e| CommandError {
+                message: e.to_string(),
+            })?;
+            if map.contains_key(id) {
+                return Err(CommandError {
+                    message: format!("pty session {id} already exists"),
+                });
+            }
+            map.insert(id.to_string(), PtyEntry::Starting { generation });
+        }
+        Ok(Self {
+            sessions,
+            id: id.to_string(),
+            generation,
+            committed: false,
+        })
+    }
+
+    fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for PtyStartReservation {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        let Ok(mut map) = self.sessions.lock() else {
+            return;
+        };
+        let reserved_by_self = matches!(
+            map.get(&self.id),
+            Some(PtyEntry::Starting { generation }) if *generation == self.generation
+        );
+        if reserved_by_self {
+            map.remove(&self.id);
+        }
+    }
+}
+
+struct PtyThreadDone(Sender<()>);
+
+enum PtyExitPoll {
+    Running,
+    Exited(i32),
+    Failed(String),
+}
+
+impl Drop for PtyThreadDone {
+    fn drop(&mut self) {
+        let _ = self.0.send(());
+    }
+}
+
+fn pty_thread_completion() -> (PtyThreadDone, Receiver<()>) {
+    let (tx, rx) = mpsc::channel();
+    (PtyThreadDone(tx), rx)
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -232,6 +351,8 @@ const TARGET_OS: &str = "unix";
 const TARGET_OS: &str = "windows";
 const INTERACTIVE_OUTPUT_FLUSH_MS: u64 = 16;
 const WORKER_OUTPUT_FLUSH_MS: u64 = 33;
+const PTY_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+const PTY_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 // Cap per emit so a fast producer (e.g. `cat hugefile`) cannot push a
 // single multi-megabyte event into the renderer's event queue. The
 // coalescer flushes early once `pending` crosses this threshold instead
@@ -243,6 +364,8 @@ const DEFAULT_PTY_COLS: u16 = 100;
 const DEFAULT_PTY_ROWS: u16 = 30;
 pub const MOBILE_TERMINAL_COLS: u16 = 56;
 pub const MOBILE_TERMINAL_ROWS: u16 = 24;
+
+static NEXT_PTY_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -368,6 +491,19 @@ pub(crate) fn pty_input_debug_log(app: &HostContext, message: impl AsRef<str>) {
         return;
     }
     let message = format!("[pty-input] {}", message.as_ref());
+    eprintln!("{message}");
+    let Some(path) = app
+        .data_dir_opt()
+        .map(|dir| dir.join("logs").join("debug.log"))
+    else {
+        return;
+    };
+    let line = format!("{} [rust] {message}\n", unix_ms());
+    let _ = append_line(&path, &line);
+}
+
+fn pty_lifecycle_log(app: &HostContext, message: impl AsRef<str>) {
+    let message = format!("[pty-lifecycle] {}", message.as_ref());
     eprintln!("{message}");
     let Some(path) = app
         .data_dir_opt()
@@ -525,11 +661,11 @@ fn emit_viewport_state(
         "id": id,
         "state": state,
     });
-    let owner_window = sessions
-        .inner
-        .lock()
-        .ok()
-        .and_then(|map| map.get(id).and_then(|session| session.owner_window.clone()));
+    let owner_window = sessions.inner.lock().ok().and_then(|map| {
+        map.get(id)
+            .and_then(PtyEntry::active)
+            .and_then(|session| session.owner_window.clone())
+    });
     match owner_window {
         Some(window) => crate::event_hub::publish_runtime_event_to_window(
             app,
@@ -736,16 +872,20 @@ fn persist_worker_output(
 }
 
 fn append_pty_output_buffer(
-    sessions: &Arc<Mutex<HashMap<String, PtySession>>>,
+    sessions: &Arc<Mutex<HashMap<String, PtyEntry>>>,
     id: &str,
+    generation: u64,
     data: &str,
 ) -> Option<Option<String>> {
     let Ok(mut map) = sessions.lock() else {
         return None;
     };
-    let Some(session) = map.get_mut(id) else {
+    let Some(session) = map.get_mut(id).and_then(PtyEntry::active_mut) else {
         return None;
     };
+    if session.generation != generation {
+        return None;
+    }
     session.output_buffer_bytes = session.output_buffer_bytes.saturating_add(data.len());
     session.output_buffer.push_back(data.to_string());
     while session.output_buffer_bytes > OUTPUT_REPLAY_MAX_BYTES {
@@ -760,12 +900,13 @@ fn append_pty_output_buffer(
 
 fn emit_pty_output(
     app: &HostContext,
-    sessions: &Arc<Mutex<HashMap<String, PtySession>>>,
+    sessions: &Arc<Mutex<HashMap<String, PtyEntry>>>,
     worker_buffer: Option<&Arc<Mutex<HashMap<String, String>>>>,
     id: &str,
+    generation: u64,
     data: String,
 ) {
-    let Some(owner_window) = append_pty_output_buffer(sessions, id, &data) else {
+    let Some(owner_window) = append_pty_output_buffer(sessions, id, generation, &data) else {
         return;
     };
     if let Some(worker_buffer) = worker_buffer {
@@ -787,6 +928,19 @@ fn emit_pty_output(
     }
 }
 
+fn emit_pty_exit(app: &HostContext, id: &str, exit_code: i32, owner_window: Option<String>) {
+    let payload = json!(PtyExitEvent {
+        id: id.to_string(),
+        exit_code,
+    });
+    match owner_window {
+        Some(window) => crate::event_hub::publish_runtime_event_to_window(
+            app, &window, "pty:exit", payload, "rust-pty",
+        ),
+        None => crate::event_hub::publish_runtime_event(app, "pty:exit", payload, "rust-pty"),
+    }
+}
+
 fn output_flush_interval_ms(id: &str) -> u64 {
     if worker_parts_from_pty_id(id).is_some() {
         WORKER_OUTPUT_FLUSH_MS
@@ -798,11 +952,14 @@ fn output_flush_interval_ms(id: &str) -> u64 {
 fn spawn_output_coalescer(
     app: HostContext,
     id: String,
-    sessions: Arc<Mutex<HashMap<String, PtySession>>>,
+    generation: u64,
+    sessions: Arc<Mutex<HashMap<String, PtyEntry>>>,
     worker_buffer: Option<Arc<Mutex<HashMap<String, String>>>>,
-) -> Sender<String> {
+) -> (Sender<String>, Receiver<()>) {
     let (tx, rx) = mpsc::channel::<String>();
+    let (done, done_rx) = pty_thread_completion();
     std::thread::spawn(move || {
+        let _done = done;
         while let Ok(first) = rx.recv() {
             let mut pending = first;
             let deadline = Instant::now() + Duration::from_millis(output_flush_interval_ms(&id));
@@ -813,6 +970,7 @@ fn spawn_output_coalescer(
                         &sessions,
                         worker_buffer.as_ref(),
                         &id,
+                        generation,
                         std::mem::take(&mut pending),
                     );
                 }
@@ -829,6 +987,7 @@ fn spawn_output_coalescer(
                                 &sessions,
                                 worker_buffer.as_ref(),
                                 &id,
+                                generation,
                                 std::mem::take(&mut pending),
                             );
                         }
@@ -836,7 +995,14 @@ fn spawn_output_coalescer(
                     Err(mpsc::RecvTimeoutError::Timeout) => break,
                     Err(mpsc::RecvTimeoutError::Disconnected) => {
                         if !pending.is_empty() {
-                            emit_pty_output(&app, &sessions, worker_buffer.as_ref(), &id, pending);
+                            emit_pty_output(
+                                &app,
+                                &sessions,
+                                worker_buffer.as_ref(),
+                                &id,
+                                generation,
+                                pending,
+                            );
                         }
                         return;
                     }
@@ -844,20 +1010,29 @@ fn spawn_output_coalescer(
             }
 
             if !pending.is_empty() {
-                emit_pty_output(&app, &sessions, worker_buffer.as_ref(), &id, pending);
+                emit_pty_output(
+                    &app,
+                    &sessions,
+                    worker_buffer.as_ref(),
+                    &id,
+                    generation,
+                    pending,
+                );
             }
         }
     });
-    tx
+    (tx, done_rx)
 }
 
 fn spawn_pty_input_writer(
     app: HostContext,
     id: String,
     mut writer: Box<dyn Write + Send>,
-) -> Sender<String> {
+) -> (Sender<String>, Receiver<()>) {
     let (tx, rx) = mpsc::channel::<String>();
+    let (done, done_rx) = pty_thread_completion();
     std::thread::spawn(move || {
+        let _done = done;
         let mut trace_seq = 0u64;
         while let Ok(mut data) = rx.recv() {
             while let Ok(next) = rx.try_recv() {
@@ -891,13 +1066,163 @@ fn spawn_pty_input_writer(
                 }
             }
         }
+        drop(writer);
     });
-    tx
+    (tx, done_rx)
+}
+
+fn wait_for_pty_thread(
+    app: &HostContext,
+    id: &str,
+    generation: u64,
+    thread_name: &str,
+    done: &Receiver<()>,
+    deadline: Instant,
+) {
+    let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+        pty_lifecycle_log(
+            app,
+            format!("shutdown timeout id={id} generation={generation} thread={thread_name}"),
+        );
+        return;
+    };
+    match done.recv_timeout(remaining) {
+        Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {}
+        Err(mpsc::RecvTimeoutError::Timeout) => pty_lifecycle_log(
+            app,
+            format!("shutdown timeout id={id} generation={generation} thread={thread_name}"),
+        ),
+    }
+}
+
+fn terminate_pty_child(
+    app: &HostContext,
+    id: &str,
+    generation: u64,
+    child: &mut (dyn Child + Send + Sync),
+    deadline: Instant,
+) {
+    if let Err(err) = child.kill() {
+        pty_lifecycle_log(
+            app,
+            format!("child kill failed id={id} generation={generation} error={err}"),
+        );
+    }
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(PTY_EXIT_POLL_INTERVAL);
+            }
+            Ok(None) => {
+                pty_lifecycle_log(
+                    app,
+                    format!("child exit timeout id={id} generation={generation}"),
+                );
+                return;
+            }
+            Err(err) => {
+                pty_lifecycle_log(
+                    app,
+                    format!("child wait failed id={id} generation={generation} error={err}"),
+                );
+                return;
+            }
+        }
+    }
+}
+
+fn shutdown_pty_session(
+    app: &HostContext,
+    id: &str,
+    session: PtySession,
+    terminate_child: bool,
+    wait_for_exit_watcher: bool,
+) {
+    let deadline = Instant::now() + PTY_SHUTDOWN_TIMEOUT;
+    let PtySession {
+        generation,
+        write_tx,
+        master,
+        mut child,
+        writer_done,
+        reader_done,
+        output_done,
+        exit_done,
+        ..
+    } = session;
+
+    pty_lifecycle_log(
+        app,
+        format!("shutdown start id={id} generation={generation}"),
+    );
+
+    // Once the map entry has been removed, the old watcher must observe that
+    // fact before a same-id replacement is allowed to appear. Otherwise it can
+    // accidentally poll or remove the replacement (an ABA race).
+    if wait_for_exit_watcher {
+        wait_for_pty_thread(app, id, generation, "exit", &exit_done, deadline);
+    }
+
+    if terminate_child {
+        terminate_pty_child(app, id, generation, child.as_mut(), deadline);
+    }
+
+    // Close input first and let its owner thread release the pipe. Keep the
+    // output reader alive while ClosePseudoConsole runs so ConPTY can drain its
+    // final output, then wait for both reader and coalescer to finish before a
+    // same-id session is created.
+    drop(write_tx);
+    wait_for_pty_thread(app, id, generation, "writer", &writer_done, deadline);
+    drop(master);
+    wait_for_pty_thread(app, id, generation, "reader", &reader_done, deadline);
+    wait_for_pty_thread(app, id, generation, "output", &output_done, deadline);
+    drop(child);
+
+    pty_lifecycle_log(
+        app,
+        format!("shutdown done id={id} generation={generation}"),
+    );
+}
+
+fn take_active_pty_session(state: &PtyState, id: &str) -> Result<Option<PtySession>, CommandError> {
+    let entry = state
+        .inner
+        .lock()
+        .map_err(|e| CommandError {
+            message: e.to_string(),
+        })?
+        .remove(id);
+    Ok(match entry {
+        Some(PtyEntry::Active(session)) => Some(session),
+        Some(PtyEntry::Starting { .. }) | None => None,
+    })
+}
+
+fn take_active_pty_session_for_generation(
+    sessions: &Arc<Mutex<HashMap<String, PtyEntry>>>,
+    id: &str,
+    generation: u64,
+) -> Option<PtySession> {
+    let Ok(mut map) = sessions.lock() else {
+        return None;
+    };
+    let is_current = matches!(
+        map.get(id),
+        Some(PtyEntry::Active(session)) if session.generation == generation
+    );
+    if !is_current {
+        return None;
+    }
+    match map.remove(id) {
+        Some(PtyEntry::Active(session)) => Some(session),
+        _ => None,
+    }
 }
 
 pub(crate) fn start_pty_session(
     app: &HostContext,
-    map_handle: Arc<Mutex<HashMap<String, PtySession>>>,
+    map_handle: Arc<Mutex<HashMap<String, PtyEntry>>>,
     worker_buffer_handle: Option<Arc<Mutex<HashMap<String, String>>>>,
     options: CreatePtyOptions,
     owner_window: Option<String>,
@@ -907,16 +1232,8 @@ pub(crate) fn start_pty_session(
             message: format!("invalid pty id: {:?}", options.id),
         });
     }
-    {
-        let map = map_handle.lock().map_err(|e| CommandError {
-            message: e.to_string(),
-        })?;
-        if map.contains_key(&options.id) {
-            return Err(CommandError {
-                message: format!("pty session {} already exists", options.id),
-            });
-        }
-    }
+    let mut reservation = PtyStartReservation::reserve(Arc::clone(&map_handle), &options.id)?;
+    let generation = reservation.generation;
     let pty_system = native_pty_system();
     let cols = options
         .cols
@@ -943,8 +1260,9 @@ pub(crate) fn start_pty_session(
     pty_input_debug_log(
         app,
         format!(
-            "session-start id={} term={:?} colorterm={:?}",
+            "session-start id={} generation={} term={:?} colorterm={:?}",
             options.id,
+            generation,
             cmd.get_env("TERM").and_then(|value| value.to_str()),
             cmd.get_env("COLORTERM").and_then(|value| value.to_str())
         ),
@@ -957,45 +1275,70 @@ pub(crate) fn start_pty_session(
     let writer = pair.master.take_writer().map_err(|e| CommandError {
         message: e.to_string(),
     })?;
-    let write_tx = spawn_pty_input_writer(app.clone(), options.id.clone(), writer);
+    let (write_tx, writer_done) = spawn_pty_input_writer(app.clone(), options.id.clone(), writer);
     let mut reader = pair.master.try_clone_reader().map_err(|e| CommandError {
         message: e.to_string(),
     })?;
-
-    // Insert the session before kicking off the exit watcher so the
-    // watcher can find it.
-    {
-        let mut map = map_handle.lock().map_err(|e| CommandError {
-            message: e.to_string(),
-        })?;
-        map.insert(
-            options.id.clone(),
-            PtySession {
-                write_tx,
-                master: pair.master,
-                child,
-                cwd: options.cwd.clone(),
-                kind: options.r#type.clone(),
-                viewport: desktop_viewport_state(cols, rows),
-                output_buffer: VecDeque::new(),
-                output_buffer_bytes: 0,
-                owner_window,
-            },
-        );
-    }
 
     // Reader thread: pump bytes from PTY → coalesced pty:output events.
     // Lossy UTF-8 because xterm.js consumes strings and PTYs can split
     // codepoints across reads; renderer can stitch via terminal state.
     let id_for_reader = options.id.clone();
     let app_for_reader = app.clone();
-    let output_tx = spawn_output_coalescer(
+    let (output_tx, output_done) = spawn_output_coalescer(
         app.clone(),
         id_for_reader.clone(),
+        generation,
         Arc::clone(&map_handle),
         worker_buffer_handle.clone(),
     );
+    let (reader_thread_done, reader_done) = pty_thread_completion();
+    let (exit_thread_done, exit_done) = pty_thread_completion();
+    let map_for_exit = Arc::clone(&map_handle);
+
+    let session = PtySession {
+        generation,
+        write_tx,
+        master: pair.master,
+        child,
+        writer_done,
+        reader_done,
+        output_done,
+        exit_done,
+        cwd: options.cwd.clone(),
+        kind: options.r#type.clone(),
+        viewport: desktop_viewport_state(cols, rows),
+        output_buffer: VecDeque::new(),
+        output_buffer_bytes: 0,
+        owner_window,
+    };
+
+    // Commit only if our reservation is still present. A stop arriving while
+    // CreateProcessW was running removes the reservation and cancels this
+    // start instead of allowing a just-closed panel to leak a new PTY.
+    let mut map = map_handle.lock().map_err(|e| CommandError {
+        message: e.to_string(),
+    })?;
+    let reservation_is_current = matches!(
+        map.get(&options.id),
+        Some(PtyEntry::Starting { generation: current }) if *current == generation
+    );
+    if !reservation_is_current {
+        drop(map);
+        drop(output_tx);
+        drop(reader);
+        drop(reader_thread_done);
+        drop(exit_thread_done);
+        shutdown_pty_session(app, &options.id, session, true, false);
+        return Err(CommandError {
+            message: format!("pty session {} start was cancelled", options.id),
+        });
+    }
+    map.insert(options.id.clone(), PtyEntry::Active(session));
+    reservation.commit();
+
     std::thread::spawn(move || {
+        let _done = reader_thread_done;
         let mut buf = [0u8; 4096];
         loop {
             match reader.read(&mut buf) {
@@ -1005,7 +1348,7 @@ pub(crate) fn start_pty_session(
                         pty_output_debug_log(
                             &app_for_reader,
                             format!(
-                                "reader id={id_for_reader} {}",
+                                "reader id={id_for_reader} generation={generation} {}",
                                 describe_pty_bytes(&buf[..n])
                             ),
                         );
@@ -1018,59 +1361,83 @@ pub(crate) fn start_pty_session(
                 Err(_) => break,
             }
         }
+        drop(output_tx);
+        drop(reader);
     });
 
     // Exit watcher: poll try_wait on the session's child every 100ms,
-    // emit pty:exit with the exit code, and remove the session entry.
+    // emit pty:exit, and tear down only the generation that it owns.
     let id_for_exit = options.id.clone();
     let app_for_exit = app.clone();
     std::thread::spawn(move || {
+        let _done = exit_thread_done;
         loop {
-            let status = {
-                let mut map = match map_handle.lock() {
+            let poll = {
+                let mut map = match map_for_exit.lock() {
                     Ok(m) => m,
-                    Err(_) => break,
+                    Err(err) => {
+                        pty_lifecycle_log(
+                            &app_for_exit,
+                            format!(
+                                "exit watcher lock failed id={id_for_exit} generation={generation} error={err}"
+                            ),
+                        );
+                        break;
+                    }
                 };
-                let session = match map.get_mut(&id_for_exit) {
-                    Some(s) => s,
-                    // Killed externally — nothing to wait on.
-                    None => break,
+                let session = match map.get_mut(&id_for_exit).and_then(PtyEntry::active_mut) {
+                    Some(session) if session.generation == generation => session,
+                    _ => break,
                 };
                 match session.child.try_wait() {
-                    Ok(Some(status)) => Some((status, session.owner_window.clone())),
-                    Ok(None) => None,
-                    Err(_) => break,
+                    Ok(Some(status)) => PtyExitPoll::Exited(status.exit_code() as i32),
+                    Ok(None) => PtyExitPoll::Running,
+                    Err(err) => PtyExitPoll::Failed(err.to_string()),
                 }
             };
-            if let Some((s, owner_window)) = status {
-                let code = s.exit_code() as i32;
-                let payload = json!(PtyExitEvent {
-                    id: id_for_exit.clone(),
-                    exit_code: code,
-                });
-                match owner_window {
-                    Some(window) => crate::event_hub::publish_runtime_event_to_window(
-                        &app_for_exit,
-                        &window,
-                        "pty:exit",
-                        payload,
-                        "rust-pty",
-                    ),
-                    None => crate::event_hub::publish_runtime_event(
-                        &app_for_exit,
-                        "pty:exit",
-                        payload,
-                        "rust-pty",
-                    ),
+            match poll {
+                PtyExitPoll::Running => {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
                 }
-                if let Ok(mut map) = map_handle.lock() {
-                    map.remove(&id_for_exit);
+                PtyExitPoll::Exited(code) => {
+                    if let Some(session) = take_active_pty_session_for_generation(
+                        &map_for_exit,
+                        &id_for_exit,
+                        generation,
+                    ) {
+                        let owner_window = session.owner_window.clone();
+                        emit_pty_exit(&app_for_exit, &id_for_exit, code, owner_window);
+                        shutdown_pty_session(&app_for_exit, &id_for_exit, session, false, false);
+                    }
+                    break;
                 }
-                break;
+                PtyExitPoll::Failed(err) => {
+                    pty_lifecycle_log(
+                        &app_for_exit,
+                        format!(
+                            "exit watcher failed id={id_for_exit} generation={generation} error={err}"
+                        ),
+                    );
+                    if let Some(session) = take_active_pty_session_for_generation(
+                        &map_for_exit,
+                        &id_for_exit,
+                        generation,
+                    ) {
+                        let owner_window = session.owner_window.clone();
+                        emit_pty_exit(&app_for_exit, &id_for_exit, 1, owner_window);
+                        shutdown_pty_session(&app_for_exit, &id_for_exit, session, true, false);
+                    }
+                    break;
+                }
             }
-            std::thread::sleep(std::time::Duration::from_millis(100));
         }
     });
+    drop(map);
+
+    pty_lifecycle_log(
+        app,
+        format!("session started id={} generation={generation}", options.id),
+    );
 
     Ok(options.id)
 }
@@ -1189,6 +1556,7 @@ pub(crate) fn read_pty_output_buffer(state: &PtyState, id: &str) -> Result<Strin
         message: e.to_string(),
     })?;
     map.get(id)
+        .and_then(PtyEntry::active)
         .map(pty_output_buffer_text)
         .ok_or_else(|| CommandError {
             message: format!("pty session {id} not found"),
@@ -1251,6 +1619,7 @@ pub(crate) fn get_pty_viewport_state(
         message: e.to_string(),
     })?;
     map.get(id)
+        .and_then(PtyEntry::active)
         .map(|session| session.viewport.clone())
         .ok_or_else(|| CommandError {
             message: format!("pty session {id} not found"),
@@ -1500,12 +1869,13 @@ pub fn pty_kill(
     )
 }
 
-pub(crate) fn kill_pty_session(state: &PtyState, id: &str) -> Result<(), CommandError> {
-    let mut map = state.inner.lock().map_err(|e| CommandError {
-        message: e.to_string(),
-    })?;
-    if let Some(mut session) = map.remove(id) {
-        let _ = session.child.kill();
+pub(crate) fn kill_pty_session(
+    app: &HostContext,
+    state: &PtyState,
+    id: &str,
+) -> Result<(), CommandError> {
+    if let Some(session) = take_active_pty_session(state, id)? {
+        shutdown_pty_session(app, id, session, true, true);
     }
     Ok(())
 }
@@ -1515,27 +1885,10 @@ pub(crate) fn kill_pty_session_with_exit(
     state: &PtyState,
     id: &str,
 ) -> Result<(), CommandError> {
-    let mut map = state.inner.lock().map_err(|e| CommandError {
-        message: e.to_string(),
-    })?;
-    let owner_window = if let Some(mut session) = map.remove(id) {
-        let _ = session.child.kill();
-        Some(session.owner_window)
-    } else {
-        None
-    };
-    drop(map);
-    if let Some(owner_window) = owner_window {
-        let payload = json!(PtyExitEvent {
-            id: id.to_string(),
-            exit_code: 0,
-        });
-        match owner_window {
-            Some(window) => crate::event_hub::publish_runtime_event_to_window(
-                app, &window, "pty:exit", payload, "rust-pty",
-            ),
-            None => crate::event_hub::publish_runtime_event(app, "pty:exit", payload, "rust-pty"),
-        }
+    if let Some(session) = take_active_pty_session(state, id)? {
+        let owner_window = session.owner_window.clone();
+        shutdown_pty_session(app, id, session, true, true);
+        emit_pty_exit(app, id, 0, owner_window);
     }
     Ok(())
 }
@@ -1558,11 +1911,11 @@ pub async fn pty_restart(
     ) {
         return result;
     }
-    let handle = state.handle();
+    let state = (*state).clone();
     crate::async_rt::spawn_blocking(move || {
         pty_restart_impl(
             crate::host_context::HostContext::from_app(app),
-            handle,
+            state,
             id,
             cwd,
             shell,
@@ -1581,8 +1934,7 @@ pub(crate) async fn pty_restart_native(
     cwd: String,
     shell: Option<String>,
 ) -> Result<bool, CommandError> {
-    let handle = state.handle();
-    crate::async_rt::spawn_blocking(move || pty_restart_impl(app, handle, id, cwd, shell))
+    crate::async_rt::spawn_blocking(move || pty_restart_impl(app, state, id, cwd, shell))
         .await
         .map_err(|e| CommandError {
             message: format!("pty.restart worker failed: {e}"),
@@ -1591,28 +1943,22 @@ pub(crate) async fn pty_restart_native(
 
 fn pty_restart_impl(
     app: HostContext,
-    handle: Arc<Mutex<HashMap<String, PtySession>>>,
+    state: PtyState,
     id: String,
     cwd: String,
     shell: Option<String>,
 ) -> Result<bool, CommandError> {
-    let (kind, viewport, owner_window) = {
-        let mut map = handle.lock().map_err(|e| CommandError {
-            message: e.to_string(),
-        })?;
-        let Some(mut session) = map.remove(&id) else {
-            return Ok(false);
-        };
-        let kind = session.kind.clone();
-        let viewport = session.viewport.clone();
-        let owner_window = session.owner_window.clone();
-        let _ = session.child.kill();
-        (kind, viewport, owner_window)
+    let Some(session) = take_active_pty_session(&state, &id)? else {
+        return Ok(false);
     };
+    let kind = session.kind.clone();
+    let viewport = session.viewport.clone();
+    let owner_window = session.owner_window.clone();
+    shutdown_pty_session(&app, &id, session, true, true);
 
     start_pty_session(
         &app,
-        Arc::clone(&handle),
+        state.handle(),
         None,
         CreatePtyOptions {
             id: id.clone(),
@@ -1631,10 +1977,10 @@ fn pty_restart_impl(
         owner_window,
     )?;
     {
-        let mut map = handle.lock().map_err(|e| CommandError {
+        let mut map = state.inner.lock().map_err(|e| CommandError {
             message: e.to_string(),
         })?;
-        if let Some(session) = map.get_mut(&id) {
+        if let Some(session) = map.get_mut(&id).and_then(PtyEntry::active_mut) {
             session.viewport = viewport;
         }
     }
@@ -1645,7 +1991,10 @@ pub(crate) fn get_pty_cwd(state: &PtyState, id: &str) -> Result<Option<String>, 
     let map = state.inner.lock().map_err(|e| CommandError {
         message: e.to_string(),
     })?;
-    Ok(map.get(id).map(|session| session.cwd.clone()))
+    Ok(map
+        .get(id)
+        .and_then(PtyEntry::active)
+        .map(|session| session.cwd.clone()))
 }
 
 #[cfg(feature = "desktop")]
@@ -1667,6 +2016,262 @@ pub fn pty_get_cwd(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use portable_pty::{ChildKiller, ExitStatus};
+    use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+
+    struct FakeMasterPty {
+        registry: Option<Arc<Mutex<HashMap<String, PtyEntry>>>>,
+        dropped_outside_registry_lock: Option<Arc<AtomicBool>>,
+    }
+
+    impl FakeMasterPty {
+        fn plain() -> Self {
+            Self {
+                registry: None,
+                dropped_outside_registry_lock: None,
+            }
+        }
+
+        fn with_drop_probe(
+            registry: Arc<Mutex<HashMap<String, PtyEntry>>>,
+            dropped_outside_registry_lock: Arc<AtomicBool>,
+        ) -> Self {
+            Self {
+                registry: Some(registry),
+                dropped_outside_registry_lock: Some(dropped_outside_registry_lock),
+            }
+        }
+    }
+
+    impl Drop for FakeMasterPty {
+        fn drop(&mut self) {
+            let (Some(registry), Some(dropped_outside_registry_lock)) =
+                (&self.registry, &self.dropped_outside_registry_lock)
+            else {
+                return;
+            };
+            dropped_outside_registry_lock
+                .store(registry.try_lock().is_ok(), AtomicOrdering::SeqCst);
+        }
+    }
+
+    impl MasterPty for FakeMasterPty {
+        fn resize(&self, _size: PtySize) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn get_size(&self) -> anyhow::Result<PtySize> {
+            Ok(PtySize {
+                rows: DEFAULT_PTY_ROWS,
+                cols: DEFAULT_PTY_COLS,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+        }
+
+        fn try_clone_reader(&self) -> anyhow::Result<Box<dyn Read + Send>> {
+            Ok(Box::new(std::io::Cursor::new(Vec::<u8>::new())))
+        }
+
+        fn take_writer(&self) -> anyhow::Result<Box<dyn Write + Send>> {
+            Ok(Box::new(std::io::sink()))
+        }
+
+        #[cfg(unix)]
+        fn process_group_leader(&self) -> Option<libc::pid_t> {
+            None
+        }
+
+        #[cfg(unix)]
+        fn as_raw_fd(&self) -> Option<std::os::fd::RawFd> {
+            None
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct FakeChild {
+        killed: Arc<AtomicBool>,
+    }
+
+    impl FakeChild {
+        fn new() -> Self {
+            Self {
+                killed: Arc::new(AtomicBool::new(false)),
+            }
+        }
+    }
+
+    impl ChildKiller for FakeChild {
+        fn kill(&mut self) -> std::io::Result<()> {
+            self.killed.store(true, AtomicOrdering::SeqCst);
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
+            Box::new(self.clone())
+        }
+    }
+
+    impl Child for FakeChild {
+        fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
+            Ok(self
+                .killed
+                .load(AtomicOrdering::SeqCst)
+                .then(|| ExitStatus::with_exit_code(0)))
+        }
+
+        fn wait(&mut self) -> std::io::Result<ExitStatus> {
+            self.killed.store(true, AtomicOrdering::SeqCst);
+            Ok(ExitStatus::with_exit_code(0))
+        }
+
+        fn process_id(&self) -> Option<u32> {
+            Some(1)
+        }
+
+        #[cfg(windows)]
+        fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+            None
+        }
+    }
+
+    fn disconnected_completion() -> Receiver<()> {
+        let (tx, rx) = mpsc::channel();
+        drop(tx);
+        rx
+    }
+
+    fn fake_session(generation: u64, master: FakeMasterPty) -> PtySession {
+        let (write_tx, write_rx) = mpsc::channel::<String>();
+        drop(write_rx);
+        PtySession {
+            generation,
+            write_tx,
+            master: Box::new(master),
+            child: Box::new(FakeChild::new()),
+            writer_done: disconnected_completion(),
+            reader_done: disconnected_completion(),
+            output_done: disconnected_completion(),
+            exit_done: disconnected_completion(),
+            cwd: ".".into(),
+            kind: "terminal".into(),
+            viewport: desktop_viewport_state(DEFAULT_PTY_COLS, DEFAULT_PTY_ROWS),
+            output_buffer: VecDeque::new(),
+            output_buffer_bytes: 0,
+            owner_window: None,
+        }
+    }
+
+    #[test]
+    fn start_reservation_is_atomic_and_released_on_drop() {
+        let state = PtyState::default();
+        let first = PtyStartReservation::reserve(state.handle(), "same-id").unwrap();
+
+        let duplicate = PtyStartReservation::reserve(state.handle(), "same-id");
+        assert!(duplicate.is_err());
+        assert_eq!(
+            state
+                .inner
+                .lock()
+                .unwrap()
+                .get("same-id")
+                .map(PtyEntry::generation),
+            Some(first.generation)
+        );
+
+        drop(first);
+        assert!(!state.inner.lock().unwrap().contains_key("same-id"));
+    }
+
+    #[test]
+    fn stale_generation_cannot_append_to_or_remove_replacement() {
+        let state = PtyState::default();
+        state.inner.lock().unwrap().insert(
+            "same-id".into(),
+            PtyEntry::Active(fake_session(2, FakeMasterPty::plain())),
+        );
+
+        assert_eq!(
+            append_pty_output_buffer(&state.inner, "same-id", 1, "stale"),
+            None
+        );
+        assert!(take_active_pty_session_for_generation(&state.inner, "same-id", 1).is_none());
+        assert_eq!(
+            append_pty_output_buffer(&state.inner, "same-id", 2, "current"),
+            Some(None)
+        );
+
+        let current = take_active_pty_session_for_generation(&state.inner, "same-id", 2)
+            .expect("current generation should still be registered");
+        assert_eq!(
+            current.output_buffer.into_iter().collect::<String>(),
+            "current"
+        );
+    }
+
+    #[test]
+    fn taking_session_releases_registry_lock_before_resource_drop() {
+        let state = PtyState::default();
+        let dropped_outside_registry_lock = Arc::new(AtomicBool::new(false));
+        state.inner.lock().unwrap().insert(
+            "restart-id".into(),
+            PtyEntry::Active(fake_session(
+                3,
+                FakeMasterPty::with_drop_probe(
+                    state.handle(),
+                    Arc::clone(&dropped_outside_registry_lock),
+                ),
+            )),
+        );
+
+        let session = take_active_pty_session(&state, "restart-id")
+            .unwrap()
+            .expect("active session should be removed");
+        drop(session);
+
+        assert!(dropped_outside_registry_lock.load(AtomicOrdering::SeqCst));
+    }
+
+    #[cfg(all(target_os = "windows", not(feature = "desktop")))]
+    #[test]
+    fn rapid_windows_conpty_restart_reuses_id_safely() {
+        use crate::event_hub::RuntimeEventHubState;
+        use crate::host_context::HeadlessHost;
+
+        let sink: crate::sidecar::EventSink = Arc::new(|_, _| {});
+        let mut host = HeadlessHost::new(None, sink);
+        host.manage(RuntimeEventHubState::default());
+        let app = HostContext::from_headless(Arc::new(host));
+        let state = PtyState::default();
+
+        for iteration in 0..8 {
+            let id = "rapid-restart";
+            start_pty_session(
+                &app,
+                state.handle(),
+                None,
+                CreatePtyOptions {
+                    id: id.into(),
+                    cwd: ".".into(),
+                    r#type: "terminal".into(),
+                    shell: None,
+                    command: Some("cmd.exe".into()),
+                    args: Some(vec!["/Q".into(), "/K".into()]),
+                    cols: Some(80),
+                    rows: Some(24),
+                    agent_preset: None,
+                    custom_env: None,
+                    per_terminal_history: None,
+                    history_key: None,
+                },
+                None,
+            )
+            .unwrap_or_else(|err| panic!("iteration {iteration} failed to start: {err:?}"));
+            kill_pty_session(&app, &state, id)
+                .unwrap_or_else(|err| panic!("iteration {iteration} failed to stop: {err:?}"));
+            assert!(state.inner.lock().unwrap().is_empty());
+        }
+    }
 
     #[test]
     fn ids_must_be_non_empty_and_non_control() {

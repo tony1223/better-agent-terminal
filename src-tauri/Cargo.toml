@@ -79,6 +79,12 @@ rustls-pki-types = "1.14.1"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Memory"] }
 
+[dev-dependencies]
+# portable-pty exposes anyhow::Result in its public mockable traits. Keep this
+# test-only direct dependency so PTY lifecycle regression fakes can implement
+# MasterPty without pulling anyhow into the production dependency surface.
+anyhow = "1"
+
 # We keep the application small for the first release: the host commands we
 # expose are read/write JSON config files in the per-user data directory and
 # open external URLs. Heavy lifting (PTY, agent SDK) stays in the Node

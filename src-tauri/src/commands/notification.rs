@@ -19,11 +19,14 @@ use serde_json::{json, Value};
 #[cfg(feature = "desktop")]
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 
+#[cfg(feature = "desktop")]
+use crate::commands::app::log_tauri;
 use crate::host_context::HostContext;
 #[cfg(feature = "desktop")]
 use crate::window_registry;
 
 const MAX_ENTRIES: usize = 50;
+pub const AGENT_SESSION_COLLISION_PREFIX: &str = "BAT_AGENT_SESSION_COLLISION";
 static NEXT_NOTIFICATION_ID: AtomicU64 = AtomicU64::new(0);
 
 // Mirror renderer/src/stores/notification-store.ts NotificationEntry. The
@@ -92,9 +95,16 @@ pub struct AgentNotificationSession {
     pub is_resting: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AgentSessionOwner {
+    window_id: Option<String>,
+    profile_id: Option<String>,
+}
+
 #[derive(Default, Clone)]
 pub struct AgentNotificationState {
     inner: Arc<Mutex<HashMap<String, AgentNotificationSession>>>,
+    owners: Arc<Mutex<HashMap<String, AgentSessionOwner>>>,
 }
 
 impl NotificationState {
@@ -110,6 +120,10 @@ impl NotificationState {
 impl AgentNotificationState {
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, AgentNotificationSession>> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn lock_owners(&self) -> std::sync::MutexGuard<'_, HashMap<String, AgentSessionOwner>> {
+        self.owners.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
@@ -261,14 +275,11 @@ pub fn register_agent_session_from_options(
     window_id: &str,
     session_id: &str,
     options: Option<&Value>,
-) {
+) -> Result<(), String> {
     if session_id.trim().is_empty() {
-        return;
+        return Ok(());
     }
     let cwd = effective_notification_cwd(options).unwrap_or_default();
-    if cwd.is_empty() {
-        return;
-    }
     // The window->profile map is GUI-only; headless sessions carry no local
     // window, so the profile id is supplied by the remote session context.
     #[cfg(feature = "desktop")]
@@ -305,36 +316,151 @@ pub fn register_agent_session_from_options(
     let worktree_branch = uses_worktree
         .then(|| options.and_then(|value| string_option(value, "worktreeBranch")))
         .flatten();
+    let next = AgentNotificationSession {
+        window_id: Some(window_id.to_string()),
+        profile_id,
+        workspace_id,
+        workspace_name,
+        cwd,
+        agent_kind,
+        model,
+        permission_mode,
+        effort,
+        auto_compact_window,
+        sdk_session_id,
+        codex_sandbox_mode,
+        codex_approval_policy,
+        latest_meta: None,
+        original_cwd,
+        worktree_path,
+        worktree_branch,
+        auto_continue: Some(default_auto_continue()),
+        is_resting: false,
+    };
+    let requested_owner = AgentSessionOwner {
+        window_id: next.window_id.clone(),
+        profile_id: next.profile_id.clone(),
+    };
     let state = app.state::<AgentNotificationState>();
-    state.lock().insert(
-        session_id.to_string(),
-        AgentNotificationSession {
-            window_id: Some(window_id.to_string()),
-            profile_id,
-            workspace_id,
-            workspace_name,
-            cwd,
-            agent_kind,
-            model,
-            permission_mode,
-            effort,
-            auto_compact_window,
-            sdk_session_id,
-            codex_sandbox_mode,
-            codex_approval_policy,
-            latest_meta: None,
-            original_cwd,
-            worktree_path,
-            worktree_branch,
-            auto_continue: Some(default_auto_continue()),
-            is_resting: false,
-        },
-    );
+    let collision = {
+        let mut owners = state.lock_owners();
+        let collision = owners.get(session_id).and_then(|existing| {
+            let owner_is_live = agent_session_owner_window_is_live(app, existing);
+            agent_session_collision_message(existing, &requested_owner, session_id, owner_is_live)
+        });
+        if collision.is_none() {
+            owners.insert(session_id.to_string(), requested_owner);
+        }
+        collision
+    };
+    if let Some(message) = collision {
+        log_agent_session_collision(app, &message);
+        return Err(message);
+    }
+    // Ownership is independent of notification metadata. A malformed or
+    // legacy start request without cwd may fail later in the runtime, but it
+    // still has to claim its process-wide session id above.
+    if next.cwd.is_empty() {
+        return Ok(());
+    }
+    state.lock().insert(session_id.to_string(), next);
+    Ok(())
+}
+
+fn agent_session_collision_message(
+    existing: &AgentSessionOwner,
+    requested: &AgentSessionOwner,
+    session_id: &str,
+    owner_is_live: bool,
+) -> Option<String> {
+    let same_window = existing.window_id == requested.window_id;
+    let same_profile = existing.profile_id == requested.profile_id;
+    if same_window && same_profile {
+        return None;
+    }
+    // A closed window from the same profile may be safely re-attached in a
+    // newly-created window. A different profile is never allowed to inherit
+    // that runtime, even when the old owner window has already closed.
+    if same_profile && !owner_is_live {
+        return None;
+    }
+    let short_session_id = session_id.chars().take(8).collect::<String>();
+    Some(format!(
+        "{AGENT_SESSION_COLLISION_PREFIX}: session {short_session_id} is already owned by profile={} window={}; requested profile={} window={}. BAT blocked the attachment to prevent agent conversations from mixing.",
+        existing.profile_id.as_deref().unwrap_or("unknown"),
+        existing.window_id.as_deref().unwrap_or("unknown"),
+        requested.profile_id.as_deref().unwrap_or("unknown"),
+        requested.window_id.as_deref().unwrap_or("unknown"),
+    ))
+}
+
+#[cfg(feature = "desktop")]
+fn agent_session_owner_window_is_live(app: &HostContext, owner: &AgentSessionOwner) -> bool {
+    owner
+        .window_id
+        .as_deref()
+        .is_some_and(|window_id| app.app().get_webview_window(window_id).is_some())
+}
+
+#[cfg(not(feature = "desktop"))]
+fn agent_session_owner_window_is_live(_app: &HostContext, _owner: &AgentSessionOwner) -> bool {
+    false
+}
+
+#[cfg(feature = "desktop")]
+fn log_agent_session_collision(app: &HostContext, message: &str) {
+    log_tauri(app, &format!("[agent-session] WARNING {message}"));
+}
+
+#[cfg(not(feature = "desktop"))]
+fn log_agent_session_collision(_app: &HostContext, _message: &str) {}
+
+#[cfg(feature = "desktop")]
+pub fn ensure_agent_session_access(
+    app: &HostContext,
+    window_id: &str,
+    session_id: &str,
+) -> Result<(), String> {
+    let requested = AgentSessionOwner {
+        window_id: Some(window_id.to_string()),
+        profile_id: Some(window_registry::get_entry(app.app(), window_id).profile_id),
+    };
+    let state = app.state::<AgentNotificationState>();
+    let (collision, transferred) = {
+        let mut owners = state.lock_owners();
+        let Some(existing) = owners.get(session_id).cloned() else {
+            owners.insert(session_id.to_string(), requested);
+            return Ok(());
+        };
+        let owner_is_live = agent_session_owner_window_is_live(app, &existing);
+        let collision =
+            agent_session_collision_message(&existing, &requested, session_id, owner_is_live);
+        let transferred = collision.is_none() && existing.window_id != requested.window_id;
+        if transferred {
+            // Same profile, old window gone: transfer event ownership before a
+            // read-only state probe decides it can reuse the live runtime.
+            owners.insert(session_id.to_string(), requested.clone());
+        }
+        (collision, transferred)
+    };
+    if let Some(message) = collision {
+        log_agent_session_collision(app, &message);
+        Err(message)
+    } else {
+        if transferred {
+            if let Some(session) = state.lock().get_mut(session_id) {
+                session.window_id = requested.window_id;
+                session.profile_id = requested.profile_id;
+            }
+        }
+        Ok(())
+    }
 }
 
 pub fn unregister_agent_session(app: &HostContext, session_id: &str) {
     if let Some(state) = app.try_state::<AgentNotificationState>() {
         state.lock().remove(session_id);
+        state.lock_owners().remove(session_id);
     }
 }
 
@@ -874,6 +1000,37 @@ mod tests {
         assert_eq!(value["max"], 0);
         assert_eq!(value["used"], 0);
         assert_eq!(value["prompt"], "");
+    }
+
+    fn sample_agent_owner(window_id: &str, profile_id: &str) -> AgentSessionOwner {
+        AgentSessionOwner {
+            window_id: Some(window_id.into()),
+            profile_id: Some(profile_id.into()),
+        }
+    }
+
+    #[test]
+    fn agent_session_owner_blocks_cross_window_and_cross_profile_collisions() {
+        let existing = sample_agent_owner("window-a", "profile-a");
+        let same_owner = sample_agent_owner("window-a", "profile-a");
+        assert!(
+            agent_session_collision_message(&existing, &same_owner, "session-1", true).is_none()
+        );
+
+        let live_sibling = sample_agent_owner("window-b", "profile-a");
+        assert!(
+            agent_session_collision_message(&existing, &live_sibling, "session-1", true).is_some()
+        );
+        assert!(
+            agent_session_collision_message(&existing, &live_sibling, "session-1", false).is_none()
+        );
+
+        let other_profile = sample_agent_owner("window-b", "profile-b");
+        let error = agent_session_collision_message(&existing, &other_profile, "session-1", false)
+            .expect("cross-profile ownership must remain isolated");
+        assert!(error.starts_with(AGENT_SESSION_COLLISION_PREFIX));
+        assert!(error.contains("profile=profile-a"));
+        assert!(error.contains("profile=profile-b"));
     }
 
     #[test]

@@ -96,6 +96,10 @@ function formatUnknownError(error: unknown): string {
   }
 }
 
+function isAgentSessionCollision(message: string): boolean {
+  return message.includes('BAT_AGENT_SESSION_COLLISION')
+}
+
 // The host caps the claude.sendMessage RPC at SESSION_TIMEOUT (~5 min), but a
 // long agent turn (e.g. one that triggers a slow auto-compaction) legitimately
 // runs past that: it keeps streaming over claude:* events and completes on
@@ -1770,7 +1774,13 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
       } catch (err: unknown) {
         if (!cancelled) {
           setIsResumingHistory(false)
-          dlog(`${stag} mount effect init failed: ${err instanceof Error ? err.message : String(err)}`)
+          const message = formatUnknownError(err)
+          if (isAgentSessionCollision(message)) {
+            const replacementId = workspaceStore.repairTerminalIdentityCollision(sessionId)
+            dlog(`${stag} repaired duplicate profile session identity replacement=${replacementId?.slice(0, 8) || 'failed'} detail=${message}`)
+            return
+          }
+          dlog(`${stag} mount effect init failed: ${message}`)
         }
       }
     })()

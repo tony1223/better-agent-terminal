@@ -78,6 +78,11 @@ export function ensureSession(sessionId) {
       // that prompt just because the previous result frame has not fully
       // unwound yet.
       sendQueue: null,
+      // Idempotency records for renderer-originated sends. A Tauri/remote RPC
+      // may time out while the SDK turn keeps running; retrying the same
+      // clientMessageId must acknowledge the accepted turn instead of
+      // queueing the prompt a second time.
+      clientMessageRequests: new Map(),
       // Cached usage stats updated from stream_event message_start /
       // message_delta + the final SDKResultSuccess.usage. Surfaced to
       // the renderer via claude.getContextUsage between turns; null

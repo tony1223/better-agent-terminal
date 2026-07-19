@@ -6,6 +6,8 @@
 // avoids repeated macOS Keychain prompts during normal profile reads/writes.
 
 use crate::app_data;
+#[cfg(feature = "desktop")]
+use crate::commands::app::log_tauri;
 use crate::electron_safe_storage::decrypt_electron_safe_storage_data;
 use crate::event_hub::publish_runtime_event;
 use crate::host_context::HostContext;
@@ -34,6 +36,7 @@ const TOKEN_FILE: &str = "remote-tokens.enc.json";
 const REMOTE_TOKEN_KEYRING_SERVICE: &str = "better-agent-terminal:remote-profile-token";
 
 static PROFILE_INDEX_TRANSACTION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static PROFILE_SNAPSHOT_REPAIR_DIRS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 static ATOMIC_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -688,6 +691,300 @@ fn empty_snapshot(profile: &ProfileEntry) -> Value {
     })
 }
 
+fn generate_snapshot_uuid() -> String {
+    let mut bytes: [u8; 16] = rand::random();
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15]
+    )
+}
+
+fn generate_history_key() -> String {
+    let bytes: [u8; 6] = rand::random();
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+// A profile snapshot is an independent runtime namespace. Copying its raw
+// workspace/terminal ids makes two simultaneously-open profile windows address
+// the same PTY/agent session in the process-wide runtime maps. Re-key every
+// identity and drop conversation/runtime handles when duplicating a profile so
+// the copy starts with the same layout and settings, but not the same live
+// processes, transcripts, shell history, or worktree.
+fn regenerate_duplicated_snapshot_identities(snapshot: &mut Value) {
+    let Some(windows) = snapshot.get_mut("windows").and_then(Value::as_array_mut) else {
+        return;
+    };
+
+    for window in windows {
+        let Some(window) = window.as_object_mut() else {
+            continue;
+        };
+
+        let mut workspace_id_map = HashMap::<String, String>::new();
+        let mut workspace_paths = HashMap::<String, String>::new();
+        let workspace_new_ids = window
+            .get("workspaces")
+            .and_then(Value::as_array)
+            .map(|workspaces| {
+                workspaces
+                    .iter()
+                    .map(|workspace| {
+                        let new_id = generate_snapshot_uuid();
+                        if let Some(old_id) = workspace.get("id").and_then(Value::as_str) {
+                            workspace_id_map
+                                .entry(old_id.to_string())
+                                .or_insert_with(|| new_id.clone());
+                            if let Some(folder_path) =
+                                workspace.get("folderPath").and_then(Value::as_str)
+                            {
+                                workspace_paths
+                                    .entry(old_id.to_string())
+                                    .or_insert_with(|| folder_path.to_string());
+                            }
+                        }
+                        new_id
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        let mut terminal_id_map = HashMap::<String, String>::new();
+        let terminal_new_ids = window
+            .get("terminals")
+            .and_then(Value::as_array)
+            .map(|terminals| {
+                terminals
+                    .iter()
+                    .map(|terminal| {
+                        let new_id = generate_snapshot_uuid();
+                        if let Some(old_id) = terminal.get("id").and_then(Value::as_str) {
+                            terminal_id_map
+                                .entry(old_id.to_string())
+                                .or_insert_with(|| new_id.clone());
+                        }
+                        new_id
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        if let Some(workspaces) = window.get_mut("workspaces").and_then(Value::as_array_mut) {
+            for (index, workspace) in workspaces.iter_mut().enumerate() {
+                let Some(workspace) = workspace.as_object_mut() else {
+                    continue;
+                };
+                if let Some(new_id) = workspace_new_ids.get(index) {
+                    workspace.insert("id".into(), Value::String(new_id.clone()));
+                }
+                if let Some(old_focus) = workspace
+                    .get("focusedTerminalId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                {
+                    if let Some(new_focus) = terminal_id_map.get(&old_focus) {
+                        workspace
+                            .insert("focusedTerminalId".into(), Value::String(new_focus.clone()));
+                    }
+                }
+                workspace.remove("lastSdkSessionId");
+            }
+        }
+
+        if let Some(terminals) = window.get_mut("terminals").and_then(Value::as_array_mut) {
+            for (index, terminal) in terminals.iter_mut().enumerate() {
+                let Some(terminal) = terminal.as_object_mut() else {
+                    continue;
+                };
+                let old_workspace_id = terminal
+                    .get("workspaceId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                let is_worktree = terminal
+                    .get("worktreePath")
+                    .and_then(Value::as_str)
+                    .is_some_and(|path| !path.is_empty())
+                    || terminal
+                        .get("agentPreset")
+                        .and_then(Value::as_str)
+                        .is_some_and(|preset| preset.ends_with("-worktree"));
+
+                if let Some(new_id) = terminal_new_ids.get(index) {
+                    terminal.insert("id".into(), Value::String(new_id.clone()));
+                }
+                if let Some(old_workspace_id) = old_workspace_id.as_deref() {
+                    if let Some(new_workspace_id) = workspace_id_map.get(old_workspace_id) {
+                        terminal.insert(
+                            "workspaceId".into(),
+                            Value::String(new_workspace_id.clone()),
+                        );
+                    }
+                    if is_worktree {
+                        if let Some(folder_path) = workspace_paths.get(old_workspace_id) {
+                            terminal.insert("cwd".into(), Value::String(folder_path.clone()));
+                        }
+                    }
+                }
+
+                for key in [
+                    "sdkSessionId",
+                    "claudeCliSessionId",
+                    "claudeCliRestartToken",
+                    "sessionMeta",
+                    "pendingPrompt",
+                    "pendingImages",
+                ] {
+                    terminal.remove(key);
+                }
+                if is_worktree {
+                    terminal.remove("worktreePath");
+                    terminal.remove("worktreeBranch");
+                    terminal.remove("worktreeMergedKind");
+                }
+                terminal.insert("historyKey".into(), Value::String(generate_history_key()));
+            }
+        }
+
+        if let Some(old_active_workspace_id) = window
+            .get("activeWorkspaceId")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        {
+            if let Some(new_active_workspace_id) = workspace_id_map.get(&old_active_workspace_id) {
+                window.insert(
+                    "activeWorkspaceId".into(),
+                    Value::String(new_active_workspace_id.clone()),
+                );
+            }
+        }
+        if let Some(old_active_terminal_id) = window
+            .get("activeTerminalId")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        {
+            if let Some(new_active_terminal_id) = terminal_id_map.get(&old_active_terminal_id) {
+                window.insert(
+                    "activeTerminalId".into(),
+                    Value::String(new_active_terminal_id.clone()),
+                );
+            }
+        }
+    }
+}
+
+fn snapshot_runtime_identities(snapshot: &Value) -> (HashSet<String>, HashSet<String>) {
+    let mut workspace_ids = HashSet::new();
+    let mut terminal_ids = HashSet::new();
+    let Some(windows) = snapshot.get("windows").and_then(Value::as_array) else {
+        return (workspace_ids, terminal_ids);
+    };
+    for window in windows {
+        if let Some(workspaces) = window.get("workspaces").and_then(Value::as_array) {
+            workspace_ids.extend(
+                workspaces
+                    .iter()
+                    .filter_map(|workspace| workspace.get("id").and_then(Value::as_str))
+                    .filter(|id| !id.trim().is_empty())
+                    .map(str::to_string),
+            );
+        }
+        if let Some(terminals) = window.get("terminals").and_then(Value::as_array) {
+            terminal_ids.extend(
+                terminals
+                    .iter()
+                    .filter_map(|terminal| terminal.get("id").and_then(Value::as_str))
+                    .filter(|id| !id.trim().is_empty())
+                    .map(str::to_string),
+            );
+        }
+    }
+    (workspace_ids, terminal_ids)
+}
+
+// Older BAT releases copied profile snapshots verbatim and the legacy
+// "Save Current" command could also persist another window's workspace.
+// Preserve the first profile in index order (the source is kept before copies)
+// and re-key later profiles before their windows can mount. This makes the
+// repair deterministic instead of letting whichever window starts first claim
+// a shared runtime and potentially strand the source profile's transcript.
+fn repair_cross_profile_snapshot_collisions_at(
+    dir: &Path,
+    index: &ProfileIndex,
+) -> io::Result<Vec<String>> {
+    let _guard = profile_index_guard();
+    let mut seen_workspace_ids = HashSet::<String>::new();
+    let mut seen_terminal_ids = HashSet::<String>::new();
+    let mut repaired_profile_ids = Vec::new();
+
+    for profile in index
+        .profiles
+        .iter()
+        .filter(|profile| profile.kind == "local")
+    {
+        let Some(mut snapshot) = read_snapshot_at(dir, &profile.id) else {
+            continue;
+        };
+        let (workspace_ids, terminal_ids) = snapshot_runtime_identities(&snapshot);
+        let collides = workspace_ids
+            .iter()
+            .any(|id| seen_workspace_ids.contains(id))
+            || terminal_ids.iter().any(|id| seen_terminal_ids.contains(id));
+
+        if collides {
+            regenerate_duplicated_snapshot_identities(&mut snapshot);
+            snapshot["id"] = Value::String(profile.id.clone());
+            snapshot["name"] = Value::String(profile.name.clone());
+            write_snapshot_at(dir, &profile.id, &snapshot)?;
+            repaired_profile_ids.push(profile.id.clone());
+            let (workspace_ids, terminal_ids) = snapshot_runtime_identities(&snapshot);
+            seen_workspace_ids.extend(workspace_ids);
+            seen_terminal_ids.extend(terminal_ids);
+        } else {
+            seen_workspace_ids.extend(workspace_ids);
+            seen_terminal_ids.extend(terminal_ids);
+        }
+    }
+
+    Ok(repaired_profile_ids)
+}
+
+fn repair_cross_profile_snapshot_collisions_once(
+    dir: &Path,
+    index: &ProfileIndex,
+) -> io::Result<Vec<String>> {
+    let scanned_dirs = PROFILE_SNAPSHOT_REPAIR_DIRS.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut scanned_dirs = scanned_dirs
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let dir_key = dir.to_path_buf();
+    if scanned_dirs.contains(&dir_key) {
+        return Ok(Vec::new());
+    }
+    // Hold this small process-wide gate across the one-time scan so a second
+    // startup window cannot load a legacy duplicate while the first window is
+    // still rewriting it. Failed scans are deliberately not cached and can be
+    // retried by the next profile:list call.
+    let repaired = repair_cross_profile_snapshot_collisions_at(dir, index)?;
+    scanned_dirs.insert(dir_key);
+    Ok(repaired)
+}
+
 fn migrate_snapshot(raw: Value) -> Option<Value> {
     if raw.get("version").and_then(Value::as_i64) == Some(2) {
         return Some(raw);
@@ -763,6 +1060,28 @@ pub fn profile_list_core(app: &HostContext) -> ProfileListResponse {
                 active_profile_id: None,
             };
             seed_default_snapshot_if_missing(&dir, app, &index);
+            match repair_cross_profile_snapshot_collisions_once(&dir, &index) {
+                Ok(repaired) if !repaired.is_empty() => {
+                    let message = format!(
+                        "[profile] WARNING repaired duplicate runtime identities in profiles={}",
+                        repaired.join(",")
+                    );
+                    #[cfg(feature = "desktop")]
+                    log_tauri(app, &message);
+                    #[cfg(not(feature = "desktop"))]
+                    eprintln!("{message}");
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    let message = format!(
+                        "[profile] WARNING could not repair duplicate runtime identities: {err}"
+                    );
+                    #[cfg(feature = "desktop")]
+                    log_tauri(app, &message);
+                    #[cfg(not(feature = "desktop"))]
+                    eprintln!("{message}");
+                }
+            }
             response
         })
         .unwrap_or_else(|| ProfileListResponse {
@@ -888,14 +1207,41 @@ pub fn profile_create(
 
 #[cfg(feature = "desktop")]
 #[tauri::command]
-pub fn profile_save(app: AppHandle, profile_id: String) -> bool {
-    let Some(dir) = profiles_dir(&HostContext::from_app(app.clone())) else {
+pub fn profile_save(app: AppHandle, window: WebviewWindow, profile_id: String) -> bool {
+    let ctx = HostContext::from_app(app.clone());
+    let window_id = window.label();
+    let bound_profile_id = window_registry::profile_id_for_window(&app, window_id);
+    if bound_profile_id.as_deref() != Some(profile_id.as_str()) {
+        log_tauri(
+            &ctx,
+            &format!(
+                "[profile] WARNING save rejected window={window_id} requestedProfile={profile_id} boundProfile={}",
+                bound_profile_id.as_deref().unwrap_or("<none>")
+            ),
+        );
+        return false;
+    }
+    let Some(workspace_json) = window_registry::workspace_json(&app, window_id) else {
+        log_tauri(
+            &ctx,
+            &format!(
+                "[profile] WARNING save rejected window={window_id} profile={profile_id} reason=missing-window-workspace"
+            ),
+        );
         return false;
     };
-    let workspace = workspace_path(&HostContext::from_app(app.clone()))
-        .and_then(|path| fs::read_to_string(path).ok())
-        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-        .unwrap_or_else(empty_workspace_state);
+    let Ok(workspace) = serde_json::from_str::<Value>(&workspace_json) else {
+        log_tauri(
+            &ctx,
+            &format!(
+                "[profile] WARNING save rejected window={window_id} profile={profile_id} reason=invalid-window-workspace"
+            ),
+        );
+        return false;
+    };
+    let Some(dir) = profiles_dir(&ctx) else {
+        return false;
+    };
     let saved = update_index_at(&dir, |index| {
         let profile = index
             .profiles
@@ -915,7 +1261,7 @@ pub fn profile_save(app: AppHandle, profile_id: String) -> bool {
     })
     .is_ok();
     if saved {
-        emit_profile_changed(&HostContext::from_app(app.clone()));
+        emit_profile_changed(&ctx);
     }
     saved
 }
@@ -1129,6 +1475,7 @@ pub fn profile_duplicate(
     })
     .ok()?;
     if let Some(mut snapshot) = read_snapshot_at(&dir, &profile_id) {
+        regenerate_duplicated_snapshot_identities(&mut snapshot);
         snapshot["id"] = Value::String(copy.id.clone());
         snapshot["name"] = Value::String(copy.name.clone());
         let _ = write_snapshot_at(&dir, &copy.id, &snapshot);
@@ -1512,6 +1859,133 @@ mod tests {
         assert!(ids.contains(&source.id));
         assert!(ids.contains(&copy.id));
         assert_ne!(source.id, copy.id);
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn duplicated_snapshot_gets_an_independent_runtime_namespace() {
+        let mut snapshot = json!({
+            "id": "source",
+            "name": "Source",
+            "version": 2,
+            "windows": [{
+                "workspaces": [{
+                    "id": "workspace-1",
+                    "folderPath": "/repo",
+                    "focusedTerminalId": "terminal-1",
+                    "lastSdkSessionId": "sdk-workspace"
+                }],
+                "activeWorkspaceId": "workspace-1",
+                "terminals": [{
+                    "id": "terminal-1",
+                    "workspaceId": "workspace-1",
+                    "agentPreset": "claude-code-worktree",
+                    "cwd": "/repo/.bat-worktrees/shared",
+                    "sdkSessionId": "sdk-1",
+                    "claudeCliSessionId": "cli-1",
+                    "claudeCliRestartToken": 123,
+                    "sessionMeta": { "inputTokens": 42 },
+                    "worktreePath": "/repo/.bat-worktrees/shared",
+                    "worktreeBranch": "bat/shared",
+                    "worktreeMergedKind": "merged",
+                    "historyKey": "shared-history"
+                }],
+                "activeTerminalId": "terminal-1"
+            }]
+        });
+
+        regenerate_duplicated_snapshot_identities(&mut snapshot);
+
+        let window = &snapshot["windows"][0];
+        let workspace = &window["workspaces"][0];
+        let terminal = &window["terminals"][0];
+        let workspace_id = workspace["id"].as_str().unwrap();
+        let terminal_id = terminal["id"].as_str().unwrap();
+
+        assert_ne!(workspace_id, "workspace-1");
+        assert_ne!(terminal_id, "terminal-1");
+        assert_eq!(terminal["workspaceId"], workspace_id);
+        assert_eq!(workspace["focusedTerminalId"], terminal_id);
+        assert_eq!(window["activeWorkspaceId"], workspace_id);
+        assert_eq!(window["activeTerminalId"], terminal_id);
+        assert_eq!(terminal["cwd"], "/repo");
+        assert_eq!(terminal["historyKey"].as_str().unwrap().len(), 12);
+        for key in [
+            "sdkSessionId",
+            "claudeCliSessionId",
+            "claudeCliRestartToken",
+            "sessionMeta",
+            "worktreePath",
+            "worktreeBranch",
+            "worktreeMergedKind",
+        ] {
+            assert!(terminal.get(key).is_none(), "{key} should not be copied");
+        }
+        assert!(workspace.get("lastSdkSessionId").is_none());
+    }
+
+    #[test]
+    fn cross_profile_collision_repair_preserves_first_profile_owner() {
+        let dir = temp_profile_dir("cross-profile-runtime-collision");
+        let source = profile_from_options("source".into(), "Source".into(), None);
+        let copy = profile_from_options("copy".into(), "Copy".into(), None);
+        let index = ProfileIndex {
+            profiles: vec![source.clone(), copy.clone()],
+            active_profile_ids: vec![source.id.clone(), copy.id.clone()],
+            active_profile_id: None,
+        };
+        let source_snapshot = json!({
+            "id": source.id,
+            "name": source.name,
+            "version": 2,
+            "windows": [{
+                "workspaces": [{
+                    "id": "shared-workspace",
+                    "folderPath": "/repo",
+                    "focusedTerminalId": "shared-terminal",
+                    "lastSdkSessionId": "sdk-source"
+                }],
+                "activeWorkspaceId": "shared-workspace",
+                "terminals": [{
+                    "id": "shared-terminal",
+                    "workspaceId": "shared-workspace",
+                    "agentPreset": "claude-code-v2",
+                    "cwd": "/repo",
+                    "sdkSessionId": "sdk-source",
+                    "historyKey": "source-history"
+                }],
+                "activeTerminalId": "shared-terminal"
+            }]
+        });
+        let mut copy_snapshot = source_snapshot.clone();
+        copy_snapshot["id"] = Value::String(copy.id.clone());
+        copy_snapshot["name"] = Value::String(copy.name.clone());
+        write_snapshot_at(&dir, &source.id, &source_snapshot).unwrap();
+        write_snapshot_at(&dir, &copy.id, &copy_snapshot).unwrap();
+
+        let repaired = repair_cross_profile_snapshot_collisions_at(&dir, &index).unwrap();
+        assert_eq!(repaired, vec![copy.id.clone()]);
+
+        let preserved = read_snapshot_at(&dir, &source.id).unwrap();
+        let repaired_copy = read_snapshot_at(&dir, &copy.id).unwrap();
+        assert_eq!(
+            preserved["windows"][0]["terminals"][0]["id"],
+            "shared-terminal"
+        );
+        assert_eq!(
+            preserved["windows"][0]["terminals"][0]["sdkSessionId"],
+            "sdk-source"
+        );
+        assert_ne!(
+            repaired_copy["windows"][0]["terminals"][0]["id"],
+            "shared-terminal"
+        );
+        assert!(repaired_copy["windows"][0]["terminals"][0]
+            .get("sdkSessionId")
+            .is_none());
+        assert!(repair_cross_profile_snapshot_collisions_at(&dir, &index)
+            .unwrap()
+            .is_empty());
         fs::remove_dir_all(dir).ok();
     }
 

@@ -815,6 +815,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "desktop")]
     #[test]
     fn renderer_url_uses_app_url_for_dynamic_windows() {
         let url = renderer_url("index.html?detached=w1");

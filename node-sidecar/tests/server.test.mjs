@@ -1395,6 +1395,61 @@ async function inProcess() {
     mod.sessions.get('queued-1')?.liveQuery?.close()
   }
 
+  // A host RPC timeout does not cancel the SDK turn. If the renderer/client
+  // retries with the same clientMessageId, the sidecar must acknowledge the
+  // already accepted request without echoing or pushing the prompt twice.
+  const idempotentPrompts = []
+  const idempotentEvents = []
+  const restoreIdempotentSend = mod.__setSendEventForTests((name, payload) => idempotentEvents.push({ name, payload }))
+  let releaseIdempotentResult
+  let idempotentTurnStartedResolve
+  const idempotentTurnStarted = new Promise(resolve => { idempotentTurnStartedResolve = resolve })
+  const fakeSdkIdempotent = {
+    query({ prompt }) {
+      const userIter = prompt[Symbol.asyncIterator]()
+      return (async function*() {
+        const next = await userIter.next()
+        if (next.done) return
+        idempotentPrompts.push(next.value?.message?.content)
+        yield { type: 'system', subtype: 'init', session_id: 'sdk-idempotent-1', cwd: '/i' }
+        idempotentTurnStartedResolve()
+        await new Promise(resolve => { releaseIdempotentResult = resolve })
+        yield { type: 'result', subtype: 'success', session_id: 'sdk-idempotent-1',
+          result: 'once', stop_reason: 'end_turn', total_cost_usd: 0.001, num_turns: 1 }
+      })()
+    },
+  }
+  __setSdkOverrideForTests(fakeSdkIdempotent)
+  try {
+    await dispatch({ jsonrpc: '2.0', id: 2291, method: 'claude.startSession',
+      params: { sessionId: 'idempotent-1', options: { cwd: '/i' } } })
+    const first = dispatch({ jsonrpc: '2.0', id: 2292, method: 'claude.sendMessage',
+      params: { sessionId: 'idempotent-1', prompt: 'only once', clientMessageId: 'user-fixed-1' } })
+    await idempotentTurnStarted
+    const duplicatePending = await dispatch({ jsonrpc: '2.0', id: 2293, method: 'claude.sendMessage',
+      params: { sessionId: 'idempotent-1', prompt: 'only once', clientMessageId: 'user-fixed-1' } })
+    assert.deepEqual(duplicatePending.result, { ok: true, duplicate: true, pending: true })
+    assert.deepEqual(idempotentPrompts, ['only once'])
+    assert.equal(
+      idempotentEvents.filter(e => e.name === 'claude:message' && e.payload?.message?.role === 'user').length,
+      1,
+      'a duplicate in-flight RPC must not emit a second user echo',
+    )
+
+    releaseIdempotentResult()
+    const firstReply = await first
+    assert.equal(firstReply.result.ok, true)
+    const duplicateCompleted = await dispatch({ jsonrpc: '2.0', id: 2294, method: 'claude.sendMessage',
+      params: { sessionId: 'idempotent-1', prompt: 'only once', clientMessageId: 'user-fixed-1' } })
+    assert.equal(duplicateCompleted.result.ok, true)
+    assert.equal(duplicateCompleted.result.duplicate, true)
+    assert.deepEqual(idempotentPrompts, ['only once'])
+  } finally {
+    __setSdkOverrideForTests(undefined)
+    restoreIdempotentSend()
+    mod.sessions.get('idempotent-1')?.liveQuery?.close()
+  }
+
   // claude.stopTask: forwards task_id to the active query's stopTask
   // control method. Errors gracefully when no query is active.
   const stopCaptured = []

@@ -14,7 +14,7 @@ use crate::subprocess::hide_console_window;
 use crate::window_registry;
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -31,6 +31,8 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 // keeps the short timeout — it runs on an interval and must fail fast.
 const REMOTE_MUTATION_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_OUTPUT_BYTES: usize = 10 * 1024 * 1024;
+const MAX_ENV_DISCOVERY_BYTES: usize = 64 * 1024 * 1024;
+const MAX_ENV_COPY_ERRORS: usize = 8;
 const PNPM_LOG_TAIL_CHARS: usize = 4000;
 const WORKTREE_DIR: &str = ".bat-worktrees";
 
@@ -347,6 +349,169 @@ fn link_claude_untracked(git_root: &Path, worktree_path: &Path) {
     }
 }
 
+#[derive(Debug, Default)]
+struct EnvCopyReport {
+    copied: usize,
+    preserved: usize,
+    errors: Vec<String>,
+}
+
+fn record_env_copy_error(report: &mut EnvCopyReport, message: impl Into<String>) {
+    if report.errors.len() < MAX_ENV_COPY_ERRORS {
+        report.errors.push(message.into());
+    }
+}
+
+fn is_local_env_file_name(name: &OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    name == ".env" || name.starts_with(".env.")
+}
+
+fn is_safe_repo_relative_path(path: &Path) -> bool {
+    !path.is_absolute()
+        && path
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+}
+
+/// Use the tracked tree as a cheap directory index. Walking the whole source
+/// repository would descend into ignored node_modules/target directories and
+/// make worktree creation noticeably slower. Every useful project directory
+/// has a tracked descendant, so its ancestors form a bounded search space for
+/// adjacent ignored/untracked `.env` files.
+fn tracked_repo_directories(git_root: &Path) -> Result<Vec<PathBuf>, String> {
+    let stdout = run_git(
+        git_root,
+        &["ls-files", "-z"],
+        DEFAULT_TIMEOUT,
+        MAX_ENV_DISCOVERY_BYTES,
+    )?;
+    let mut directories = HashSet::from([PathBuf::new()]);
+    for raw in stdout.split('\0').filter(|entry| !entry.is_empty()) {
+        let tracked_path = Path::new(raw);
+        if !is_safe_repo_relative_path(tracked_path) {
+            continue;
+        }
+        let mut parent = tracked_path.parent();
+        while let Some(directory) = parent {
+            directories.insert(directory.to_path_buf());
+            parent = directory.parent();
+        }
+    }
+    let mut directories = directories.into_iter().collect::<Vec<_>>();
+    directories.sort();
+    Ok(directories)
+}
+
+/// Copy a local secret/config file without ever replacing an existing target.
+/// On Unix the destination starts at mode 0600 before we apply the source
+/// permissions, so there is no window where a private `.env` is world-readable.
+fn copy_file_without_overwrite(src: &Path, dst: &Path) -> std::io::Result<bool> {
+    let mut source = fs::File::open(src)?;
+    let source_permissions = source.metadata()?.permissions();
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut destination = match options.open(dst) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(err) => return Err(err),
+    };
+    if let Err(err) = std::io::copy(&mut source, &mut destination) {
+        drop(destination);
+        let _ = fs::remove_file(dst);
+        return Err(err);
+    }
+    drop(destination);
+    if let Err(err) = fs::set_permissions(dst, source_permissions) {
+        let _ = fs::remove_file(dst);
+        return Err(err);
+    }
+    Ok(true)
+}
+
+/// Copy root and monorepo-local `.env` / `.env.*` files into a worktree.
+/// Files are copied, never linked, and an existing worktree file always wins.
+/// This keeps worktree edits isolated from the source checkout and makes the
+/// operation safe to repeat while rehydrating worktrees created by older BATs.
+fn copy_local_env_files(git_root: &Path, worktree_path: &Path) -> EnvCopyReport {
+    let mut report = EnvCopyReport::default();
+    let directories = match tracked_repo_directories(git_root) {
+        Ok(directories) => directories,
+        Err(err) => {
+            record_env_copy_error(
+                &mut report,
+                format!("could not enumerate project directories: {err}"),
+            );
+            vec![PathBuf::new()]
+        }
+    };
+
+    for relative_dir in directories {
+        let source_dir = git_root.join(&relative_dir);
+        let entries = match fs::read_dir(&source_dir) {
+            Ok(entries) => entries,
+            Err(err) => {
+                record_env_copy_error(
+                    &mut report,
+                    format!("could not inspect {}: {err}", relative_dir.display()),
+                );
+                continue;
+            }
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(err) => {
+                    record_env_copy_error(
+                        &mut report,
+                        format!(
+                            "could not inspect an entry under {}: {err}",
+                            relative_dir.display()
+                        ),
+                    );
+                    continue;
+                }
+            };
+            let file_name = entry.file_name();
+            if !is_local_env_file_name(&file_name) {
+                continue;
+            }
+            let source = entry.path();
+            if !fs::metadata(&source)
+                .map(|metadata| metadata.is_file())
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let target_dir = worktree_path.join(&relative_dir);
+            if let Err(err) = fs::create_dir_all(&target_dir) {
+                record_env_copy_error(
+                    &mut report,
+                    format!("could not create {}: {err}", relative_dir.display()),
+                );
+                continue;
+            }
+            let relative_file = relative_dir.join(&file_name);
+            match copy_file_without_overwrite(&source, &target_dir.join(&file_name)) {
+                Ok(true) => report.copied += 1,
+                Ok(false) => report.preserved += 1,
+                Err(err) => record_env_copy_error(
+                    &mut report,
+                    format!("could not copy {}: {err}", relative_file.display()),
+                ),
+            }
+        }
+    }
+    report
+}
+
 fn create_worktree_native(
     app: Option<HostContext>,
     state: &WorktreeState,
@@ -388,6 +553,30 @@ fn create_worktree_native(
     .map_err(bridge_error)?;
     write_worktree_fork_head(&git_root_path, &branch_name, &fork_head);
     link_claude_untracked(&git_root_path, &worktree_path);
+    let env_copy = copy_local_env_files(&git_root_path, &worktree_path);
+    if env_copy.copied > 0 {
+        worktree_debug_log(
+            app.as_ref(),
+            format!(
+                "[worktree] copied local env files cwd={} copied={} preserved={}",
+                worktree_path.display(),
+                env_copy.copied,
+                env_copy.preserved
+            ),
+        );
+    }
+    if !env_copy.errors.is_empty() {
+        if let Some(app) = app.as_ref() {
+            log_tauri(
+                app,
+                &format!(
+                    "[worktree] warning: local env copy was incomplete cwd={} errors={}",
+                    worktree_path.display(),
+                    env_copy.errors.join(" | ")
+                ),
+            );
+        }
+    }
 
     let info = WorktreeInfo {
         session_id,
@@ -775,6 +964,9 @@ pub fn ensure_worktree_for_session_native(
         } else {
             load_worktree_fork_head(Path::new(&git_root), &branch_name)
         };
+        if !git_root.is_empty() {
+            let _ = copy_local_env_files(Path::new(&git_root), path_ref);
+        }
         let info = WorktreeInfo {
             session_id,
             worktree_path: path,
@@ -807,6 +999,7 @@ pub fn ensure_worktree_for_session_native(
             .unwrap_or_else(|| get_branch(&expected_path));
         let git_root_path = Path::new(&git_root);
         let fork_head = load_worktree_fork_head(git_root_path, &branch_name);
+        let _ = copy_local_env_files(git_root_path, &expected_path);
         let info = WorktreeInfo {
             session_id,
             worktree_path: path,
@@ -1144,6 +1337,9 @@ fn rehydrate_worktree_native(
     let git_root = worktree_git_root_from_path(&worktree_path)
         .map(|path| path.to_string_lossy().to_string())
         .unwrap_or_default();
+    if !git_root.is_empty() && Path::new(&worktree_path).is_dir() {
+        let _ = copy_local_env_files(Path::new(&git_root), Path::new(&worktree_path));
+    }
     if let Some(mut existing) = state.get(&session_id) {
         if existing.worktree_path == worktree_path {
             existing.original_cwd = cwd;
@@ -1449,6 +1645,144 @@ mod tests {
         let root = worktree_git_root_from_path("C:/repo/.bat-worktrees/abc")
             .expect("root from worktree path");
         assert!(root.ends_with(Path::new("C:/repo")));
+    }
+
+    #[test]
+    fn local_env_matcher_excludes_similarly_named_files() {
+        assert!(is_local_env_file_name(OsStr::new(".env")));
+        assert!(is_local_env_file_name(OsStr::new(".env.local")));
+        assert!(is_local_env_file_name(OsStr::new(".env.production")));
+        assert!(!is_local_env_file_name(OsStr::new(".envrc")));
+        assert!(!is_local_env_file_name(OsStr::new("environment.env")));
+    }
+
+    #[test]
+    fn worktree_copies_local_env_files_without_overwriting_them() {
+        if !Command::new("git")
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+        {
+            return;
+        }
+
+        let repo = std::env::temp_dir().join(format!(
+            "bat-worktree-env-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let service_dir = repo.join("apps").join("service");
+        fs::create_dir_all(&service_dir).expect("create fixture directories");
+        run_git(
+            &repo,
+            &["init", "-b", "main"],
+            DEFAULT_TIMEOUT,
+            MAX_OUTPUT_BYTES,
+        )
+        .expect("init repo");
+        run_git(
+            &repo,
+            &["config", "user.email", "test@example.com"],
+            DEFAULT_TIMEOUT,
+            MAX_OUTPUT_BYTES,
+        )
+        .expect("set email");
+        run_git(
+            &repo,
+            &["config", "user.name", "Test"],
+            DEFAULT_TIMEOUT,
+            MAX_OUTPUT_BYTES,
+        )
+        .expect("set name");
+        fs::write(repo.join(".gitignore"), ".env\n.env.*\n").expect("write gitignore");
+        fs::write(repo.join("README.md"), "# fixture\n").expect("write readme");
+        fs::write(service_dir.join("package.json"), "{}\n").expect("write package file");
+        run_git(&repo, &["add", "."], DEFAULT_TIMEOUT, MAX_OUTPUT_BYTES).expect("git add");
+        run_git(
+            &repo,
+            &["commit", "-m", "init"],
+            DEFAULT_TIMEOUT,
+            MAX_OUTPUT_BYTES,
+        )
+        .expect("git commit");
+
+        fs::write(repo.join(".env"), "ROOT_SECRET=source\n").expect("write root env");
+        fs::write(service_dir.join(".env.local"), "SERVICE_SECRET=source\n")
+            .expect("write nested env");
+        fs::write(repo.join(".envrc"), "not-an-env-file\n").expect("write envrc");
+
+        let state = WorktreeState::default();
+        let session_id = "session-env-copy".to_string();
+        let created = create_worktree_native(
+            None,
+            &state,
+            session_id.clone(),
+            repo.to_string_lossy().to_string(),
+            false,
+        )
+        .expect("create worktree");
+        assert_eq!(created["success"], true);
+        let info = state.get(&session_id).expect("stored worktree");
+        let worktree_path = PathBuf::from(&info.worktree_path);
+        let root_target = worktree_path.join(".env");
+        let nested_target = worktree_path
+            .join("apps")
+            .join("service")
+            .join(".env.local");
+        assert_eq!(
+            fs::read_to_string(&root_target).expect("read copied root env"),
+            "ROOT_SECRET=source\n"
+        );
+        assert_eq!(
+            fs::read_to_string(&nested_target).expect("read copied nested env"),
+            "SERVICE_SECRET=source\n"
+        );
+        assert!(!worktree_path.join(".envrc").exists());
+        assert!(!fs::symlink_metadata(&root_target)
+            .expect("root env metadata")
+            .file_type()
+            .is_symlink());
+
+        fs::write(&root_target, "ROOT_SECRET=worktree\n").expect("customize worktree env");
+        fs::write(repo.join(".env"), "ROOT_SECRET=updated-source\n").expect("update source env");
+        let repeated = copy_local_env_files(&repo, &worktree_path);
+        assert_eq!(repeated.copied, 0);
+        assert_eq!(repeated.preserved, 2);
+        assert!(repeated.errors.is_empty());
+        assert_eq!(
+            fs::read_to_string(&root_target).expect("read preserved env"),
+            "ROOT_SECRET=worktree\n"
+        );
+
+        fs::remove_file(&nested_target).expect("remove nested env before rehydrate");
+        let rehydrated = WorktreeState::default();
+        assert_eq!(
+            rehydrate_worktree_native(
+                &rehydrated,
+                "session-env-rehydrated".into(),
+                repo.to_string_lossy().to_string(),
+                info.worktree_path.clone(),
+                info.branch_name.clone(),
+            )["success"],
+            true
+        );
+        assert_eq!(
+            fs::read_to_string(&nested_target).expect("read rehydrated nested env"),
+            "SERVICE_SECRET=source\n"
+        );
+        assert_eq!(
+            fs::read_to_string(&root_target).expect("read rehydrated preserved env"),
+            "ROOT_SECRET=worktree\n"
+        );
+
+        assert_eq!(
+            remove_worktree_native(&state, session_id, true)["success"],
+            true
+        );
+        fs::remove_dir_all(repo).ok();
     }
 
     #[test]

@@ -2231,6 +2231,20 @@ fn validate_local_session_cwd(options: Option<&Value>) -> Result<(), BridgeError
     })
 }
 
+#[cfg(feature = "desktop")]
+fn ensure_local_agent_session_access(
+    app: &AppHandle,
+    window: &WebviewWindow,
+    session_id: &str,
+) -> Result<(), BridgeError> {
+    notification_cmd::ensure_agent_session_access(
+        &HostContext::from_app(app.clone()),
+        window.label(),
+        session_id,
+    )
+    .map_err(|message| BridgeError { message })
+}
+
 async fn prepare_codex_worktree_options(
     worktree_state: worktree_cmd::WorktreeState,
     session_id: String,
@@ -3155,6 +3169,16 @@ pub async fn claude_start_session(
         return result;
     }
     validate_local_session_cwd(options.as_ref())?;
+    // Claim the process-wide runtime identity before worktree preparation can
+    // create or rehydrate resources named by this session id. Register again
+    // below with the effective worktree metadata once preparation succeeds.
+    notification_cmd::register_agent_session_from_options(
+        &HostContext::from_app(app.clone()),
+        window.label(),
+        &session_id,
+        options.as_ref(),
+    )
+    .map_err(|message| BridgeError { message })?;
     let options =
         prepare_codex_worktree_options((*worktree_state).clone(), session_id.clone(), options)
             .await?;
@@ -3163,7 +3187,8 @@ pub async fn claude_start_session(
         window.label(),
         &session_id,
         options.as_ref(),
-    );
+    )
+    .map_err(|message| BridgeError { message })?;
     ClaudeRuntimeRouter::from_states(app, &state, &codex_state)
         .start_session(session_id, options)
         .await
@@ -3184,11 +3209,6 @@ pub async fn claude_send_message(
     display_prompt: Option<String>,
     suppress_user_echo: Option<bool>,
 ) -> Result<Value, BridgeError> {
-    notification_cmd::set_agent_session_resting(
-        &HostContext::from_app(app.clone()),
-        &session_id,
-        false,
-    );
     claude_debug_log(
         &HostContext::from_app(app.clone()),
         &format!(
@@ -3219,6 +3239,12 @@ pub async fn claude_send_message(
     {
         return result;
     }
+    ensure_local_agent_session_access(&app, &window, &session_id)?;
+    notification_cmd::set_agent_session_resting(
+        &HostContext::from_app(app.clone()),
+        &session_id,
+        false,
+    );
     ClaudeRuntimeRouter::from_states(app, &state, &codex_state)
         .send_message(
             session_id,
@@ -3241,7 +3267,6 @@ pub async fn claude_stop_session(
     codex_state: State<'_, CodexAppServerState>,
     session_id: String,
 ) -> Result<Value, BridgeError> {
-    notification_cmd::unregister_agent_session(&HostContext::from_app(app.clone()), &session_id);
     if let Some(result) = remote_invoke_for_window(
         &HostContext::from_app(app.clone()),
         &state,
@@ -3254,9 +3279,15 @@ pub async fn claude_stop_session(
     {
         return result;
     }
-    ClaudeRuntimeRouter::from_states(app, &state, &codex_state)
-        .stop_session(session_id)
-        .await
+    ensure_local_agent_session_access(&app, &window, &session_id)?;
+    let result = ClaudeRuntimeRouter::from_states(app.clone(), &state, &codex_state)
+        .stop_session(session_id.clone())
+        .await?;
+    // Keep ownership until the runtime has actually stopped. Releasing it
+    // first leaves a window where another profile can claim the same id while
+    // the previous sidecar/app-server session is still alive.
+    notification_cmd::unregister_agent_session(&HostContext::from_app(app), &session_id);
+    Ok(result)
 }
 
 #[cfg(feature = "desktop")]
@@ -3287,6 +3318,7 @@ pub async fn claude_abort_session(
     {
         return result;
     }
+    ensure_local_agent_session_access(&app, &window, &session_id)?;
     ClaudeRuntimeRouter::from_states(app, &state, &codex_state)
         .abort_session(session_id)
         .await
@@ -3317,6 +3349,7 @@ pub async fn claude_interrupt_turn(
     {
         return result;
     }
+    ensure_local_agent_session_access(&app, &window, &session_id)?;
     ClaudeRuntimeRouter::from_states(app, &state, &codex_state)
         .interrupt_turn(session_id)
         .await
@@ -3349,6 +3382,7 @@ pub async fn claude_stop_task(
                 .unwrap_or(false)
         });
     }
+    ensure_local_agent_session_access(&app, &window, &session_id)?;
     ClaudeRuntimeRouter::from_states(app, &state, &codex_state)
         .stop_task(session_id, task_id)
         .await
@@ -3998,6 +4032,7 @@ pub async fn claude_get_supported_models(
     {
         return result;
     }
+    ensure_local_agent_session_access(&app, &window, &session_id)?;
     Ok(ClaudeRuntimeRouter::from_states(app, &state, &codex_state).supported_models(&session_id))
 }
 
@@ -4022,6 +4057,7 @@ pub async fn claude_get_supported_efforts(
     {
         return result;
     }
+    ensure_local_agent_session_access(&app, &window, &session_id)?;
     Ok(ClaudeRuntimeRouter::from_states(app, &state, &codex_state).supported_efforts(&session_id))
 }
 
@@ -4046,6 +4082,7 @@ pub async fn claude_get_supported_codex_sandbox_modes(
     {
         return result;
     }
+    ensure_local_agent_session_access(&app, &window, &session_id)?;
     Ok(ClaudeRuntimeRouter::from_states(app, &state, &codex_state)
         .supported_codex_sandbox_modes(&session_id))
 }
@@ -4071,6 +4108,7 @@ pub async fn claude_get_supported_codex_approval_policies(
     {
         return result;
     }
+    ensure_local_agent_session_access(&app, &window, &session_id)?;
     Ok(ClaudeRuntimeRouter::from_states(app, &state, &codex_state)
         .supported_codex_approval_policies(&session_id))
 }
@@ -4096,6 +4134,7 @@ pub async fn claude_get_supported_commands(
     {
         return result;
     }
+    ensure_local_agent_session_access(&app, &window, &session_id)?;
     ClaudeRuntimeRouter::from_states(app, &state, &codex_state)
         .supported_commands(session_id)
         .await
@@ -4122,6 +4161,7 @@ pub async fn claude_get_supported_agents(
     {
         return result;
     }
+    ensure_local_agent_session_access(&app, &window, &session_id)?;
     ClaudeRuntimeRouter::from_states(app, &state, &codex_state)
         .supported_agents(session_id)
         .await
@@ -4148,6 +4188,7 @@ pub async fn claude_get_account_info(
     {
         return result;
     }
+    ensure_local_agent_session_access(&app, &window, &session_id)?;
     ClaudeRuntimeRouter::from_states(app, &state, &codex_state)
         .account_info(session_id)
         .await
@@ -4175,6 +4216,7 @@ pub async fn claude_get_session_state(
     {
         return result;
     }
+    ensure_local_agent_session_access(&app, &window, &session_id)?;
     ClaudeRuntimeRouter::from_states(app, &state, &codex_state)
         .session_state(session_id, agent_preset)
         .await
@@ -4202,6 +4244,7 @@ pub async fn claude_get_session_meta(
     {
         return result;
     }
+    ensure_local_agent_session_access(&app, &window, &session_id)?;
     ClaudeRuntimeRouter::from_states(app, &state, &codex_state)
         .session_meta(session_id, agent_preset)
         .await
@@ -4228,6 +4271,7 @@ pub async fn claude_get_context_usage(
     {
         return result;
     }
+    ensure_local_agent_session_access(&app, &window, &session_id)?;
     ClaudeRuntimeRouter::from_states(app, &state, &codex_state)
         .context_usage(session_id)
         .await
@@ -4253,6 +4297,7 @@ pub async fn claude_get_worktree_status(
     {
         return result;
     }
+    ensure_local_agent_session_access(&app, &window, &session_id)?;
     if let Some(session) = notification_cmd::get_agent_session_snapshot(
         &HostContext::from_app(app.clone()),
         &session_id,
@@ -4322,6 +4367,7 @@ pub async fn claude_cleanup_worktree(
     {
         return result;
     }
+    ensure_local_agent_session_access(&app, &window, &session_id)?;
     if let Some(session) = notification_cmd::get_agent_session_snapshot(
         &HostContext::from_app(app.clone()),
         &session_id,
@@ -4407,6 +4453,7 @@ pub async fn claude_set_auto_continue(
     {
         return result;
     }
+    ensure_local_agent_session_access(&app, &window, &session_id)?;
     ClaudeRuntimeRouter::from_states(app, &state, &codex_state)
         .set_auto_continue(session_id, opts)
         .await
@@ -4433,6 +4480,7 @@ pub async fn claude_get_auto_continue(
     {
         return result;
     }
+    ensure_local_agent_session_access(&app, &window, &session_id)?;
     ClaudeRuntimeRouter::from_states(app, &state, &codex_state)
         .get_auto_continue(session_id)
         .await
@@ -4460,6 +4508,7 @@ pub async fn claude_set_permission_mode(
     {
         return result;
     }
+    ensure_local_agent_session_access(&app, &window, &session_id)?;
     ClaudeRuntimeRouter::from_states(app, &state, &codex_state)
         .set_permission_mode(session_id, mode)
         .await
@@ -4487,6 +4536,7 @@ pub async fn claude_set_codex_sandbox_mode(
     {
         return result;
     }
+    ensure_local_agent_session_access(&app, &window, &session_id)?;
     ClaudeRuntimeRouter::from_states(app, &state, &codex_state)
         .set_codex_sandbox_mode(session_id, mode)
         .await
@@ -4514,6 +4564,7 @@ pub async fn claude_set_codex_approval_policy(
     {
         return result;
     }
+    ensure_local_agent_session_access(&app, &window, &session_id)?;
     ClaudeRuntimeRouter::from_states(app, &state, &codex_state)
         .set_codex_approval_policy(session_id, policy)
         .await
@@ -4546,6 +4597,7 @@ pub async fn claude_set_model(
     {
         return result;
     }
+    ensure_local_agent_session_access(&app, &window, &session_id)?;
     if let Some(value) = codex_state.set_model(
         &HostContext::from_app(app.clone()),
         &session_id,
@@ -4595,6 +4647,7 @@ pub async fn claude_set_effort(
     {
         return result;
     }
+    ensure_local_agent_session_access(&app, &window, &session_id)?;
     if let Some(value) = codex_state.set_effort(
         &HostContext::from_app(app.clone()),
         &session_id,
@@ -4642,6 +4695,7 @@ pub async fn claude_reset_session(
     {
         return result;
     }
+    ensure_local_agent_session_access(&app, &window, &session_id)?;
     ClaudeRuntimeRouter::from_states(app, &state, &codex_state)
         .reset_session(session_id)
         .await
@@ -4668,6 +4722,7 @@ pub async fn claude_fork_session(
     {
         return result;
     }
+    ensure_local_agent_session_access(&app, &window, &session_id)?;
     ClaudeRuntimeRouter::from_states(app, &state, &codex_state)
         .fork_session(session_id)
         .await
@@ -4694,6 +4749,7 @@ pub async fn claude_archive_messages(
     {
         return result;
     }
+    ensure_local_agent_session_access(&app, &window, &session_id)?;
     let data_dir = app_data_dir(&HostContext::from_app(app.clone()))?;
     match archive_messages_in_dir(&data_dir, &session_id, &messages) {
         Ok(value) => Ok(json!(value)),
@@ -4723,6 +4779,7 @@ pub async fn claude_load_archived(
     {
         return result;
     }
+    ensure_local_agent_session_access(&app, &window, &session_id)?;
     let data_dir = app_data_dir(&HostContext::from_app(app.clone()))?;
     Ok(load_archived_from_dir(
         &data_dir,
@@ -4752,6 +4809,7 @@ pub async fn claude_clear_archive(
     {
         return result;
     }
+    ensure_local_agent_session_access(&app, &window, &session_id)?;
     let data_dir = app_data_dir(&HostContext::from_app(app.clone()))?;
     Ok(json!(clear_archive_in_dir(&data_dir, &session_id)))
 }
@@ -4777,6 +4835,7 @@ pub async fn claude_rest_session(
     {
         return result;
     }
+    ensure_local_agent_session_access(&app, &window, &session_id)?;
     if let Some(value) = codex_state.rest_session(&HostContext::from_app(app.clone()), &session_id)
     {
         return Ok(value);
@@ -4819,6 +4878,7 @@ pub async fn claude_wake_session(
     {
         return result;
     }
+    ensure_local_agent_session_access(&app, &window, &session_id)?;
     if let Some(value) = codex_state.wake_session(&session_id) {
         return Ok(value);
     }
@@ -4860,6 +4920,7 @@ pub async fn claude_is_resting(
     {
         return result;
     }
+    ensure_local_agent_session_access(&app, &window, &session_id)?;
     if let Some(value) = codex_state.is_resting(&session_id) {
         return Ok(value);
     }
@@ -4900,6 +4961,7 @@ pub async fn claude_fetch_subagent_messages(
     {
         return result;
     }
+    ensure_local_agent_session_access(&app, &window, &session_id)?;
     ClaudeRuntimeRouter::from_states(app, &state, &codex_state)
         .fetch_subagent_messages(session_id, agent_tool_use_id)
         .await
@@ -4927,6 +4989,7 @@ pub async fn claude_rewind_to_prompt(
     {
         return result;
     }
+    ensure_local_agent_session_access(&app, &window, &session_id)?;
     ClaudeRuntimeRouter::from_states(app, &state, &codex_state)
         .rewind_to_prompt(session_id, prompt_index)
         .await
@@ -4974,6 +5037,13 @@ pub async fn claude_resume_session(
         return result;
     }
     validate_local_session_cwd(options.as_ref())?;
+    notification_cmd::register_agent_session_from_options(
+        &HostContext::from_app(app.clone()),
+        window.label(),
+        &session_id,
+        options.as_ref(),
+    )
+    .map_err(|message| BridgeError { message })?;
     let options =
         prepare_codex_worktree_options((*worktree_state).clone(), session_id.clone(), options)
             .await?;
@@ -4982,7 +5052,8 @@ pub async fn claude_resume_session(
         window.label(),
         &session_id,
         options.as_ref(),
-    );
+    )
+    .map_err(|message| BridgeError { message })?;
     ClaudeRuntimeRouter::from_states(app, &state, &codex_state)
         .resume_session(session_id, sdk_session_id, options)
         .await
@@ -5034,6 +5105,13 @@ pub async fn claude_client_resume(
         return result;
     }
     validate_local_session_cwd(options.as_ref())?;
+    notification_cmd::register_agent_session_from_options(
+        &HostContext::from_app(app.clone()),
+        window.label(),
+        &session_id,
+        options.as_ref(),
+    )
+    .map_err(|message| BridgeError { message })?;
     let options =
         prepare_codex_worktree_options((*worktree_state).clone(), session_id.clone(), options)
             .await?;
@@ -5042,7 +5120,8 @@ pub async fn claude_client_resume(
         window.label(),
         &session_id,
         options.as_ref(),
-    );
+    )
+    .map_err(|message| BridgeError { message })?;
     ClaudeRuntimeRouter::from_states(app, &state, &codex_state)
         .client_resume(session_id, sdk_session_id, options)
         .await
@@ -5075,6 +5154,7 @@ pub async fn claude_resolve_permission(
     {
         return remote_result;
     }
+    ensure_local_agent_session_access(&app, &window, &session_id)?;
     ClaudeRuntimeRouter::from_states(app, &state, &codex_state)
         .resolve_permission(session_id, tool_use_id, result)
         .await
@@ -5107,6 +5187,7 @@ pub async fn claude_resolve_ask_user(
     {
         return result;
     }
+    ensure_local_agent_session_access(&app, &window, &session_id)?;
     ClaudeRuntimeRouter::from_states(app, &state, &codex_state)
         .resolve_ask_user(session_id, tool_use_id, answers)
         .await

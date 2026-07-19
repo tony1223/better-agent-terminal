@@ -263,6 +263,69 @@ class WorkspaceStore {
     )
   }
 
+  // Legacy profile snapshots (and profile copies created before the host
+  // started re-keying them) can contain the same terminal id in two profile
+  // windows. The process-wide agent runtime uses that id as its session key,
+  // so repair the later claimant in-place and let React remount it under a
+  // fresh identity. Conversation/runtime handles are deliberately cleared:
+  // inheriting them would reconnect the replacement terminal to the same
+  // Claude/Codex transcript even after its panel id changed.
+  repairTerminalIdentityCollision(terminalId: string): string | undefined {
+    const terminal = this.state.terminals.find(t => t.id === terminalId)
+    if (!terminal) return undefined
+
+    const replacementId = uuidv4()
+    const workspace = this.state.workspaces.find(w => w.id === terminal.workspaceId)
+    const isWorktree = !!terminal.worktreePath || terminal.agentPreset?.endsWith('-worktree') === true
+    const previousSdkSessionId = terminal.sdkSessionId
+    const repairedTerminal: TerminalInstance = {
+      ...terminal,
+      id: replacementId,
+      cwd: isWorktree ? (workspace?.folderPath || terminal.cwd) : terminal.cwd,
+      sdkSessionId: undefined,
+      claudeCliSessionId: undefined,
+      claudeCliRestartToken: undefined,
+      sessionMeta: undefined,
+      worktreePath: isWorktree ? undefined : terminal.worktreePath,
+      worktreeBranch: isWorktree ? undefined : terminal.worktreeBranch,
+      worktreeMergedKind: isWorktree ? undefined : terminal.worktreeMergedKind,
+      historyKey: uuidv4().replace(/-/g, '').slice(0, 12),
+      pendingPrompt: undefined,
+      pendingImages: undefined,
+      hasPendingAction: false,
+      isAgentRunning: false,
+      scrollbackBuffer: [],
+      pid: undefined,
+    }
+
+    this.state = {
+      ...this.state,
+      workspaces: this.state.workspaces.map(w => ({
+        ...w,
+        focusedTerminalId: w.focusedTerminalId === terminalId ? replacementId : w.focusedTerminalId,
+        lastSdkSessionId: previousSdkSessionId && w.lastSdkSessionId === previousSdkSessionId
+          ? undefined
+          : w.lastSdkSessionId,
+      })),
+      terminals: this.state.terminals.map(t => t.id === terminalId ? repairedTerminal : t),
+      activeTerminalId: this.state.activeTerminalId === terminalId
+        ? replacementId
+        : this.state.activeTerminalId,
+      focusedTerminalId: this.state.focusedTerminalId === terminalId
+        ? replacementId
+        : this.state.focusedTerminalId,
+    }
+    debugLog('[workspace-store] repaired duplicate agent session identity', {
+      windowId: this.windowId,
+      previousSessionId: terminalId,
+      replacementSessionId: replacementId,
+      workspaceId: terminal.workspaceId,
+    })
+    this.notify()
+    void this.save()
+    return replacementId
+  }
+
   setTerminalSdkSessionId(terminalId: string, sdkSessionId: string | undefined): void {
     this.state = {
       ...this.state,

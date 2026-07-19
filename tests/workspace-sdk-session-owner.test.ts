@@ -30,12 +30,13 @@ async function main() {
     applySerializedData(data: string): void
   }).applySerializedData(JSON.stringify({
     workspaces: [
-      { id: 'ws-a', name: 'A', folderPath: '/a', createdAt: 1 },
+      { id: 'ws-a', name: 'A', folderPath: '/a', createdAt: 1, focusedTerminalId: 'claude-2', lastSdkSessionId: 'shared' },
     ],
     activeWorkspaceId: 'ws-a',
+    activeTerminalId: 'claude-2',
     terminals: [
       { id: 'claude-1', workspaceId: 'ws-a', type: 'terminal', agentPreset: 'claude-code', title: 'Claude 1', cwd: '/a', sdkSessionId: 'shared' },
-      { id: 'claude-2', workspaceId: 'ws-a', type: 'terminal', agentPreset: 'claude-code-v2', title: 'Claude 2', cwd: '/a', sdkSessionId: 'shared' },
+      { id: 'claude-2', workspaceId: 'ws-a', type: 'terminal', agentPreset: 'claude-code-worktree', title: 'Claude 2', cwd: '/a/.bat-worktrees/shared', sdkSessionId: 'shared', claudeCliSessionId: 'cli-shared', worktreePath: '/a/.bat-worktrees/shared', worktreeBranch: 'bat/shared', historyKey: 'shared-history' },
       { id: 'codex-1', workspaceId: 'ws-a', type: 'terminal', agentPreset: 'codex-agent', title: 'Codex 1', cwd: '/a', sdkSessionId: 'shared' },
     ],
   }))
@@ -65,6 +66,23 @@ async function main() {
     undefined,
     'non-SDK runtime families should not participate in sdk session ownership',
   )
+
+  const replacementId = workspaceStore.repairTerminalIdentityCollision('claude-2')
+  assert.ok(replacementId && replacementId !== 'claude-2')
+  const repairedState = workspaceStore.getState()
+  const repaired = repairedState.terminals.find(t => t.id === replacementId)
+  assert.ok(repaired)
+  assert.equal(repaired.sdkSessionId, undefined)
+  assert.equal(repaired.claudeCliSessionId, undefined)
+  assert.equal(repaired.worktreePath, undefined)
+  assert.equal(repaired.worktreeBranch, undefined)
+  assert.equal(repaired.cwd, '/a')
+  assert.notEqual(repaired.historyKey, 'shared-history')
+  assert.equal(repairedState.focusedTerminalId, replacementId)
+  assert.equal(repairedState.activeTerminalId, replacementId)
+  assert.equal(repairedState.workspaces[0].focusedTerminalId, replacementId)
+  assert.equal(repairedState.workspaces[0].lastSdkSessionId, undefined)
+  assert.ok(repairedState.terminals.some(t => t.id === 'claude-1'), 'the original owner must remain unchanged')
 
   console.log('workspace sdk session owner: passed')
 }

@@ -2481,7 +2481,7 @@ fn invoke_rust_for_remote(
         }),
         "pty:kill" => string_param(params, "id", channel).and_then(|id| {
             let state = ctx.state::<pty_cmd::PtyState>();
-            pty_cmd::kill_pty_session(&state, &id)
+            pty_cmd::kill_pty_session(&ctx, &state, &id)
                 .map(|_| Value::Bool(true))
                 .map_err(|err| format!("{err:?}"))
         }),

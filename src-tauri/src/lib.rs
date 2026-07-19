@@ -22,6 +22,7 @@ mod host_context;
 mod linux_wayland;
 mod log_file;
 mod network_addresses;
+mod panic_log;
 mod path_guard;
 mod remote_client;
 pub mod remote_core;
@@ -184,6 +185,9 @@ fn app_builder(headless: bool) -> tauri::Builder<tauri::Wry> {
         .manage(window_registry::WindowRegistryState::default())
         .manage(sidecar::SidecarState::new())
         .setup(move |app| {
+            if let Some(data_dir) = app_data::app_data_dir_opt(app.handle()) {
+                panic_log::install(data_dir);
+            }
             if !headless {
                 // Tier 2 is the default: recover from an interrupted swap and
                 // auto-migrate legacy multi-HOME Codex accounts into the unified
@@ -458,6 +462,7 @@ fn run_headless_server(args: HeadlessServerArgs) -> Result<(), String> {
         .clone()
         .or_else(app_data::app_data_dir_opt)
         .ok_or_else(|| "bat-server: could not resolve app data dir".to_string())?;
+    panic_log::install(data_dir.clone());
 
     let remote_state = remote_server::RustRemoteServerState::default();
     let sidecar_state = sidecar::SidecarState::new();
