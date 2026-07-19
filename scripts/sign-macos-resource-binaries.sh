@@ -66,14 +66,50 @@ if [[ -z "$IDENTITY" ]]; then
   exit 1
 fi
 
+# Binaries embedding a JS engine (V8 / JavaScriptCore) allocate JIT (MAP_JIT)
+# memory. Under the hardened runtime this requires the allow-jit entitlements
+# (matching how OpenAI and Anthropic sign their own distributions of these
+# binaries). Without them:
+#   - codex-code-mode-host (V8) aborts at startup with FatalProcessOutOfMemory,
+#     so every Codex tool call fails with "code-mode host closed its stdout".
+#   - the bundled claude binary (Bun/JSC) silently disables JIT-dependent
+#     features; SharedArrayBuffer disappears and Claude Code sessions crash
+#     with "ReferenceError: SharedArrayBuffer is not defined".
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+JIT_ENTITLEMENTS="$SCRIPT_DIR/../build/entitlements.jit.plist"
+
+needs_jit_entitlements() {
+  case "$(basename "$1")" in
+    codex-code-mode-host|claude) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 count=0
+jit_signed=()
 for root in "${ROOTS[@]}"; do
   while IFS= read -r -d '' file_path; do
     if file "$file_path" | grep -q 'Mach-O'; then
-      codesign --force --timestamp --options runtime --sign "$IDENTITY" "$file_path"
+      if needs_jit_entitlements "$file_path"; then
+        codesign --force --timestamp --options runtime \
+          --entitlements "$JIT_ENTITLEMENTS" --sign "$IDENTITY" "$file_path"
+        jit_signed+=("$file_path")
+      else
+        codesign --force --timestamp --options runtime --sign "$IDENTITY" "$file_path"
+      fi
       count=$((count + 1))
     fi
   done < <(find "$root" -type f -perm -111 -print0)
 done
 
-echo "[sign-macos-resource-binaries] signed $count Mach-O resource file(s)"
+# Post-condition: JS-engine binaries must carry allow-jit after signing, or the
+# packaged app ships broken Codex/Claude agents (see needs_jit_entitlements).
+for file_path in ${jit_signed[@]+"${jit_signed[@]}"}; do
+  if ! codesign -d --entitlements - "$file_path" 2>/dev/null \
+      | grep -q 'com.apple.security.cs.allow-jit'; then
+    echo "[sign-macos-resource-binaries] $file_path is missing allow-jit after signing" >&2
+    exit 1
+  fi
+done
+
+echo "[sign-macos-resource-binaries] signed $count Mach-O resource file(s) (${#jit_signed[@]} with JIT entitlements)"
