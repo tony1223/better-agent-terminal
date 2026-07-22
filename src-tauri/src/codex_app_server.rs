@@ -274,6 +274,10 @@ pub struct CodexAppServerState {
 struct CodexSession {
     session_id: String,
     thread_id: Option<String>,
+    // A newly created thread only lives in the current app-server process until
+    // its first turn starts. If the idle reaper restarts that process first,
+    // thread/resume cannot restore it because there is no rollout on disk yet.
+    thread_has_started_turn: bool,
     cwd: String,
     model: String,
     sandbox_mode: String,
@@ -1754,6 +1758,14 @@ fn is_thread_not_found_error(message: &str) -> bool {
     lower.contains("thread not found") || (lower.contains("thread") && lower.contains("not found"))
 }
 
+fn is_missing_rollout_error(message: &str) -> bool {
+    message.to_ascii_lowercase().contains("no rollout found")
+}
+
+fn should_replace_unpersisted_thread(thread_has_started_turn: bool, resume_error: &str) -> bool {
+    !thread_has_started_turn && is_missing_rollout_error(resume_error)
+}
+
 fn found_active_turn_from_interrupt_error(message: &str) -> Option<String> {
     let found = message.split(" but found ").nth(1)?.trim();
     let turn_id = found
@@ -2879,6 +2891,7 @@ impl CodexAppServerState {
                 .map_err(|_| "codex sessions lock poisoned".to_string())?;
             for (session_id, session) in sessions.iter_mut() {
                 session.thread_id = None;
+                session.thread_has_started_turn = false;
                 session.active_turn_id = None;
                 session.active_turn_key = None;
                 session.active_turn_started = false;
@@ -3483,6 +3496,7 @@ impl CodexAppServerState {
                 .map_err(|_| "codex sessions lock poisoned".to_string())?;
             for (session_id, session) in sessions.iter_mut() {
                 session.thread_id = None;
+                session.thread_has_started_turn = false;
                 session.active_turn_id = None;
                 session.active_turn_key = None;
                 session.active_turn_started = false;
@@ -3573,6 +3587,7 @@ impl CodexAppServerState {
             let mut sessions = self.inner.sessions.lock().expect("codex sessions lock");
             if let Some(session) = sessions.get_mut(session_id) {
                 session.thread_id = Some(thread_id.clone());
+                session.thread_has_started_turn = false;
                 clear_runtime_status(session);
                 emit(app, "claude:status", session_id, "meta", session.metadata());
             }
@@ -3588,6 +3603,70 @@ impl CodexAppServerState {
             format!("started new thread after Codex account switch thread={thread_id}"),
         );
         Ok(thread_id)
+    }
+
+    fn replace_unpersisted_thread(
+        &self,
+        app: &HostContext,
+        connection: &CodexConnection,
+        session_id: &str,
+        old_thread_id: &str,
+        model: &str,
+        cwd: &str,
+        approval_policy: &str,
+        sandbox_mode: &str,
+    ) -> Result<String, String> {
+        log_codex(
+            app,
+            session_id,
+            format!(
+                "empty thread has no rollout after app-server restart; creating replacement oldThread={old_thread_id}"
+            ),
+        );
+        let response = connection.request_logged(
+            app,
+            session_id,
+            "thread/start",
+            build_thread_start_params(model, cwd, approval_policy, sandbox_mode),
+            REQUEST_TIMEOUT,
+        )?;
+        let new_thread_id = response
+            .get("thread")
+            .and_then(|value| value.get("id"))
+            .and_then(Value::as_str)
+            .or_else(|| response.get("threadId").and_then(Value::as_str))
+            .ok_or_else(|| {
+                "codex app-server replacement thread/start returned no thread id".to_string()
+            })?
+            .to_string();
+
+        let meta = {
+            let mut sessions = self.inner.sessions.lock().expect("codex sessions lock");
+            let session = sessions
+                .get_mut(session_id)
+                .ok_or_else(|| "Codex session not started".to_string())?;
+            if session.thread_id.as_deref() != Some(old_thread_id) {
+                return Err("Codex thread changed while replacing an empty thread".to_string());
+            }
+            session.thread_id = Some(new_thread_id.clone());
+            session.thread_has_started_turn = false;
+            session.metadata()
+        };
+        self.remove_thread_owner_if_session(old_thread_id, session_id);
+        self.inner
+            .thread_to_session
+            .lock()
+            .expect("codex thread map lock")
+            .insert(new_thread_id.clone(), session_id.to_string());
+        emit(app, "claude:status", session_id, "meta", meta);
+        log_codex(
+            app,
+            session_id,
+            format!(
+                "replacement thread/start ok oldThread={old_thread_id} newThread={new_thread_id}"
+            ),
+        );
+        Ok(new_thread_id)
     }
 
     fn session_id_for_notification(&self, params: &Value) -> Option<String> {
@@ -4244,6 +4323,7 @@ impl CodexAppServerState {
         let session = CodexSession {
             session_id: session_id.clone(),
             thread_id: None,
+            thread_has_started_turn: false,
             cwd: cwd.clone(),
             model: model.clone(),
             sandbox_mode: sandbox_mode.clone(),
@@ -4422,6 +4502,9 @@ impl CodexAppServerState {
         let session = CodexSession {
             session_id: session_id.clone(),
             thread_id: Some(sdk_session_id.clone()),
+            // A successful thread/resume proves this thread has persisted
+            // state; never silently replace it if a later resume fails.
+            thread_has_started_turn: true,
             cwd,
             model,
             sandbox_mode,
@@ -4583,14 +4666,27 @@ impl CodexAppServerState {
                     format!("send_message build_turn_input failed: {err}"),
                 );
                 self.fail_turn(app, &session_id, err.clone());
-                return Ok(json!({ "ok": false, "error": err }));
+                return Ok(json!({
+                    "ok": false,
+                    "error": err,
+                    "errorEmitted": true
+                }));
             }
         };
         if let Err(err) = self.ensure_thread_for_session(app, &session_id) {
             cleanup_temp_images(temp_image_paths);
             return Err(err);
         }
-        let (thread_id, model, effort, cwd, approval_policy, sandbox_mode, interrupted_turn) = {
+        let (
+            thread_id,
+            model,
+            effort,
+            cwd,
+            approval_policy,
+            sandbox_mode,
+            interrupted_turn,
+            thread_has_started_turn,
+        ) = {
             let mut sessions = self.inner.sessions.lock().expect("codex sessions lock");
             let Some(session) = sessions.get_mut(&session_id) else {
                 cleanup_temp_images(temp_image_paths);
@@ -4653,6 +4749,7 @@ impl CodexAppServerState {
                 session.approval_policy.clone(),
                 session.sandbox_mode.clone(),
                 interrupted_turn,
+                session.thread_has_started_turn,
             )
         };
         let connection = match self.ensure_connection(app) {
@@ -4857,7 +4954,11 @@ impl CodexAppServerState {
                                         &session_id,
                                         format!("Codex error after thread resume: {retry_err}"),
                                     );
-                                    return Ok(json!({ "ok": false, "error": retry_err }));
+                                    return Ok(json!({
+                                        "ok": false,
+                                        "error": retry_err,
+                                        "errorEmitted": true
+                                    }));
                                 }
                             }
                         }
@@ -4867,19 +4968,96 @@ impl CodexAppServerState {
                                 &session_id,
                                 format!("thread/resume failed: {resume_err}"),
                             );
-                            let message = format!(
-                                "Codex error: thread not found: {thread_id}; resume failed: {resume_err}"
-                            );
-                            self.fail_turn(app, &session_id, message.clone());
-                            return Ok(json!({ "ok": false, "error": message }));
+                            if should_replace_unpersisted_thread(
+                                thread_has_started_turn,
+                                &resume_err,
+                            ) {
+                                let replacement_thread_id = match self.replace_unpersisted_thread(
+                                    app,
+                                    connection.as_ref(),
+                                    &session_id,
+                                    &thread_id,
+                                    &model,
+                                    &cwd,
+                                    &approval_policy,
+                                    &sandbox_mode,
+                                ) {
+                                    Ok(replacement_thread_id) => replacement_thread_id,
+                                    Err(replacement_err) => {
+                                        let message = format!(
+                                            "Codex could not recreate an empty thread after restart: {replacement_err}"
+                                        );
+                                        self.fail_turn(app, &session_id, message.clone());
+                                        return Ok(json!({
+                                            "ok": false,
+                                            "error": message,
+                                            "errorEmitted": true
+                                        }));
+                                    }
+                                };
+                                log_codex(
+                                    app,
+                                    &session_id,
+                                    format!(
+                                        "retrying first turn on replacement thread={replacement_thread_id}"
+                                    ),
+                                );
+                                match connection.request_logged(
+                                    app,
+                                    &session_id,
+                                    "turn/start",
+                                    build_turn_start_params(
+                                        &replacement_thread_id,
+                                        input,
+                                        &model,
+                                        &effort,
+                                        &approval_policy,
+                                        &sandbox_mode,
+                                    ),
+                                    TURN_START_TIMEOUT,
+                                ) {
+                                    Ok(response) => response,
+                                    Err(retry_err) => {
+                                        let message = format!(
+                                            "Codex error after recreating an empty thread: {retry_err}"
+                                        );
+                                        self.fail_turn(app, &session_id, message.clone());
+                                        return Ok(json!({
+                                            "ok": false,
+                                            "error": message,
+                                            "errorEmitted": true
+                                        }));
+                                    }
+                                }
+                            } else {
+                                let message = format!(
+                                    "Codex error: thread not found: {thread_id}; resume failed: {resume_err}"
+                                );
+                                self.fail_turn(app, &session_id, message.clone());
+                                return Ok(json!({
+                                    "ok": false,
+                                    "error": message,
+                                    "errorEmitted": true
+                                }));
+                            }
                         }
                     }
                 } else {
                     self.fail_turn(app, &session_id, format!("Codex error: {err}"));
-                    return Ok(json!({ "ok": false, "error": err }));
+                    return Ok(json!({
+                        "ok": false,
+                        "error": err,
+                        "errorEmitted": true
+                    }));
                 }
             }
         };
+        {
+            let mut sessions = self.inner.sessions.lock().expect("codex sessions lock");
+            if let Some(session) = sessions.get_mut(&session_id) {
+                session.thread_has_started_turn = true;
+            }
+        }
         if let Some(turn_id) = response
             .get("turn")
             .and_then(|v| v.get("id"))
@@ -5168,6 +5346,7 @@ impl CodexAppServerState {
                 .get_mut(&session_id)
                 .ok_or_else(|| bridge_error("Codex session not started"))?;
             session.thread_id = Some(new_thread_id.clone());
+            session.thread_has_started_turn = false;
             session.active_turn_id = None;
             session.active_turn_key = None;
             session.active_turn_started = false;
@@ -6690,6 +6869,7 @@ mod tests {
         CodexSession {
             session_id: "session-1".to_string(),
             thread_id: Some("thread-1".to_string()),
+            thread_has_started_turn: true,
             cwd: "/repo".to_string(),
             model: "gpt-5.6-sol".to_string(),
             sandbox_mode: "workspace-write".to_string(),
@@ -7131,6 +7311,17 @@ mod tests {
     }
 
     #[test]
+    fn codex_only_replaces_an_unpersisted_thread_when_no_rollout_exists() {
+        let missing_rollout = "no rollout found for thread id 019e1bfc-e8f6-77e1-9886-1833ce991217";
+        assert!(should_replace_unpersisted_thread(false, missing_rollout));
+        assert!(!should_replace_unpersisted_thread(true, missing_rollout));
+        assert!(!should_replace_unpersisted_thread(
+            false,
+            "authentication required"
+        ));
+    }
+
+    #[test]
     fn codex_interrupt_error_extracts_found_active_turn() {
         assert_eq!(
             found_active_turn_from_interrupt_error(
@@ -7366,6 +7557,7 @@ mod tests {
         let session = CodexSession {
             session_id: "s-1".to_string(),
             thread_id: Some("thread-1".to_string()),
+            thread_has_started_turn: true,
             cwd: "/repo".to_string(),
             model: "gpt-5.6-sol".to_string(),
             sandbox_mode: "workspace-write".to_string(),
@@ -7414,6 +7606,7 @@ mod tests {
         let mut session = CodexSession {
             session_id: "s-1".to_string(),
             thread_id: Some("thread-1".to_string()),
+            thread_has_started_turn: true,
             cwd: "/repo".to_string(),
             model: "gpt-5.5".to_string(),
             sandbox_mode: "workspace-write".to_string(),
@@ -7470,6 +7663,7 @@ mod tests {
         let mut session = CodexSession {
             session_id: "s-1".to_string(),
             thread_id: Some("thread-1".to_string()),
+            thread_has_started_turn: true,
             cwd: "/repo".to_string(),
             model: "gpt-5.6-sol".to_string(),
             sandbox_mode: "workspace-write".to_string(),

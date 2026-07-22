@@ -48,6 +48,11 @@ async function main() {
     false,
     'Codex account changes must not trigger a second destructive renderer reset',
   )
+  assert.match(
+    source,
+    /result\.errorEmitted === true[\s\S]*err instanceof CodexSendError && err\.alreadyReported/,
+    'Codex send failures already emitted by the backend must not render a duplicate error',
+  )
   const weeklyOnlySnapshot: HostUsageSnapshot = {
     provider: 'codex',
     fiveHour: null,

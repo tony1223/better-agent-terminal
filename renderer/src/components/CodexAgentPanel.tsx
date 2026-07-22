@@ -57,6 +57,13 @@ function formatUnknownError(error: unknown): string {
   }
 }
 
+class CodexSendError extends Error {
+  constructor(message: string, readonly alreadyReported: boolean) {
+    super(message)
+    this.name = 'CodexSendError'
+  }
+}
+
 function isAgentSessionCollision(message: string): boolean {
   return message.includes('BAT_AGENT_SESSION_COLLISION')
 }
@@ -2712,9 +2719,16 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
 
     try {
       const sendInvokeStarted = performance.now()
-      const result = await sendClaudeMessage(promptToSend, imageDataUrls.length > 0 ? imageDataUrls : undefined) as { ok?: boolean; error?: string } | undefined
+      const result = await sendClaudeMessage(promptToSend, imageDataUrls.length > 0 ? imageDataUrls : undefined) as {
+        ok?: boolean
+        error?: string
+        errorEmitted?: boolean
+      } | undefined
       if (result?.ok === false) {
-        throw new Error(result.error || 'Codex rejected the request.')
+        throw new CodexSendError(
+          result.error || 'Codex rejected the request.',
+          result.errorEmitted === true,
+        )
       }
       if (debugSend) {
         host.debug.log(
@@ -2758,13 +2772,17 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
         // Send failed (invoke-error) → mark the ghosted message failed.
         setMessages(prev => prev.map(m => (!isToolCall(m) && m.id === userMsgId) ? { ...m, status: 'failed' as const } : m))
       }
-      setMessages(prev => [...prev, {
-        id: `err-send-${Date.now()}`,
-        sessionId,
-        role: 'system' as const,
-        content: `Error: ${message}`,
-        timestamp: Date.now(),
-      }])
+      // fail_turn emits claude:error before returning its structured failure.
+      // Do not append the same message again when handling that invoke result.
+      if (!(err instanceof CodexSendError && err.alreadyReported)) {
+        setMessages(prev => [...prev, {
+          id: `err-send-${Date.now()}`,
+          sessionId,
+          role: 'system' as const,
+          content: `Error: ${message}`,
+          timestamp: Date.now(),
+        }])
+      }
     }
   }, [isRemoteConnected, isStreaming, isInterrupted, sessionId, attachedImages, attachedFiles, clearInput, setInputValue, clearPendingAutoContinue, sendClaudeMessage, onRequestLogin])
 
