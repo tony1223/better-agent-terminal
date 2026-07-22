@@ -3743,6 +3743,15 @@ async function inProcess() {
 
 // End-to-end: spawn `node server.mjs`, send a few requests, assert replies.
 async function endToEnd() {
+  const isolatedDataDir = mkdtempSync(join(tmpdir(), 'bat-sidecar-e2e-data-'))
+  try {
+    await endToEndInDataDir(isolatedDataDir)
+  } finally {
+    rmSync(isolatedDataDir, { recursive: true, force: true })
+  }
+}
+
+async function endToEndInDataDir(isolatedDataDir) {
   const child = spawn(process.execPath, [serverPath], {
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true,
@@ -3751,7 +3760,11 @@ async function endToEnd() {
     // the cargo end_to_end_bundled_sdk_loads_through_bundled_node
     // integration test instead — which is the right place because
     // that test actually has a bundled SDK available.
-    env: { ...process.env, BAT_SIDECAR_DISABLE_SDK: '1' },
+    env: {
+      ...process.env,
+      BAT_SIDECAR_DISABLE_SDK: '1',
+      BAT_SIDECAR_DATA_DIR: isolatedDataDir,
+    },
   })
   // Capture stderr so a hidden crash surfaces if the test fails.
   let stderr = ''
@@ -3816,6 +3829,11 @@ async function endToEnd() {
   const eventNames = new Set(eventNotifs.map(e => e.method))
   assert.ok(eventNames.has('event:claude:message'), `expected event:claude:message, got ${[...eventNames]}`)
   assert.ok(eventNames.has('event:claude:turn-end'), `expected event:claude:turn-end, got ${[...eventNames]}`)
+
+  // The spawned server must never fall back to the developer's real
+  // userData directory. Confirm its log landed in the per-run temp dir.
+  assert.equal(existsSync(join(isolatedDataDir, 'sidecar.log')), true,
+    'sidecar e2e must write logs inside its isolated data directory')
 }
 
 async function run() {
