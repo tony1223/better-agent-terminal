@@ -29,6 +29,7 @@ import { buildSnippetContextPrompt, parseSnippetSlashCommand, type SnippetForCon
 import { createToolRenderCache, getOrComputeToolRender, pruneToolRenderCache } from '../utils/tool-result-cache'
 import { useRafBatchedString } from '../utils/use-raf-batched-string'
 import { translateRuntimeMessage } from '../utils/runtime-status-message'
+import { agentSendResultError, isMissingSessionCwdError } from '../utils/agent-send-recovery'
 import { dispatchWorkerCommand, parseWorkerSlashCommand } from '../utils/worker-command'
 import { normalizePendingAskUser, wrapPreviewHtml } from './AskUserQuestion.helpers'
 import { autoContinueTurnEndKey, buildCollapsedOutputPreview, formatContentSize, formatElapsed, formatFullTimestamp, formatTimestamp, parseContentBlocks, parseShellInvocation, shouldAutoContinueForTrigger, shouldShowTimeDivider, splitSystemReminders, stringifyToolResult, summarizeToolSearchResult, toolDescription, toolInputContent, toolInputSummary, truncateMiddle } from './CodexAgentPanel.helpers'
@@ -1693,6 +1694,16 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
     }
   }, [sessionId, isCodexSession, archiveDlog])
 
+  const previousRemoteConnectedRef = useRef(isRemoteConnected)
+  useEffect(() => {
+    const wasConnected = previousRemoteConnectedRef.current
+    previousRemoteConnectedRef.current = isRemoteConnected
+    if (wasConnected && !isRemoteConnected) {
+      clearStartedSessionTracking(sessionId)
+      host.debug.log(`[Codex:${sessionId.slice(0, 8)}] remote disconnected; cleared cached session startup state`)
+    }
+  }, [isRemoteConnected, sessionId])
+
   // Start session on mount (guarded against StrictMode double-mount)
   // If a saved sdkSessionId exists (from a previous /resume), auto-resume that session
   useEffect(() => {
@@ -1759,7 +1770,7 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
       cancelled = true
       scheduleStartedSessionCleanup(sessionId)
     }
-  }, [sessionId, cwd, isCodexSession, codexSandboxMode, codexApprovalPolicy])
+  }, [sessionId, cwd, isCodexSession, codexSandboxMode, codexApprovalPolicy, isRemoteConnected])
 
   // Refresh session metadata when panel becomes active (fixes stale display after window switch)
   const refreshActiveSessionMeta = useCallback(() => {
@@ -1873,20 +1884,32 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
     clientMessage?: { id?: string; displayContent?: string; suppressUserEcho?: boolean },
   ) => {
     await ensureSessionStarted()
+    const recoverMissingSession = async (message: string) => {
+      host.debug.log(`[Codex:${sessionId.slice(0, 8)}] sendMessage hit no-cwd (runtime restarted) — dropping phantom session, re-establishing, and retrying`)
+      await host.claude.stopSession(sessionId).catch((stopErr: unknown) => {
+        host.debug.log(`[Codex:${sessionId.slice(0, 8)}] no-cwd phantom cleanup failed: ${formatUnknownError(stopErr)}`)
+      })
+      clearStartedSessionTracking(sessionId)
+      await ensureSessionStarted()
+      host.debug.log(`[Codex:${sessionId.slice(0, 8)}] no-cwd recovery ready; retrying original message detail=${message}`)
+      return host.claude.sendMessage(sessionId, prompt, images, autoCompactWindow, clientMessage)
+    }
     try {
-      return await host.claude.sendMessage(sessionId, prompt, images, autoCompactWindow, clientMessage)
+      const result = await host.claude.sendMessage(sessionId, prompt, images, autoCompactWindow, clientMessage)
+      const resultError = agentSendResultError(result)
+      if (resultError && isMissingSessionCwdError(resultError)) {
+        return await recoverMissingSession(resultError)
+      }
+      return result
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err)
+      const message = formatUnknownError(err)
       // "session has no cwd" means the sidecar restarted underneath us: its
       // session map is empty but our module-level started-session tracking is
       // stale, so ensureSessionStarted skipped the (re)start. Clear the stale
       // tracking, re-establish (the resume path keeps the transcript), and
       // retry once with the same clientMessage so the user echo dedupes.
-      if (!/session has no cwd/i.test(message)) throw err
-      host.debug.log(`[Codex:${sessionId.slice(0, 8)}] sendMessage hit no-cwd (sidecar restarted) — re-establishing session and retrying`)
-      clearStartedSessionTracking(sessionId)
-      await ensureSessionStarted()
-      return await host.claude.sendMessage(sessionId, prompt, images, autoCompactWindow, clientMessage)
+      if (!isMissingSessionCwdError(message)) throw err
+      return await recoverMissingSession(message)
     }
   }, [ensureSessionStarted, sessionId])
 

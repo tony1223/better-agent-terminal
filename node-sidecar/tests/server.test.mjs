@@ -908,6 +908,30 @@ async function inProcess() {
     rmSync(mcpRoot, { recursive: true, force: true })
   }
 
+  // A renderer can retain module-level "started" state after the host or
+  // sidecar restarts. sendMessage must reject before user echo/idempotency
+  // bookkeeping and remove the default record it just materialized, so the
+  // renderer's recovery getSessionState sees null and calls start/resume.
+  const noCwdReply = await dispatch({ jsonrpc: '2.0', id: 190, method: 'claude.sendMessage',
+    params: { sessionId: 'phantom-no-cwd', prompt: 'continue', clientMessageId: 'phantom-message-1' } })
+  assert.equal(noCwdReply.error?.code, -32000)
+  assert.match(noCwdReply.error?.message || '', /session has no cwd/i)
+  assert.equal(mod.sessions.has('phantom-no-cwd'), false, 'failed send must not leave a phantom session')
+  const noCwdState = await dispatch({ jsonrpc: '2.0', id: 191, method: 'claude.getSessionState',
+    params: { sessionId: 'phantom-no-cwd' } })
+  assert.equal(noCwdState.result, null)
+
+  // Setter calls may also create a default record before startSession. State
+  // lookup must discard it rather than telling self-heal that a live session
+  // exists.
+  await dispatch({ jsonrpc: '2.0', id: 192, method: 'claude.setModel',
+    params: { sessionId: 'phantom-from-setter', model: 'claude-sonnet-4-6' } })
+  assert.equal(mod.sessions.has('phantom-from-setter'), true)
+  const setterPhantomState = await dispatch({ jsonrpc: '2.0', id: 193, method: 'claude.getSessionState',
+    params: { sessionId: 'phantom-from-setter' } })
+  assert.equal(setterPhantomState.result, null)
+  assert.equal(mod.sessions.has('phantom-from-setter'), false)
+
   // Per-session state round-trip via dispatch. Verifies setters mutate
   // the session map and getters read back exactly what was written.
   // This is the "stub stays consistent" contract — when SDK lands the

@@ -540,8 +540,19 @@ registerHandler('claude.resetSession', async (params) => {
 // the given id we return null to match Electron's behaviour.
 registerHandler('claude.getSessionState', async (params) => {
   if (isCodexSession(String(params?.sessionId ?? ''))) return getCodexSessionState(params)
-  const s = sessions.get(String(params?.sessionId ?? ''))
+  const sessionId = String(params?.sessionId ?? '')
+  const s = sessions.get(sessionId)
   if (!s) return null
+  const cwd = s.options && typeof s.options === 'object' && typeof s.options.cwd === 'string'
+    ? s.options.cwd.trim()
+    : ''
+  if (!cwd) {
+    // Setter/send paths can materialize a default record before startSession.
+    // It is not a resumable session and must not make renderer self-healing
+    // skip the required startSession/resumeSession call after a host restart.
+    sessions.delete(sessionId)
+    return null
+  }
   return {
     active: s.active,
     permissionMode: s.permissionMode,

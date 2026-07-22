@@ -44,6 +44,16 @@ import { isCodexSession, sendCodexMessage, isCodexAgentPreset } from './codex.mj
 let userEchoSeq = 0
 const MAX_CLIENT_MESSAGE_REQUESTS = 256
 
+function sessionCwd(session) {
+  return session?.options && typeof session.options === 'object' && typeof session.options.cwd === 'string'
+    ? session.options.cwd.trim()
+    : ''
+}
+
+function missingSessionCwdError(sessionId) {
+  return `claude.sendMessage(${shortSessionId(sessionId)}): session has no cwd; startSession must be called with options.cwd`
+}
+
 function clientMessageId(params) {
   return typeof params?.clientMessageId === 'string' && params.clientMessageId.trim()
     ? params.clientMessageId
@@ -684,9 +694,9 @@ function handleTaskMessage(s, sessionId, msg) {
 }
 
 async function buildQueryOptions(s, sessionId, prompt) {
-  const cwd = (s.options && typeof s.options === 'object' && typeof s.options.cwd === 'string') ? s.options.cwd : ''
+  const cwd = sessionCwd(s)
   if (!cwd) {
-    throw new Error(`claude.sendMessage(${shortSessionId(sessionId)}): session has no cwd; startSession must be called with options.cwd`)
+    throw new Error(missingSessionCwdError(sessionId))
   }
   const sdkMode = s.permissionMode === 'bypassPlan' ? 'plan' : s.permissionMode
   const sdkModel = sdkModelForClaudeSelection(s.model)
@@ -962,6 +972,15 @@ registerHandler('claude.sendMessage', async (params) => {
     throw new Error('claude.sendMessage: missing sessionId')
   }
   const s = ensureSession(sessionId)
+  // A host/runtime restart loses the in-memory session map while the renderer
+  // may still cache this id as started. Do this preflight before user echo and
+  // clientMessageId bookkeeping: otherwise the failed request creates a
+  // phantom session whose duplicate record blocks the renderer's recovery
+  // retry, and getSessionState incorrectly reports that the session exists.
+  if (!isCodexSession(sessionId) && !sessionCwd(s)) {
+    sessions.delete(sessionId)
+    throw new Error(missingSessionCwdError(sessionId))
+  }
   const sid = shortSessionId(sessionId)
   const prompt = typeof params?.prompt === 'string' ? params.prompt : ''
   const images = Array.isArray(params?.images) ? params.images : null

@@ -28,6 +28,7 @@ import { buildSnippetContextPrompt, parseSnippetSlashCommand, type SnippetForCon
 import { createToolRenderCache, getOrComputeToolRender, pruneToolRenderCache } from '../utils/tool-result-cache'
 import { useRafBatchedString } from '../utils/use-raf-batched-string'
 import { translateRuntimeMessage } from '../utils/runtime-status-message'
+import { agentSendResultError, isMissingSessionCwdError } from '../utils/agent-send-recovery'
 import { dispatchWorkerCommand, parseWorkerSlashCommand } from '../utils/worker-command'
 import { buildCollapsedOutputPreview, formatContentSize, parseShellInvocation, stringifyToolResult, summarizeToolCommandInput, summarizeToolSearchResult, truncateMiddle } from './CodexAgentPanel.helpers'
 import { normalizePendingAskUser, summarizeAskUserInput, wrapPreviewHtml } from './AskUserQuestion.helpers'
@@ -1725,6 +1726,16 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
     }
   }, [sessionId, archiveDlog])
 
+  const previousRemoteConnectedRef = useRef(isRemoteConnected)
+  useEffect(() => {
+    const wasConnected = previousRemoteConnectedRef.current
+    previousRemoteConnectedRef.current = isRemoteConnected
+    if (wasConnected && !isRemoteConnected) {
+      clearStartedSessionTracking(sessionId)
+      host.debug.log(`[Claude:${sessionId.slice(0, 8)}] remote disconnected; cleared cached session startup state`)
+    }
+  }, [isRemoteConnected, sessionId])
+
   // Start session on mount (guarded against StrictMode double-mount)
   // If a saved sdkSessionId exists (from a previous /resume), auto-resume that session
   useEffect(() => {
@@ -1975,20 +1986,32 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
     // Remember this turn's display prompt so a later barge-in can recap it.
     inFlightPromptRef.current = clientMessage?.displayContent ?? prompt
     await ensureSessionStarted()
+    const recoverMissingSession = async (message: string) => {
+      host.debug.log(`[Claude:${sessionId.slice(0, 8)}] sendMessage hit no-cwd (runtime restarted) — dropping phantom session, re-establishing, and retrying`)
+      await host.claude.stopSession(sessionId).catch((stopErr: unknown) => {
+        host.debug.log(`[Claude:${sessionId.slice(0, 8)}] no-cwd phantom cleanup failed: ${formatUnknownError(stopErr)}`)
+      })
+      clearStartedSessionTracking(sessionId)
+      await ensureSessionStarted()
+      host.debug.log(`[Claude:${sessionId.slice(0, 8)}] no-cwd recovery ready; retrying original message detail=${message}`)
+      return host.claude.sendMessage(sessionId, prompt, images, autoCompactWindow, clientMessage)
+    }
     try {
-      return await host.claude.sendMessage(sessionId, prompt, images, autoCompactWindow, clientMessage)
+      const result = await host.claude.sendMessage(sessionId, prompt, images, autoCompactWindow, clientMessage)
+      const resultError = agentSendResultError(result)
+      if (resultError && isMissingSessionCwdError(resultError)) {
+        return await recoverMissingSession(resultError)
+      }
+      return result
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err)
+      const message = formatUnknownError(err)
       // "session has no cwd" means the sidecar restarted underneath us: its
       // session map is empty but our module-level started-session tracking is
       // stale, so ensureSessionStarted skipped the (re)start. Clear the stale
       // tracking, re-establish (the resume path keeps the transcript), and
       // retry once with the same clientMessage so the user echo dedupes.
-      if (!/session has no cwd/i.test(message)) throw err
-      host.debug.log(`[Claude:${sessionId.slice(0, 8)}] sendMessage hit no-cwd (sidecar restarted) — re-establishing session and retrying`)
-      clearStartedSessionTracking(sessionId)
-      await ensureSessionStarted()
-      return await host.claude.sendMessage(sessionId, prompt, images, autoCompactWindow, clientMessage)
+      if (!isMissingSessionCwdError(message)) throw err
+      return await recoverMissingSession(message)
     }
   }, [ensureSessionStarted, sessionId])
 

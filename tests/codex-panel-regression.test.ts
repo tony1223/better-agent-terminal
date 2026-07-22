@@ -2,6 +2,7 @@ import * as assert from 'assert'
 import { readFile } from 'fs/promises'
 import { rateLimitsFromHostUsage, type HostUsageSnapshot } from '../renderer/src/utils/claude-usage-cache'
 import { normalizeReasoningSummary } from '../renderer/src/utils/reasoning-summary'
+import { agentSendResultError, isMissingSessionCwdError } from '../renderer/src/utils/agent-send-recovery'
 
 async function main() {
   const source = await readFile('renderer/src/components/CodexAgentPanel.tsx', 'utf8')
@@ -53,6 +54,13 @@ async function main() {
     /result\.errorEmitted === true[\s\S]*err instanceof CodexSendError && err\.alreadyReported/,
     'Codex send failures already emitted by the backend must not render a duplicate error',
   )
+  assert.equal(
+    agentSendResultError({ ok: false, error: 'session has no cwd' }),
+    'session has no cwd',
+    'resolved send failures must expose their error to session recovery',
+  )
+  assert.equal(agentSendResultError({ ok: true, error: 'ignored' }), null)
+  assert.equal(isMissingSessionCwdError('Session has no CWD; restart required'), true)
   const weeklyOnlySnapshot: HostUsageSnapshot = {
     provider: 'codex',
     fiveHour: null,
@@ -178,6 +186,21 @@ async function main() {
       panelSource,
       /await ensureSessionStarted\(\)[\s\S]*host\.claude\.sendMessage\(sessionId, prompt, images, autoCompactWindow, clientMessage\)/,
       `${name} panel should await session startup before sending the first message`,
+    )
+    assert.match(
+      panelSource,
+      /const recoverMissingSession[\s\S]*stopSession\(sessionId\)[\s\S]*clearStartedSessionTracking\(sessionId\)[\s\S]*await ensureSessionStarted\(\)/,
+      `${name} panel should discard the phantom session before restarting`,
+    )
+    assert.match(
+      panelSource,
+      /agentSendResultError\(result\)[\s\S]*isMissingSessionCwdError\(resultError\)[\s\S]*recoverMissingSession\(resultError\)/,
+      `${name} panel should recover resolved no-cwd failures as well as rejected RPCs`,
+    )
+    assert.match(
+      panelSource,
+      /wasConnected && !isRemoteConnected[\s\S]*clearStartedSessionTracking\(sessionId\)/,
+      `${name} panel should invalidate cached startup state when a remote connection drops`,
     )
   }
 
