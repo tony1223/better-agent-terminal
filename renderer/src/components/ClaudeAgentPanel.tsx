@@ -31,7 +31,7 @@ import { translateRuntimeMessage } from '../utils/runtime-status-message'
 import { agentSendResultError, isMissingSessionCwdError } from '../utils/agent-send-recovery'
 import { dispatchWorkerCommand, parseWorkerSlashCommand } from '../utils/worker-command'
 import { buildCollapsedOutputPreview, formatContentSize, parseShellInvocation, stringifyToolResult, summarizeToolCommandInput, summarizeToolSearchResult, truncateMiddle } from './CodexAgentPanel.helpers'
-import { normalizePendingAskUser, summarizeAskUserInput, wrapPreviewHtml } from './AskUserQuestion.helpers'
+import { formatAskUserPrompt, normalizePendingAskUser, summarizeAskUserInput, wrapPreviewHtml } from './AskUserQuestion.helpers'
 import { AgentActivityTree } from './AgentActivityTree'
 import { buildAgentTaskTree, findAgentNode, formatAgentNodeElapsed, summarizeAgentTree, terminateLifecycleEntries, type TaskLifecycle } from '../lib/agent-task-tree'
 import { usePanelActivation, usePanelActiveEffect, type PanelActivation } from '../utils/panel-activation'
@@ -4327,6 +4327,12 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
       const inLines = inContent.split('\n')
       const isInLong = inLines.length > 3
       const isInExpanded = expandedTools.has(`in-expand-${item.id}`)
+      // The header already prints the summary, and for single-field inputs
+      // (file_path / pattern / url / short commands) toolInputContent returns
+      // that exact same string — an IN row there costs a line and says nothing.
+      // The full input stays one click away via the header's expand toggle.
+      const headerSummary = desc ? '' : toolInputSummary(item.toolName, item.input)
+      const showInRow = !!inContent.trim() && inContent !== headerSummary
       return (
         <div key={item.id || index} className="tl-item" data-tool-id={item.id}>
           <div className={`tl-dot ${dotClass}`} />
@@ -4336,13 +4342,15 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
               {shellInvocation && <span className="claude-tool-shell">| {shellInvocation.shell} |</span>}
               {item.isDeferred && <span className="claude-tool-badge claude-deferred-badge">deferred</span>}
               {desc && <span className="claude-tool-desc">{desc}</span>}
-              {!desc && <span className="claude-tool-summary">{toolInputSummary(item.toolName, item.input)}</span>}
+              {!desc && <span className="claude-tool-summary">{headerSummary}</span>}
               {item.timestamp > 0 && <span className="claude-tool-time" title={formatFullTimestamp(item.timestamp)}>{formatTimestamp(item.timestamp)}</span>}
             </div>
             {item.denyReason && (
               <div className="claude-tool-reason">Reason: {item.denyReason}</div>
             )}
+            {(showInRow || !!item.result) && (
             <div className="claude-tool-blocks">
+              {showInRow && (
               <div
                 className="claude-tool-row"
                 onClick={() => handleCopyBlock(inContent, inBlockId)}
@@ -4364,6 +4372,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
                   {copiedId === inBlockId ? '✓' : '⧉'}
                 </span>
               </div>
+              )}
               {item.result && (() => {
                 const { outText, isLongOutput, outPreviewLines, reminders, errors } = getOrComputeToolRender(
                   toolRenderCacheRef.current,
@@ -4468,6 +4477,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
                 )
               })()}
             </div>
+            )}
             {item.denied && (
               <div className="claude-tool-interrupted">{t('claude.toolInterrupted')}</div>
             )}
@@ -5973,8 +5983,27 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
 
       {/* Prompt History Modal */}
       {showPromptHistory && (() => {
-        const userPrompts = allMessages
-          .filter(m => !isToolCall(m) && (m as ClaudeMessage).role === 'user') as ClaudeMessage[]
+        // Answered AskUserQuestion picks steer the turn the same way a typed
+        // prompt does, so they are listed here too. Only real user turns carry
+        // a rewindIndex: the host's rewindToPrompt counts role==='user'
+        // messages, so numbering answers into that sequence would rewind to
+        // the wrong turn.
+        const entries: { id: string; content: string; timestamp: number; rewindIndex: number | null }[] = []
+        let promptIndex = 0
+        for (const m of allMessages) {
+          if (isToolCall(m)) {
+            if (m.toolName !== 'AskUserQuestion' || !m.result) continue
+            const content = formatAskUserPrompt(m.input, m.result)
+            if (content) entries.push({ id: m.id, content, timestamp: m.timestamp, rewindIndex: null })
+            continue
+          }
+          const msg = m as ClaudeMessage
+          if (msg.role !== 'user') continue
+          entries.push({ id: msg.id, content: msg.content, timestamp: msg.timestamp, rewindIndex: promptIndex })
+          promptIndex += 1
+        }
+        const userPrompts = entries
+        const promptTurns = promptIndex
         return (
           <div className="claude-plan-overlay" onClick={() => setShowPromptHistory(false)}>
             <div className="claude-plan-modal claude-prompt-history-modal" onClick={e => e.stopPropagation()}>
@@ -5997,18 +6026,21 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
                   <div key={m.id} className="claude-prompt-history-item">
                     <div className="claude-prompt-history-header">
                       <span className="claude-prompt-history-index">#{i + 1}</span>
+                      {m.rewindIndex === null && <span className="claude-prompt-history-kind">ask</span>}
                       {m.timestamp > 0 && <span className="claude-prompt-history-time">{formatFullTimestamp(m.timestamp)}</span>}
                       <button
                         className="claude-prompt-history-copy-one"
                         onClick={() => navigator.clipboard.writeText(m.content)}
                         title={t('claude.copyThisPrompt')}
                       >copy</button>
-                      <button
-                        className="claude-prompt-history-rewind-one"
-                        onClick={() => handleRewindToPrompt(i, userPrompts.length)}
-                        title={`Rewind to before this prompt (removes ${userPrompts.length - i} prompt(s) and responses)`}
-                        disabled={isStreaming}
-                      >↶ rewind</button>
+                      {m.rewindIndex !== null && (
+                        <button
+                          className="claude-prompt-history-rewind-one"
+                          onClick={() => handleRewindToPrompt(m.rewindIndex!, promptTurns)}
+                          title={`Rewind to before this prompt (removes ${promptTurns - m.rewindIndex} prompt(s) and responses)`}
+                          disabled={isStreaming}
+                        >↶ rewind</button>
+                      )}
                     </div>
                     <pre className="claude-prompt-history-content">{m.content}</pre>
                   </div>

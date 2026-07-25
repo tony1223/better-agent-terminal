@@ -40,47 +40,83 @@ export function classifyHiddenKind(item: StreamItem, f: MessageFilterFlags): Hid
   return null
 }
 
-// Muted timeline row standing in for a contiguous run of filtered-out items of
-// a single kind, e.g. "3 tools hidden". The tools still executed; only their
-// timeline rows are hidden by the presentation filter.
-function SkippedRunRow({ kind, count }: { kind: HiddenKind; count: number }) {
+// Muted timeline row standing in for a run of filtered-out items of a single
+// kind, e.g. "3 tools hidden". The tools still executed; only their timeline
+// rows are hidden by the presentation filter. `merged` marks a row that totals
+// several runs at once, so it reads as an accumulated group rather than a
+// single stretch.
+function SkippedRunRow({ kind, count, merged }: { kind: HiddenKind; count: number; merged?: boolean }) {
   const { t } = useTranslation()
   return (
-    <div className="tl-item claude-skipped-run">
+    <div className={`tl-item claude-skipped-run${merged ? ' claude-skipped-run-merged' : ''}`}>
       <div className="tl-dot dot-skipped" />
       <div className="tl-content claude-skipped-run-label">{t(SKIP_LABEL_KEY[kind], { count })}</div>
     </div>
   )
 }
 
+interface HiddenRun {
+  kind: HiddenKind
+  count: number
+  startIndex: number
+}
+
+// Trailing runs of a hidden block that keep their own rows. A long filtered
+// stretch is usually still growing, so the last few runs stay separate to show
+// the stream ticking forward while everything older collapses behind them.
+const LIVE_TAIL_RUNS = 2
+
+// Renders one contiguous block of hidden runs. Kinds alternate constantly
+// (tool → thinking → tool → …), so a block of 20 runs used to cost 20 rows and
+// swallow the viewport. Everything before the live tail is totalled per kind
+// into a single row each, capping the block at (kinds + LIVE_TAIL_RUNS) rows.
+function renderHiddenBlock(runs: HiddenRun[]): ReactNode[] {
+  const rowFor = (run: HiddenRun, merged?: boolean) => (
+    <SkippedRunRow key={`skipped-${run.kind}-${run.startIndex}`} kind={run.kind} count={run.count} merged={merged} />
+  )
+  if (runs.length <= LIVE_TAIL_RUNS) return runs.map(run => rowFor(run))
+
+  // Total the older runs per kind, keyed so each kind keeps the position and
+  // key of its first run — stable across re-renders as the block grows.
+  const totals = new Map<HiddenKind, HiddenRun & { runCount: number }>()
+  for (const run of runs.slice(0, -LIVE_TAIL_RUNS)) {
+    const acc = totals.get(run.kind)
+    if (acc) {
+      acc.count += run.count
+      acc.runCount += 1
+    } else {
+      totals.set(run.kind, { ...run, runCount: 1 })
+    }
+  }
+  return [
+    ...Array.from(totals.values(), acc => rowFor(acc, acc.runCount > 1)),
+    ...runs.slice(-LIVE_TAIL_RUNS).map(run => rowFor(run)),
+  ]
+}
+
 // Walks the message list, rendering each visible item via `renderVisible` and
-// collapsing every contiguous run of same-kind filtered-out items into one
-// SkippedRunRow reporting how many items of that kind were hidden. A run only
-// extends while the hidden kind stays the same, so tools / messages / thinking
-// each get their own placeholder (matching the mobile client).
+// every contiguous stretch of filtered-out items as placeholder rows. Within a
+// stretch, same-kind neighbours group into one run, then renderHiddenBlock
+// folds the older runs together so tools / messages / thinking each contribute
+// at most one summary row plus the live tail.
 export function buildMessageStream(
   items: StreamItem[],
   flags: MessageFilterFlags,
   renderVisible: (item: StreamItem, index: number) => ReactNode,
 ): ReactNode[] {
   const out: ReactNode[] = []
-  let pending: { kind: HiddenKind; count: number; startIndex: number } | null = null
+  let block: HiddenRun[] = []
   const flush = () => {
-    if (!pending) return
-    out.push(
-      <SkippedRunRow key={`skipped-${pending.kind}-${pending.startIndex}`} kind={pending.kind} count={pending.count} />,
-    )
-    pending = null
+    if (block.length === 0) return
+    out.push(...renderHiddenBlock(block))
+    block = []
   }
   items.forEach((item, i) => {
     const kind = classifyHiddenKind(item, flags)
     if (kind) {
-      if (pending && pending.kind === kind) {
-        pending.count += 1
-      } else {
-        flush()
-        pending = { kind, count: 1, startIndex: i }
-      }
+      const last = block[block.length - 1]
+      if (last && last.kind === kind) last.count += 1
+      else block.push({ kind, count: 1, startIndex: i })
       return
     }
     flush()

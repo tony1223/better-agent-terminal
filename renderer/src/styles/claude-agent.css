@@ -4,6 +4,10 @@
 
 .claude-agent-panel {
   --claude-font-size: 13px;
+  /* Left gutter holding the timeline rail and dots. The bars pinned above the
+     list (pinned messages, active tasks, agent tree) indent by the same amount
+     so their content stays flush with the timeline content. */
+  --claude-timeline-gutter: 32px;
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -16,7 +20,7 @@
   flex-shrink: 0;
   background: linear-gradient(180deg, var(--bg-secondary) 0%, var(--bg-primary) 100%);
   border-bottom: 1px solid var(--border-color);
-  padding: 4px 8px 4px 40px;
+  padding: 4px 8px 4px var(--claude-timeline-gutter);
   z-index: 5;
 }
 
@@ -59,7 +63,7 @@
   gap: 6px;
   background: linear-gradient(180deg, rgba(224, 153, 86, 0.06) 0%, var(--bg-primary) 100%);
   border-bottom: 1px solid var(--border-color);
-  padding: 4px 8px 4px 40px;
+  padding: 4px 8px 4px var(--claude-timeline-gutter);
   z-index: 5;
   overflow-x: auto;
   overflow-y: hidden;
@@ -175,7 +179,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 4px 8px 4px 40px;
+  padding: 4px 8px 4px var(--claude-timeline-gutter);
   border-bottom: 1px solid rgba(224, 153, 86, 0.15);
 }
 
@@ -333,7 +337,7 @@
   min-height: 0;
   overflow-y: auto;
   overflow-x: auto;
-  padding: 16px 16px 24px 0;
+  padding: 8px 16px 16px 0;
 }
 
 .claude-messages::-webkit-scrollbar {
@@ -364,15 +368,15 @@
   display: flex;
   align-items: flex-start;
   position: relative;
-  padding: 6px 0 6px 40px;
-  min-height: 28px;
+  padding: 3px 0 3px var(--claude-timeline-gutter);
+  min-height: 22px;
 }
 
 /* Vertical line */
 .tl-item::before {
   content: '';
   position: absolute;
-  left: 18px;
+  left: 14px;
   top: 0;
   bottom: 0;
   width: 1px;
@@ -387,8 +391,8 @@
 /* Dot */
 .tl-dot {
   position: absolute;
-  left: 13px;
-  top: 12px;
+  left: 9px;
+  top: 9px;
   width: 11px;
   height: 11px;
   border-radius: 50%;
@@ -457,6 +461,13 @@
 .claude-skipped-run {
   opacity: 0.6;
   min-height: 0;
+}
+
+/* Row totalling several older hidden runs — hollow dot so an accumulated group
+   reads differently from the live runs still ticking in below it. */
+.claude-skipped-run-merged .tl-dot.dot-skipped {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--text-secondary);
 }
 
 .claude-skipped-run-label {
@@ -875,7 +886,7 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 0;
+  padding: 1px 0;
   cursor: pointer;
   user-select: none;
   font-size: calc(var(--claude-font-size) - 1px);
@@ -1348,7 +1359,7 @@
 .claude-tool-blocks {
   background: var(--bg-secondary);
   border-radius: var(--radius-sm);
-  margin: 4px 0;
+  margin: 2px 0;
   overflow: hidden;
 }
 
@@ -1356,7 +1367,7 @@
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  padding: 8px 12px;
+  padding: 3px 10px;
   cursor: pointer;
   transition: background 0.12s;
 }
@@ -1376,7 +1387,7 @@
   color: #aaa;
   flex-shrink: 0;
   min-width: 28px;
-  line-height: 1.6;
+  line-height: 1.45;
 }
 
 .claude-tool-row-content {
@@ -1387,11 +1398,7 @@
   min-width: 0;
   white-space: pre-wrap;
   word-break: break-word;
-  line-height: 1.6;
-}
-
-.codex-agent-panel .claude-tool-row {
-  padding: 6px 10px;
+  line-height: 1.45;
 }
 
 .codex-agent-panel .claude-tool-row-content {
@@ -2636,6 +2643,18 @@
   gap: 8px;
   margin-bottom: 4px;
 }
+/* Marks a history entry that came from an AskUserQuestion answer rather than a
+   typed prompt — it steered the turn the same way, but cannot be rewound to. */
+.claude-prompt-history-kind {
+  font-size: calc(var(--claude-font-size) - 3px);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--claude-accent);
+  border: 1px solid color-mix(in srgb, var(--claude-accent) 40%, transparent);
+  border-radius: 3px;
+  padding: 0 4px;
+}
+
 .claude-prompt-history-index {
   color: var(--accent-color);
   font-weight: 600;
