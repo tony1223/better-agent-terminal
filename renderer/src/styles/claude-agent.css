@@ -2437,6 +2437,85 @@
   opacity: 0.7;
 }
 
+/* Two-axis model picker: one row per model family, context windows as a
+   segmented control on the right. */
+.claude-model-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  margin-bottom: 4px;
+  transition: background 0.12s;
+}
+
+.claude-model-row.single {
+  cursor: pointer;
+}
+
+.claude-model-row:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-color);
+}
+
+.claude-model-row.active {
+  background: var(--bg-hover);
+  border-color: var(--claude-accent);
+}
+
+.claude-model-row-main {
+  min-width: 0;
+}
+
+.claude-model-row-name {
+  display: block;
+  font-size: var(--claude-font-size);
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.claude-model-row-sdk {
+  display: block;
+  font-family: 'Cascadia Code', 'SF Mono', Consolas, monospace;
+  font-size: calc(var(--claude-font-size) - 2px);
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.claude-model-row-windows {
+  display: flex;
+  flex-shrink: 0;
+  gap: 3px;
+}
+
+.claude-model-window {
+  font-family: 'Cascadia Code', 'SF Mono', Consolas, monospace;
+  font-size: calc(var(--claude-font-size) - 2px);
+  color: var(--text-secondary);
+  background: var(--bg-tertiary, var(--bg-hover));
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  padding: 3px 9px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+
+.claude-model-window:hover {
+  color: var(--text-primary);
+  border-color: var(--claude-accent);
+}
+
+.claude-model-window.active {
+  background: var(--claude-accent);
+  border-color: var(--claude-accent);
+  color: var(--bg-primary);
+  font-weight: 600;
+}
+
 .claude-model-1m-hint {
   font-size: 11px;
   color: #f59e0b;

@@ -10,6 +10,7 @@ import {
   normalizeClaudeModelSelection,
   sdkModelForClaudeSelection,
 } from '../utils/claude-model-presets'
+import { groupClaudeModels } from '../utils/claude-model-groups'
 import {
   type ClaudeChannelCapabilities,
   type ClaudeChannelEntry,
@@ -269,15 +270,9 @@ export const ClaudeChannelAgentPanel = memo(function ClaudeChannelAgentPanel({
   const effortOptions = useMemo(() => includeCurrentOption(CLAUDE_EFFORT_MODES, controls.effort), [controls.effort])
   const currentModelLabel = useMemo(() => displayNameForClaudeSelection(controls.model), [controls.model])
   const currentSdkModel = useMemo(() => sdkModelForClaudeSelection(controls.model) || controls.model, [controls.model])
-  const modelOptions = useMemo(() => {
-    const seen = new Set<string>()
-    return CLAUDE_BUILTIN_MODELS
-      .filter(model => {
-        if (!model.value || seen.has(model.value)) return false
-        seen.add(model.value)
-        return true
-      })
-  }, [])
+  // groupClaudeModels dedups by preset id while collapsing the flat cross
+  // product into one row per model family.
+  const modelOptions = useMemo(() => groupClaudeModels(CLAUDE_BUILTIN_MODELS), [])
 
   const selectModel = useCallback((model: string) => {
     const normalized = normalizeClaudeModelSelection(model) || model
@@ -476,18 +471,35 @@ export const ClaudeChannelAgentPanel = memo(function ClaudeChannelAgentPanel({
         <div className="claude-resume-card">
           <div className="claude-permission-title">Select a model</div>
           <div className="claude-resume-list">
-            {modelOptions.map(model => (
-              <div
-                key={model.value}
-                className={`claude-resume-item${model.value === controls.model ? ' active' : ''}`}
-                onClick={() => selectModel(model.value)}
-              >
-                <div className="claude-resume-item-header">
-                  <span className="claude-resume-item-id">{model.displayName}</span>
+            {modelOptions.map(family => {
+              const single = family.variants.length === 1 ? family.variants[0] : null
+              const active = family.variants.some(v => v.value === controls.model)
+              return (
+                <div
+                  key={family.key}
+                  className={`claude-model-row${active ? ' active' : ''}${single ? ' single' : ''}`}
+                  onClick={single ? () => selectModel(single.value) : undefined}
+                >
+                  <div className="claude-model-row-main">
+                    <span className="claude-model-row-name">{family.label}</span>
+                    <span className="claude-model-row-sdk">{family.key}</span>
+                  </div>
+                  <div className="claude-model-row-windows">
+                    {family.variants.filter(v => v.label).map(variant => (
+                      <button
+                        key={variant.value}
+                        type="button"
+                        className={`claude-model-window${variant.value === controls.model ? ' active' : ''}`}
+                        title={variant.option.description}
+                        onClick={e => { e.stopPropagation(); selectModel(variant.value) }}
+                      >
+                        {variant.label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
-                <div className="claude-resume-item-preview">{model.description}</div>
-              </div>
-            ))}
+              )
+            })}
           </div>
           <div className="claude-permission-hint">Restart applies model changes to the channel session. Esc to cancel.</div>
         </div>

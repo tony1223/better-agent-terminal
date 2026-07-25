@@ -23,6 +23,7 @@ import { useRemoteDropUpload } from '../utils/remote-drop-upload'
 import { RemoteUploadConfirmDialog } from './RemoteUploadConfirmDialog'
 import { getHostUsageSnapshot, rateLimitsFromHostUsage, subscribeHostUsage } from '../utils/claude-usage-cache'
 import { autoCompactWindowForClaudeSelection, displayNameForClaudeSelection, normalizeClaudeModelSelection, sdkModelForClaudeSelection } from '../utils/claude-model-presets'
+import { groupClaudeModels } from '../utils/claude-model-groups'
 import { shouldNavigateInputHistoryFromTextarea } from '../utils/input-history-navigation'
 import { buildSnippetContextPrompt, parseSnippetSlashCommand, type SnippetForContext } from '../utils/snippet-command'
 import { createToolRenderCache, getOrComputeToolRender, pruneToolRenderCache } from '../utils/tool-result-cache'
@@ -4874,18 +4875,50 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
                     <div className="claude-resume-item-preview">{m.description}</div>
                   </div>
                 )
+                // One row per model family, context windows as a segmented
+                // control — keeps the list short as models gain windows.
+                const renderFamilies = (list: ModelInfo[]) => groupClaudeModels(list).map(family => {
+                  const single = family.variants.length === 1 ? family.variants[0] : null
+                  const active = family.variants.some(v => v.value === currentModel)
+                  return (
+                    <div
+                      key={family.key}
+                      className={`claude-model-row${active ? ' active' : ''}${single ? ' single' : ''}`}
+                      onClick={single ? () => handleModelSelect(single.value) : undefined}
+                    >
+                      <div className="claude-model-row-main">
+                        <span className="claude-model-row-name">{family.label}</span>
+                        <span className="claude-model-row-sdk">{family.key}</span>
+                      </div>
+                      <div className="claude-model-row-windows">
+                        {family.variants.filter(v => v.label).map(variant => (
+                          <button
+                            key={variant.value}
+                            type="button"
+                            className={`claude-model-window${variant.value === currentModel ? ' active' : ''}`}
+                            title={variant.option.description}
+                            onClick={e => { e.stopPropagation(); void handleModelSelect(variant.value) }}
+                          >
+                            {variant.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )
+                })
                 return (
                   <>
                     {builtins.length > 0 && (
                       <>
                         <div className="claude-model-group-label">Better Agent Terminal</div>
-                        {builtins.map(renderItem)}
+                        {/* Codex models have no context-window variants — keep the flat rows. */}
+                        {isCodexSession ? builtins.map(renderItem) : renderFamilies(builtins)}
                       </>
                     )}
                     {sdkModels.length > 0 && (
                       <>
                         <div className="claude-model-group-label">{isCodexSession ? 'Codex Agent' : 'Claude Agent'}</div>
-                        {sdkModels.map(renderItem)}
+                        {isCodexSession ? sdkModels.map(renderItem) : renderFamilies(sdkModels)}
                       </>
                     )}
                   </>

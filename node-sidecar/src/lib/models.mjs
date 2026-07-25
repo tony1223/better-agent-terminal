@@ -1,12 +1,14 @@
 // Mirror of renderer/src/utils/claude-model-presets.ts CLAUDE_BUILTIN_MODELS.
 // Drift guard: see node-sidecar/tests/server.test.mjs.
+// Ordered newest-first — the renderer's picker keeps this order, so the
+// latest model family stays at the top of the list.
 export const CLAUDE_BUILTIN_MODELS = [
-  { value: 'claude-fable-5:auto-compact-200k', displayName: 'Fable 5 · 200K Auto-Compact', description: 'claude-fable-5 · compact at 200K tokens' },
-  { value: 'claude-fable-5:auto-compact-300k', displayName: 'Fable 5 · 300K Auto-Compact', description: 'claude-fable-5 · compact at 300K tokens' },
-  { value: 'claude-fable-5:1m', displayName: 'Fable 5 · 1M', description: 'claude-fable-5 · no early auto-compact' },
   { value: 'claude-opus-5:auto-compact-200k', displayName: 'Opus 5 · 200K Auto-Compact', description: 'claude-opus-5 · compact at 200K tokens' },
   { value: 'claude-opus-5:auto-compact-300k', displayName: 'Opus 5 · 300K Auto-Compact', description: 'claude-opus-5 · compact at 300K tokens' },
   { value: 'claude-opus-5:1m', displayName: 'Opus 5 · 1M', description: 'claude-opus-5 · no early auto-compact' },
+  { value: 'claude-fable-5:auto-compact-200k', displayName: 'Fable 5 · 200K Auto-Compact', description: 'claude-fable-5 · compact at 200K tokens' },
+  { value: 'claude-fable-5:auto-compact-300k', displayName: 'Fable 5 · 300K Auto-Compact', description: 'claude-fable-5 · compact at 300K tokens' },
+  { value: 'claude-fable-5:1m', displayName: 'Fable 5 · 1M', description: 'claude-fable-5 · no early auto-compact' },
   { value: 'claude-opus-4-8:auto-compact-200k', displayName: 'Opus 4.8 · 200K Auto-Compact', description: 'claude-opus-4-8 · compact at 200K tokens' },
   { value: 'claude-opus-4-8:auto-compact-300k', displayName: 'Opus 4.8 · 300K Auto-Compact', description: 'claude-opus-4-8 · compact at 300K tokens' },
   { value: 'claude-opus-4-8:1m', displayName: 'Opus 4.8 · 1M', description: 'claude-opus-4-8 · no early auto-compact' },
@@ -28,10 +30,10 @@ export const CLAUDE_BUILTIN_MODELS = [
 // duplicate a builtin via either form get filtered. Drift guard test
 // validates this stays in sync with the renderer-side TS source.
 export const CLAUDE_BUILTIN_DEDUP_KEYS = [
-  'claude-fable-5',
-  'claude-fable-5[1m]',
   'claude-opus-5',
   'claude-opus-5[1m]',
+  'claude-fable-5',
+  'claude-fable-5[1m]',
   'claude-opus-4-8',
   'claude-opus-4-8[1m]',
   'claude-opus-4-7',
@@ -50,10 +52,10 @@ export const CLAUDE_BUILTIN_DEDUP_KEYS = [
 // the TS file and sorted-equals the keys against this map. Used by
 // claude.getContextUsage to compute the maxTokens budget.
 export const CLAUDE_MODEL_CONTEXT_WINDOWS = new Map([
-  ['claude-fable-5', 1000000],
-  ['claude-fable-5[1m]', 1000000],
   ['claude-opus-5', 1000000],
   ['claude-opus-5[1m]', 1000000],
+  ['claude-fable-5', 1000000],
+  ['claude-fable-5[1m]', 1000000],
   ['claude-opus-4-8', 1000000],
   ['claude-opus-4-8[1m]', 1000000],
   ['claude-opus-4-7', 1000000],
@@ -67,12 +69,12 @@ export const CLAUDE_MODEL_CONTEXT_WINDOWS = new Map([
   ['claude-haiku-4-5-20251001', 200000],
   // Preset variants — auto-compact wraps the underlying base model,
   // so context window budget is the auto-compact target.
-  ['claude-fable-5:auto-compact-200k', 200000],
-  ['claude-fable-5:auto-compact-300k', 300000],
-  ['claude-fable-5:1m', 1000000],
   ['claude-opus-5:auto-compact-200k', 200000],
   ['claude-opus-5:auto-compact-300k', 300000],
   ['claude-opus-5:1m', 1000000],
+  ['claude-fable-5:auto-compact-200k', 200000],
+  ['claude-fable-5:auto-compact-300k', 300000],
+  ['claude-fable-5:1m', 1000000],
   ['claude-opus-4-8:auto-compact-200k', 200000],
   ['claude-opus-4-8:auto-compact-300k', 300000],
   ['claude-opus-4-8:1m', 1000000],
@@ -98,12 +100,12 @@ export function expectedContextWindowForModel(model) {
 // Auto-compact presets wrap the underlying base model, and the compact
 // window is configured separately via CLAUDE_CODE_AUTO_COMPACT_WINDOW env.
 export const CLAUDE_PRESET_SDK_MODELS = new Map([
-  ['claude-fable-5:auto-compact-200k', 'claude-fable-5'],
-  ['claude-fable-5:auto-compact-300k', 'claude-fable-5'],
-  ['claude-fable-5:1m', 'claude-fable-5'],
   ['claude-opus-5:auto-compact-200k', 'claude-opus-5'],
   ['claude-opus-5:auto-compact-300k', 'claude-opus-5'],
   ['claude-opus-5:1m', 'claude-opus-5'],
+  ['claude-fable-5:auto-compact-200k', 'claude-fable-5'],
+  ['claude-fable-5:auto-compact-300k', 'claude-fable-5'],
+  ['claude-fable-5:1m', 'claude-fable-5'],
   ['claude-opus-4-8:auto-compact-200k', 'claude-opus-4-8'],
   ['claude-opus-4-8:auto-compact-300k', 'claude-opus-4-8'],
   ['claude-opus-4-8:1m', 'claude-opus-4-8'],

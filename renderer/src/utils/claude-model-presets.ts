@@ -1,13 +1,13 @@
-export const CLAUDE_FABLE_5_MODEL = 'claude-fable-5'
-export const CLAUDE_FABLE_5_1M_SDK_MODEL = 'claude-fable-5[1m]'
-export const CLAUDE_FABLE_5_200K_PRESET = 'claude-fable-5:auto-compact-200k'
-export const CLAUDE_FABLE_5_300K_PRESET = 'claude-fable-5:auto-compact-300k'
-export const CLAUDE_FABLE_5_1M_PRESET = 'claude-fable-5:1m'
 export const CLAUDE_OPUS_5_MODEL = 'claude-opus-5'
 export const CLAUDE_OPUS_5_1M_SDK_MODEL = 'claude-opus-5[1m]'
 export const CLAUDE_OPUS_5_200K_PRESET = 'claude-opus-5:auto-compact-200k'
 export const CLAUDE_OPUS_5_300K_PRESET = 'claude-opus-5:auto-compact-300k'
 export const CLAUDE_OPUS_5_1M_PRESET = 'claude-opus-5:1m'
+export const CLAUDE_FABLE_5_MODEL = 'claude-fable-5'
+export const CLAUDE_FABLE_5_1M_SDK_MODEL = 'claude-fable-5[1m]'
+export const CLAUDE_FABLE_5_200K_PRESET = 'claude-fable-5:auto-compact-200k'
+export const CLAUDE_FABLE_5_300K_PRESET = 'claude-fable-5:auto-compact-300k'
+export const CLAUDE_FABLE_5_1M_PRESET = 'claude-fable-5:1m'
 export const CLAUDE_OPUS_48_MODEL = 'claude-opus-4-8'
 export const CLAUDE_OPUS_48_1M_SDK_MODEL = 'claude-opus-4-8[1m]'
 export const CLAUDE_OPUS_48_200K_PRESET = 'claude-opus-4-8:auto-compact-200k'
@@ -31,13 +31,15 @@ export type ClaudeModelInfo = {
   description: string
 }
 
+// Ordered newest-first — the picker renders one row per model family in this
+// order, so the latest model stays at the top of the list.
 export const CLAUDE_BUILTIN_MODELS: ClaudeModelInfo[] = [
-  { value: CLAUDE_FABLE_5_200K_PRESET, displayName: 'Fable 5 · 200K Auto-Compact', description: 'claude-fable-5 · compact at 200K tokens' },
-  { value: CLAUDE_FABLE_5_300K_PRESET, displayName: 'Fable 5 · 300K Auto-Compact', description: 'claude-fable-5 · compact at 300K tokens' },
-  { value: CLAUDE_FABLE_5_1M_PRESET, displayName: 'Fable 5 · 1M', description: 'claude-fable-5 · no early auto-compact' },
   { value: CLAUDE_OPUS_5_200K_PRESET, displayName: 'Opus 5 · 200K Auto-Compact', description: 'claude-opus-5 · compact at 200K tokens' },
   { value: CLAUDE_OPUS_5_300K_PRESET, displayName: 'Opus 5 · 300K Auto-Compact', description: 'claude-opus-5 · compact at 300K tokens' },
   { value: CLAUDE_OPUS_5_1M_PRESET, displayName: 'Opus 5 · 1M', description: 'claude-opus-5 · no early auto-compact' },
+  { value: CLAUDE_FABLE_5_200K_PRESET, displayName: 'Fable 5 · 200K Auto-Compact', description: 'claude-fable-5 · compact at 200K tokens' },
+  { value: CLAUDE_FABLE_5_300K_PRESET, displayName: 'Fable 5 · 300K Auto-Compact', description: 'claude-fable-5 · compact at 300K tokens' },
+  { value: CLAUDE_FABLE_5_1M_PRESET, displayName: 'Fable 5 · 1M', description: 'claude-fable-5 · no early auto-compact' },
   { value: CLAUDE_OPUS_48_200K_PRESET, displayName: 'Opus 4.8 · 200K Auto-Compact', description: 'claude-opus-4-8 · compact at 200K tokens' },
   { value: CLAUDE_OPUS_48_300K_PRESET, displayName: 'Opus 4.8 · 300K Auto-Compact', description: 'claude-opus-4-8 · compact at 300K tokens' },
   { value: CLAUDE_OPUS_48_1M_PRESET, displayName: 'Opus 4.8 · 1M', description: 'claude-opus-4-8 · no early auto-compact' },
@@ -54,10 +56,10 @@ export const CLAUDE_BUILTIN_MODELS: ClaudeModelInfo[] = [
 ]
 
 export const CLAUDE_BUILTIN_MODEL_CONTEXT_WINDOWS = new Map<string, number>([
-  ['claude-fable-5', 1000000],
-  ['claude-fable-5[1m]', 1000000],
   ['claude-opus-5', 1000000],
   ['claude-opus-5[1m]', 1000000],
+  ['claude-fable-5', 1000000],
+  ['claude-fable-5[1m]', 1000000],
   ['claude-opus-4-8', 1000000],
   ['claude-opus-4-8[1m]', 1000000],
   ['claude-opus-4-7', 1000000],
@@ -72,12 +74,12 @@ export const CLAUDE_BUILTIN_MODEL_CONTEXT_WINDOWS = new Map<string, number>([
 ])
 
 const CLAUDE_PRESET_AUTO_COMPACT = new Map<string, number | null>([
-  [CLAUDE_FABLE_5_200K_PRESET, 200000],
-  [CLAUDE_FABLE_5_300K_PRESET, 300000],
-  [CLAUDE_FABLE_5_1M_PRESET, null],
   [CLAUDE_OPUS_5_200K_PRESET, 200000],
   [CLAUDE_OPUS_5_300K_PRESET, 300000],
   [CLAUDE_OPUS_5_1M_PRESET, null],
+  [CLAUDE_FABLE_5_200K_PRESET, 200000],
+  [CLAUDE_FABLE_5_300K_PRESET, 300000],
+  [CLAUDE_FABLE_5_1M_PRESET, null],
   [CLAUDE_OPUS_48_200K_PRESET, 200000],
   [CLAUDE_OPUS_48_300K_PRESET, 300000],
   [CLAUDE_OPUS_48_1M_PRESET, null],
@@ -91,12 +93,12 @@ const CLAUDE_PRESET_AUTO_COMPACT = new Map<string, number | null>([
 ])
 
 const CLAUDE_PRESET_SDK_MODELS = new Map<string, string>([
-  [CLAUDE_FABLE_5_200K_PRESET, CLAUDE_FABLE_5_MODEL],
-  [CLAUDE_FABLE_5_300K_PRESET, CLAUDE_FABLE_5_MODEL],
-  [CLAUDE_FABLE_5_1M_PRESET, CLAUDE_FABLE_5_MODEL],
   [CLAUDE_OPUS_5_200K_PRESET, CLAUDE_OPUS_5_MODEL],
   [CLAUDE_OPUS_5_300K_PRESET, CLAUDE_OPUS_5_MODEL],
   [CLAUDE_OPUS_5_1M_PRESET, CLAUDE_OPUS_5_MODEL],
+  [CLAUDE_FABLE_5_200K_PRESET, CLAUDE_FABLE_5_MODEL],
+  [CLAUDE_FABLE_5_300K_PRESET, CLAUDE_FABLE_5_MODEL],
+  [CLAUDE_FABLE_5_1M_PRESET, CLAUDE_FABLE_5_MODEL],
   [CLAUDE_OPUS_48_200K_PRESET, CLAUDE_OPUS_48_MODEL],
   [CLAUDE_OPUS_48_300K_PRESET, CLAUDE_OPUS_48_MODEL],
   [CLAUDE_OPUS_48_1M_PRESET, CLAUDE_OPUS_48_MODEL],
