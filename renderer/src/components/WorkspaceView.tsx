@@ -7,7 +7,7 @@ import { workspaceStore } from '../stores/workspace-store'
 import { settingsStore } from '../stores/settings-store'
 import { ThumbnailBar } from './ThumbnailBar'
 import { CloseConfirmDialog } from './CloseConfirmDialog'
-import { RemoteLoginDialog } from './RemoteLoginDialog'
+import { LoginDialog } from './LoginDialog'
 import { ResizeHandle } from './ResizeHandle'
 import { FolderPicker } from './FolderPicker'
 import { NewTerminalQuickPick, type QuickPickChoice } from './NewTerminalQuickPick'
@@ -325,7 +325,7 @@ export const WorkspaceView = memo(function WorkspaceView({ workspace, terminals,
   const [cliVersions, setCliVersions] = useState<CliVersions | null>(null)
   const [loginPending, setLoginPending] = useState(false)
   // Non-null while the remote URL ("paste code") login dialog is open.
-  const [remoteLoginKind, setRemoteLoginKind] = useState<'claude' | 'codex' | null>(null)
+  const [loginDialog, setLoginDialog] = useState<{ kind: 'claude' | 'codex'; target: 'local' | 'remote' } | null>(null)
   // undefined = still loading, null = connected host does not advertise the
   // additive remote-auth capability (typically an older host).
   const [remoteAuthCapabilities, setRemoteAuthCapabilities] = useState<RemoteAuthCapabilities | null | undefined>(undefined)
@@ -655,7 +655,17 @@ export const WorkspaceView = memo(function WorkspaceView({ workspace, terminals,
         return
       }
       setAccountMenuOpen(false)
-      setRemoteLoginKind(kind)
+      setLoginDialog({ kind, target: 'remote' })
+      return
+    }
+    // Local Claude: `claude auth login` redirects to a hosted callback page, so
+    // there is no localhost listener for the CLI to catch the code with — the
+    // user has to paste it back. Same dialog as remote; the difference is the
+    // host opens the browser for us, so we never ask the user to do it.
+    if (kind === 'claude') {
+      setAccountMenuOpen(false)
+      setAccountMenuError(null)
+      setLoginDialog({ kind, target: 'local' })
       return
     }
     if (loginPending) return
@@ -666,17 +676,9 @@ export const WorkspaceView = memo(function WorkspaceView({ workspace, terminals,
     setLoginPending(true)
     let loginError: string | null = null
     try {
-      if (kind === 'claude') {
-        const result = await host.claude.authLogin() as { success?: boolean; error?: string }
-        if (result?.success) {
-          try { await host.claude.accountImportCurrent() } catch { /* ignore if unavailable */ }
-        }
-        window.dispatchEvent(new CustomEvent('claude-account-switched', { detail: {} }))
-      } else {
-        // Real Codex login (ChatGPT browser OAuth); registers + activates it.
-        await host.codex.accountLogin()
-        window.dispatchEvent(new CustomEvent('codex-account-switched', { detail: {} }))
-      }
+      // Real Codex login (ChatGPT browser OAuth); registers + activates it.
+      await host.codex.accountLogin()
+      window.dispatchEvent(new CustomEvent('codex-account-switched', { detail: {} }))
     } catch (error) {
       loginError = errorMessage(error)
       void host.debug.log(`[WorkspaceView] ${kind} login failed: ${loginError}`)
@@ -721,13 +723,22 @@ export const WorkspaceView = memo(function WorkspaceView({ workspace, terminals,
     setSwitchingId(entry.id)
     setAccountMenuError(null)
     try {
+      // A `false` result is a refusal, not an exception — surface it like the
+      // catch below does, otherwise the spinner just vanishes and the menu sits
+      // on the old account with no hint that anything went wrong.
+      const failed = async () => {
+        await refreshAccountChip()
+        setAccountMenuError(t('workspace.accountSwitchFailed', { account: entry.label }))
+        setAccountMenuOpen(true)
+        setSwitchingId(null)
+      }
       if (kind === 'codex') {
         const result = await host.codex.accountSwitch(entry.id) as { success?: boolean }
-        if (result?.success === false) { setSwitchingId(null); return }
+        if (result?.success === false) { await failed(); return }
         window.dispatchEvent(new CustomEvent('codex-account-switched', { detail: { accountId: entry.id } }))
       } else {
         const ok = await host.claude.accountSwitch(entry.id) as boolean
-        if (ok === false) { setSwitchingId(null); return }
+        if (ok === false) { await failed(); return }
         window.dispatchEvent(new CustomEvent('claude-account-switched', { detail: { accountId: entry.id } }))
       }
     } catch (error) {
@@ -745,7 +756,7 @@ export const WorkspaceView = memo(function WorkspaceView({ workspace, terminals,
     await refreshAccountChip()
     setSwitchingId(null)
     setAccountMenuOpen(false)
-  }, [refreshAccountChip, switchingId])
+  }, [refreshAccountChip, switchingId, t])
 
   // Initialize terminals when workspace becomes active
   // If terminals were restored from a saved profile, start their PTY/agent processes
@@ -1504,16 +1515,17 @@ export const WorkspaceView = memo(function WorkspaceView({ workspace, terminals,
           onClose={() => setShowQuickPick(false)}
         />
       )}
-      {remoteLoginKind && (
-        <RemoteLoginDialog
-          kind={remoteLoginKind}
+      {loginDialog && (
+        <LoginDialog
+          kind={loginDialog.kind}
+          target={loginDialog.target}
           hostLabel={remoteHostLabel || remoteEndpointLabel || undefined}
-          onClose={() => setRemoteLoginKind(null)}
+          onClose={() => setLoginDialog(null)}
           onSuccess={() => {
-            setRemoteLoginKind(null)
+            setLoginDialog(null)
             void refreshAccountChip()
             window.dispatchEvent(new CustomEvent(
-              remoteLoginKind === 'codex' ? 'codex-account-switched' : 'claude-account-switched',
+              loginDialog.kind === 'codex' ? 'codex-account-switched' : 'claude-account-switched',
               { detail: {} },
             ))
           }}

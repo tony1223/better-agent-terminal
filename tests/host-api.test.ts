@@ -199,10 +199,8 @@ async function run() {
       if (cmd === 'claude_abort_session') return { ok: true } as unknown as T
       if (cmd === 'claude_stop_task') return true as unknown as T
       if (cmd === 'claude_resume_session') return { ok: true } as unknown as T
-      if (cmd === 'claude_auth_login') return { success: false, error: 'stub' } as unknown as T
       if (cmd === 'claude_auth_logout') return { success: true } as unknown as T
       if (cmd === 'claude_account_import_current') return null as unknown as T
-      if (cmd === 'claude_account_login_new') return { success: false, error: 'stub' } as unknown as T
       if (cmd === 'claude_account_switch') return false as unknown as T
       if (cmd === 'claude_account_remove') return false as unknown as T
       if (cmd === 'claude_account_mark_warning_shown') return true as unknown as T
@@ -597,11 +595,11 @@ async function run() {
       mod.resolveClaudeEventSecondArg('onSessionReset', { sessionId: 's-1', payload: 'ignored' }),
       undefined,
     )
-    // Account / auth ops.
-    assert.deepEqual(await mod.host.claude.authLogin(), { success: false, error: 'stub' })
+    // Account / auth ops. There is deliberately no authLogin / accountLoginNew:
+    // `claude auth login` redirects to a hosted callback, so every entry point
+    // drives the paste-code commands below instead.
     assert.deepEqual(await mod.host.claude.authLogout(), { success: true })
     assert.equal(await mod.host.claude.accountImportCurrent(), null)
-    assert.deepEqual(await mod.host.claude.accountLoginNew(), { success: false, error: 'stub' })
     assert.equal(await mod.host.claude.accountSwitch('a-1'), false)
     assert.equal(await mod.host.claude.accountRemove('a-1'), false)
     assert.equal(await mod.host.claude.accountMarkWarningShown(), true)
@@ -880,10 +878,8 @@ async function run() {
           },
         },
       },
-      { cmd: 'claude_auth_login', args: undefined },
       { cmd: 'claude_auth_logout', args: undefined },
       { cmd: 'claude_account_import_current', args: undefined },
-      { cmd: 'claude_account_login_new', args: undefined },
       { cmd: 'claude_account_switch', args: { accountId: 'a-1' } },
       { cmd: 'claude_account_remove', args: { accountId: 'a-1' } },
       { cmd: 'claude_account_mark_warning_shown', args: undefined },

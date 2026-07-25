@@ -2131,10 +2131,11 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
   }, [])
 
   // Fetch account info and slash commands once session metadata arrives
-  // Refresh account info when SettingsPanel switches account in this window.
-  // Event is window-local (CustomEvent on window), so a remote window only
-  // sees switches from its own SettingsPanel — getAccountInfo is proxied per
-  // window's profile, so remote windows refetch from remote, local from local.
+  // Refresh account info when the account changes. The CustomEvent is window-
+  // local, but App.tsx re-dispatches it from the host's claude:account-changed
+  // broadcast, so this also fires for a switch made in another window or by
+  // another remote client. getAccountInfo is proxied per window's profile, so
+  // remote windows refetch from remote, local from local.
   useEffect(() => {
     if (isCodexSession) return
     const handler = () => {
@@ -2696,35 +2697,23 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
       return
     }
 
-    // Intercept /login command — open Claude auth login flow
+    // Intercept /login command — open the Claude auth login flow. Delegates to
+    // the same handler as the account chip in both local and remote mode: the
+    // CLI redirects to a hosted callback, so the code has to be pasted into the
+    // sign-in dialog. Awaiting `authLogin()` here could only ever time out.
     if (!isCodexSession && trimmed === '/login') {
       clearInput()
-      setMessages(prev => [...prev, {
-        id: `sys-login-${Date.now()}`, sessionId, role: 'system' as const,
-        content: 'Opening Claude login...', timestamp: Date.now(),
-      }])
-      if (isRemoteConnected && onRequestLogin) {
-        onRequestLogin('claude')
-        return
-      }
-      const result = await host.claude.authLogin()
-      if (result.success) {
-        const status = await host.claude.authStatus()
+      if (onRequestLogin) {
         setMessages(prev => [...prev, {
-          id: `sys-login-ok-${Date.now()}`, sessionId, role: 'system' as const,
-          content: status?.email
-            ? `Logged in as ${status.email} (${status.subscriptionType || 'unknown'}). Use /switch to manage accounts.`
-            : 'Login successful. Use /switch to manage accounts.',
-          timestamp: Date.now(),
+          id: `sys-login-${Date.now()}`, sessionId, role: 'system' as const,
+          content: 'Opening Claude login...', timestamp: Date.now(),
         }])
-        // Auto-register account when account switching is enabled
-        try {
-          await host.claude.accountImportCurrent()
-        } catch { /* ignore if not available */ }
+        onRequestLogin('claude')
       } else {
         setMessages(prev => [...prev, {
           id: `sys-login-err-${Date.now()}`, sessionId, role: 'system' as const,
-          content: `Login failed: ${result.error || 'unknown error'}`, timestamp: Date.now(),
+          content: 'Login is not available from this view — use the account chip in the top bar.',
+          timestamp: Date.now(),
         }])
       }
       return

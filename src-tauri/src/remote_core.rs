@@ -522,6 +522,10 @@ pub fn is_proxied_remote_event(channel: &str) -> bool {
             | "claude:session-reset"
             | "claude:worktree-info"
             | "claude:rate-limit"
+            // Host-owned account state. Carries no sessionId, so
+            // event_owner_key_for_event yields None and it fans out to every
+            // window on the client rather than one session's owner.
+            | "claude:account-changed"
             | "agent:usage"
             | "fs:changed"
             | "profile:changed"
@@ -572,6 +576,21 @@ mod tests {
             ),
             json!({ "tool": "claude", "ok": true })
         );
+    }
+
+    #[test]
+    fn account_changes_reach_remote_clients() {
+        // The host broadcasts this after applying a switch / removal / login so
+        // other clients repaint instead of holding a stale account chip.
+        assert!(is_proxied_remote_event("claude:account-changed"));
+        // The whitelist is matched *after* canonicalization, so an entry only
+        // works in its canonical spelling — listing "agent:account-changed"
+        // instead would silently never match and drop the event.
+        assert_eq!(
+            canonical_remote_channel("agent:account-changed"),
+            "claude:account-changed"
+        );
+        assert!(is_proxied_remote_event("agent:account-changed"));
     }
 
     #[test]

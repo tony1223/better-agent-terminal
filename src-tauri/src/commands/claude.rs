@@ -40,6 +40,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 #[cfg(feature = "desktop")]
 use tauri::{AppHandle, Manager, State, WebviewWindow};
@@ -558,11 +559,173 @@ pub(crate) fn account_info_from_auth_status(value: &Value) -> Value {
     Value::Object(info)
 }
 
-pub(crate) fn auth_login_native(app: &HostContext) -> Value {
-    match run_claude_cli_native(app, &["auth", "login"], AUTH_LOGIN_TIMEOUT) {
-        Ok(_) => json!({ "success": true }),
-        Err(err) => json!({ "success": false, "error": err }),
+/// True only for HTTPS URLs on Anthropic-controlled hosts. The CLI output is
+/// untrusted input to us, and we hand the result straight to the OS browser,
+/// so anything else is refused rather than opened.
+fn is_trusted_claude_login_url(value: &str) -> bool {
+    const SCHEME: &str = "https://";
+    if value.len() < SCHEME.len() || !value[..SCHEME.len()].eq_ignore_ascii_case(SCHEME) {
+        return false;
     }
+    let authority = &value[SCHEME.len()..];
+    let authority = authority
+        .find(['/', '?', '#'])
+        .map_or(authority, |end| &authority[..end]);
+    // `https://claude.ai@evil.example/` is a userinfo trick: the real host is
+    // whatever follows the last '@'.
+    let host = authority.rsplit('@').next().unwrap_or(authority);
+    let host = host.split(':').next().unwrap_or(host).to_ascii_lowercase();
+    ["claude.ai", "claude.com", "anthropic.com"]
+        .iter()
+        .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
+}
+
+#[cfg(feature = "desktop")]
+fn open_login_url(app: &HostContext, url: &str) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    app.app()
+        .opener()
+        .open_url(url.to_string(), None::<&str>)
+        .map_err(|err| err.to_string())
+}
+
+#[cfg(not(feature = "desktop"))]
+fn open_login_url(_app: &HostContext, _url: &str) -> Result<(), String> {
+    // A headless host has no browser. Remote clients authenticate through the
+    // paste-code flow (claude.authLoginStart) instead.
+    Err("headless host cannot open a browser".to_string())
+}
+
+/// Persist an auth breadcrumb to `<app-data>/logs/debug.log`. Called from a
+/// blocking worker, so the blocking append is fine here.
+fn log_auth_line(app: &HostContext, message: &str) {
+    let Some(dir) = app.data_dir_opt() else {
+        return;
+    };
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+    let line = format!("{millis} [claude-auth] {message}\n");
+    let _ = crate::log_file::append_line_blocking(&dir.join("logs").join("debug.log"), &line);
+}
+
+/// The renderer-facing channel for "the active account set just changed".
+pub(crate) const ACCOUNT_CHANGED_EVENT: &str = "claude:account-changed";
+
+/// Announce an account switch / removal / new login to every window that could
+/// be showing the old one.
+///
+/// Account state is host-owned (see CLAUDE.md): the host applies the mutation
+/// first, then tells everyone. Without this, a second remote client keeps
+/// rendering the account chip it last read and only notices on its next manual
+/// refresh — and its agent panels keep addressing the previous account.
+///
+/// Both agents share one channel with an `agent` discriminator so a listener
+/// registers once. `accountId` is advisory — it names the account the change
+/// was *about* (the switch target, the removed id), not necessarily the one now
+/// active; listeners re-read the index rather than patch from it.
+///
+/// Goes through the runtime event hub rather than `ctx.emit` + an explicit
+/// `broadcast_event`: the hub already fans out to local webviews and then
+/// re-broadcasts whitelisted topics to connected remote clients, and doing it
+/// by hand would double-send on the headless host, whose `emit` sink *is* the
+/// broadcast.
+pub(crate) fn broadcast_account_changed(
+    ctx: &HostContext,
+    agent: &str,
+    account_id: Option<&str>,
+) {
+    publish_runtime_event(
+        ctx,
+        ACCOUNT_CHANGED_EVENT,
+        json!({ "agent": agent, "accountId": account_id }),
+        "rust-account",
+    );
+}
+
+/// Which step of the interactive paste-code login just returned.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ClaudeLoginStage {
+    Start,
+    SubmitCode,
+    Cancel,
+}
+
+/// Account bookkeeping wrapped around the paste-code login ceremony.
+///
+/// `claude auth login` redirects to a hosted callback rather than a localhost
+/// port, so the only way to finish a login is to paste the code back into the
+/// CLI's stdin. Desktop and remote clients both drive that through the same
+/// sidecar login driver (node-sidecar/src/handlers/claude-auth-login.mjs),
+/// which means the account bookkeeping around it has to live in one place —
+/// a desktop-only copy would drift and silently stop registering accounts.
+///
+/// - `Start` (ok)           → snapshot the active credential, so a login that
+///                            fails halfway cannot strand the user logged out.
+/// - `SubmitCode` (success) → verify via `auth status`, register and activate
+///                            the new account, attach it to the result.
+/// - any terminal stage     → restore the snapshot.
+pub(crate) fn finish_claude_login_stage(
+    ctx: &HostContext,
+    stage: ClaudeLoginStage,
+    label: &str,
+    mut result: Value,
+) -> Result<Value, String> {
+    let data_dir = || {
+        ctx.data_dir()
+            .map_err(|err| format!("{label}: could not resolve app data dir: {err}"))
+    };
+    let terminal = result
+        .get("terminal")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let succeeded = result
+        .get("success")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let started = result.get("ok").and_then(Value::as_bool).unwrap_or(false);
+    if stage == ClaudeLoginStage::Start && started {
+        account_store::snapshot_active_account_credential(&data_dir()?)
+            .map_err(|err| format!("could not preserve the active Claude account: {err}"))?;
+    } else if stage == ClaudeLoginStage::SubmitCode && succeeded {
+        let dir = data_dir()?;
+        let account = (|| {
+            let status_value = fetch_auth_status_native(ctx);
+            let status = account_store::auth_status_from_value(&status_value).ok_or_else(|| {
+                "Claude login completed but the host could not verify it".to_string()
+            })?;
+            let credential = account_store::read_cli_credentials().ok_or_else(|| {
+                "Claude login completed but the host credential was unavailable".to_string()
+            })?;
+            account_store::activate_new_login_account(&dir, status, credential)
+                .map_err(|err| err.to_string())
+        })();
+        match account {
+            Ok(account) => {
+                // A new login also *activates* the account, so every window is
+                // now showing a stale chip — announce it like a switch.
+                broadcast_account_changed(ctx, "claude", Some(&account.id));
+                if let Value::Object(map) = &mut result {
+                    map.insert(
+                        "account".to_string(),
+                        serde_json::to_value(account).unwrap_or(Value::Null),
+                    );
+                }
+            }
+            Err(err) => {
+                let _ = account_store::restore_active_account_credential(&dir);
+                return Err(format!(
+                    "Claude login completed but the account could not be registered: {err}"
+                ));
+            }
+        }
+    } else if terminal {
+        if let Ok(dir) = data_dir() {
+            let _ = account_store::restore_active_account_credential(&dir);
+        }
+    }
+    Ok(result)
 }
 
 pub(crate) fn auth_logout_native(app: &HostContext) -> Value {
@@ -3406,19 +3569,6 @@ pub async fn claude_stop_task(
 
 #[cfg(feature = "desktop")]
 #[tauri::command]
-pub async fn claude_auth_login(
-    app: AppHandle,
-    _state: State<'_, SidecarState>,
-) -> Result<Value, BridgeError> {
-    crate::async_rt::spawn_blocking(move || auth_login_native(&HostContext::from_app(app.clone())))
-        .await
-        .map_err(|err| BridgeError {
-            message: format!("claude.authLogin worker failed: {err}"),
-        })
-}
-
-#[cfg(feature = "desktop")]
-#[tauri::command]
 pub async fn claude_auth_logout(
     app: AppHandle,
     _state: State<'_, SidecarState>,
@@ -3430,12 +3580,15 @@ pub async fn claude_auth_logout(
         })
 }
 
-// Interactive URL ("paste code") login. Unlike claude_auth_login (which
-// opens a browser locally), these drive the CLI on the host and surface its
-// sign-in URL, so a remote client can authenticate the host. The renderer
-// uses these only when connected to a remote host; desktop keeps the browser
-// flow. The sidecar (claude-auth-login.mjs) holds the in-flight login between
-// the start and submit-code calls.
+// Interactive URL ("paste code") login.
+//
+// `claude auth login` redirects to a hosted callback (platform.claude.com)
+// rather than a localhost port, so nothing local can ever observe the
+// completion — the code has to be pasted back into the CLI's stdin. That makes
+// this the only workable sign-in flow for *both* desktop and remote; desktop
+// simply gets to open the browser itself instead of asking the user to copy
+// the URL. The sidecar (claude-auth-login.mjs) holds the in-flight login
+// between the start and submit-code calls.
 #[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn claude_auth_login_start(
@@ -3455,14 +3608,51 @@ pub async fn claude_auth_login_start(
     {
         return result;
     }
-    call_with_timeout_blocking(
-        app,
-        state,
+    let ctx = HostContext::from_app(app);
+    let result = call_sidecar_with_timeout_blocking(
+        ctx.clone(),
+        (*state).clone(),
         "claude.authLoginStart",
         Value::Null,
         AUTH_LOGIN_TIMEOUT,
     )
-    .await
+    .await?;
+    // The browser is right here on desktop, so open the sign-in page instead of
+    // making the user copy the URL. The dialog still shows it as a fallback.
+    if result.get("ok").and_then(Value::as_bool) == Some(true) {
+        if let Some(url) = result.get("url").and_then(Value::as_str) {
+            if is_trusted_claude_login_url(url) {
+                match open_login_url(&ctx, url) {
+                    Ok(()) => log_auth_line(&ctx, "opened sign-in URL in browser"),
+                    Err(err) => log_auth_line(&ctx, &format!("failed to open sign-in URL: {err}")),
+                }
+            } else {
+                log_auth_line(&ctx, "refused to open an untrusted sign-in URL");
+            }
+        }
+    }
+    finish_claude_login_stage(
+        &ctx,
+        ClaudeLoginStage::Start,
+        "claude.authLoginStart",
+        result,
+    )
+    .map_err(|message| BridgeError { message })
+}
+
+/// Hand the sidecar's login slot back once the account has been registered or
+/// the ceremony has terminally failed. Mirrors the remote server: releasing
+/// before finalization would let a second login start mid-flight.
+#[cfg(feature = "desktop")]
+async fn release_claude_login(ctx: &HostContext, state: &SidecarState, login_id: Option<&str>) {
+    let _ = call_sidecar_with_timeout_blocking(
+        ctx.clone(),
+        state.clone(),
+        "claude.authLoginRelease",
+        json!({ "loginId": login_id }),
+        DEFAULT_TIMEOUT,
+    )
+    .await;
 }
 
 #[cfg(feature = "desktop")]
@@ -3490,14 +3680,33 @@ pub async fn claude_auth_login_submit_code(
     {
         return result;
     }
-    call_with_timeout_blocking(
-        app,
-        state,
+    let ctx = HostContext::from_app(app);
+    let sidecar = (*state).clone();
+    // deferRelease keeps the sidecar's login slot reserved until the account is
+    // registered below; a non-terminal failure (wrong code) keeps the session
+    // alive so the user can retry without restarting the ceremony.
+    let result = call_sidecar_with_timeout_blocking(
+        ctx.clone(),
+        sidecar.clone(),
         "claude.authLoginSubmitCode",
-        json!({ "code": code, "loginId": login_id }),
+        json!({ "code": code, "loginId": login_id, "deferRelease": true }),
         AUTH_LOGIN_TIMEOUT,
     )
-    .await
+    .await?;
+    let terminal = result
+        .get("terminal")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let finished = finish_claude_login_stage(
+        &ctx,
+        ClaudeLoginStage::SubmitCode,
+        "claude.authLoginSubmitCode",
+        result,
+    );
+    if terminal || finished.is_err() {
+        release_claude_login(&ctx, &sidecar, login_id.as_deref()).await;
+    }
+    finished.map_err(|message| BridgeError { message })
 }
 
 #[cfg(feature = "desktop")]
@@ -3524,14 +3733,31 @@ pub async fn claude_auth_login_cancel(
     {
         return result;
     }
-    call_with_timeout_blocking(
-        app,
-        state,
+    let ctx = HostContext::from_app(app);
+    let sidecar = (*state).clone();
+    let result = call_sidecar_with_timeout_blocking(
+        ctx.clone(),
+        sidecar.clone(),
         "claude.authLoginCancel",
-        json!({ "loginId": login_id }),
+        json!({ "loginId": login_id, "deferRelease": true }),
         DEFAULT_TIMEOUT,
     )
-    .await
+    .await?;
+    let terminal = result
+        .get("terminal")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    // A cancelled ceremony must put the previous account's credential back.
+    let finished = finish_claude_login_stage(
+        &ctx,
+        ClaudeLoginStage::Cancel,
+        "claude.authLoginCancel",
+        result,
+    );
+    if terminal || finished.is_err() {
+        release_claude_login(&ctx, &sidecar, login_id.as_deref()).await;
+    }
+    finished.map_err(|message| BridgeError { message })
 }
 
 #[cfg(feature = "desktop")]
@@ -3562,67 +3788,6 @@ pub async fn claude_account_import_current(
 
 #[cfg(feature = "desktop")]
 #[tauri::command]
-pub async fn claude_account_login_new(
-    app: AppHandle,
-    _state: State<'_, SidecarState>,
-) -> Result<Value, BridgeError> {
-    let app_data_dir = app_data_dir(&HostContext::from_app(app.clone()))?;
-    let index = account_store::read_index(&app_data_dir);
-    let active_account_id = index.active_account_id.clone();
-    let backup_credential = account_store::read_cli_credentials();
-    let login_app = app.clone();
-    let login_result = crate::async_rt::spawn_blocking(move || {
-        auth_login_native(&HostContext::from_app(login_app.clone()))
-    })
-    .await
-    .map_err(|err| BridgeError {
-        message: format!("claude.accountLoginNew authLogin worker failed: {err}"),
-    })?;
-    if !login_success(&login_result) {
-        return Ok(login_result);
-    }
-    let status_app = app.clone();
-    let status_value = crate::async_rt::spawn_blocking(move || {
-        fetch_auth_status_native(&HostContext::from_app(status_app.clone()))
-    })
-    .await
-    .map_err(|err| BridgeError {
-        message: format!("claude.accountLoginNew authStatus worker failed: {err}"),
-    })?;
-    let Some(status) = account_store::auth_status_from_value(&status_value) else {
-        if let Some(backup) = backup_credential {
-            let _ = account_store::write_cli_credentials(&backup);
-        }
-        return Ok(
-            json!({ "success": false, "error": "Login completed but could not verify account" }),
-        );
-    };
-    let Some(new_credential) = account_store::read_cli_credentials() else {
-        if let Some(backup) = backup_credential {
-            let _ = account_store::write_cli_credentials(&backup);
-        }
-        return Ok(json!({ "success": false, "error": "Could not read credentials after login" }));
-    };
-    let account =
-        match account_store::upsert_new_login_account(&app_data_dir, status, new_credential) {
-            Ok(account) => account,
-            Err(err) => {
-                if let Some(backup) = backup_credential {
-                    let _ = account_store::write_cli_credentials(&backup);
-                }
-                return Ok(json!({ "success": false, "error": err.to_string() }));
-            }
-        };
-    if let (Some(backup), Some(active_id)) = (backup_credential, active_account_id) {
-        if active_id != account.id {
-            let _ = account_store::write_cli_credentials(&backup);
-        }
-    }
-    Ok(json!({ "success": true, "account": account }))
-}
-
-#[cfg(feature = "desktop")]
-#[tauri::command]
 pub async fn claude_account_switch(
     app: AppHandle,
     window: WebviewWindow,
@@ -3641,8 +3806,12 @@ pub async fn claude_account_switch(
     {
         return result;
     }
-    let app_data_dir = app_data_dir(&HostContext::from_app(app.clone()))?;
+    let ctx = HostContext::from_app(app.clone());
+    let app_data_dir = app_data_dir(&ctx)?;
     let ok = account_store::switch_account(&app_data_dir, &account_id).map_err(account_error)?;
+    if ok {
+        broadcast_account_changed(&ctx, "claude", Some(&account_id));
+    }
     Ok(Value::Bool(ok))
 }
 
@@ -3666,8 +3835,14 @@ pub async fn claude_account_remove(
     {
         return result;
     }
-    let app_data_dir = app_data_dir(&HostContext::from_app(app.clone()))?;
+    let ctx = HostContext::from_app(app.clone());
+    let app_data_dir = app_data_dir(&ctx)?;
     let ok = account_store::remove_account(&app_data_dir, &account_id).map_err(account_error)?;
+    if ok {
+        // The removed id, not a new active one — removing the active account
+        // leaves none active, and listeners re-read the list either way.
+        broadcast_account_changed(&ctx, "claude", Some(&account_id));
+    }
     Ok(Value::Bool(ok))
 }
 
@@ -3748,9 +3923,14 @@ pub async fn codex_account_switch(
     {
         return result;
     }
-    codex
-        .switch_account(&HostContext::from_app(app.clone()), codex_home)
-        .map_err(|message| BridgeError { message })
+    let ctx = HostContext::from_app(app.clone());
+    let result = codex
+        .switch_account(&ctx, codex_home)
+        .map_err(|message| BridgeError { message })?;
+    if login_success(&result) {
+        broadcast_account_changed(&ctx, "codex", None);
+    }
+    Ok(result)
 }
 
 #[cfg(feature = "desktop")]
@@ -5258,6 +5438,34 @@ mod tests {
     use super::*;
     use std::env;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn is_trusted_claude_login_url_rejects_untrusted_hosts() {
+        assert!(is_trusted_claude_login_url(
+            "https://claude.ai/oauth/authorize"
+        ));
+        assert!(is_trusted_claude_login_url(
+            "https://platform.claude.com/oauth/authorize"
+        ));
+        assert!(is_trusted_claude_login_url(
+            "https://console.anthropic.com/oauth/authorize"
+        ));
+        // Plain HTTP is never trusted — we hand this to the OS browser.
+        assert!(!is_trusted_claude_login_url(
+            "http://claude.ai/oauth/authorize"
+        ));
+        // Suffix confusion: a lookalike domain must not pass.
+        assert!(!is_trusted_claude_login_url(
+            "https://evil-claude.ai/oauth/authorize"
+        ));
+        assert!(!is_trusted_claude_login_url(
+            "https://claude.ai.evil.example/oauth/authorize"
+        ));
+        // Userinfo trick: the real host is after the '@'.
+        assert!(!is_trusted_claude_login_url(
+            "https://claude.ai@evil.example/oauth/authorize"
+        ));
+    }
 
     #[test]
     fn validate_local_session_cwd_passes_when_cwd_missing_or_empty() {

@@ -12,6 +12,7 @@ import { buildConnectionUrl } from '../utils/connection-url'
 import { checkUpdatesNow, getUpdateState, subscribeUpdate } from '../lib/auto-update'
 import { CLAUDE_BUILTIN_MODELS } from '../utils/claude-model-presets'
 import { CODEX_MODELS } from '../utils/codex-models'
+import { LoginDialog } from './LoginDialog'
 
 interface SettingsPanelProps {
   onClose: () => void
@@ -160,8 +161,9 @@ export function SettingsPanel({ onClose, isRemoteProfile = false, remoteOrigin =
   const [activeAccountId, setActiveAccountId] = useState<string | null>(null)
   const [switchWarningShown, setSwitchWarningShown] = useState(false)
   const [accountsLoading, setAccountsLoading] = useState(false)
-  const [accountLoginLoading, setAccountLoginLoading] = useState(false)
+  const [accountLoginOpen, setAccountLoginOpen] = useState(false)
   const [accountSwitchingId, setAccountSwitchingId] = useState<string | null>(null)
+  const [accountRemovingId, setAccountRemovingId] = useState<string | null>(null)
   const [accountStatusMsg, setAccountStatusMsg] = useState('')
   const [accountStatusIsError, setAccountStatusIsError] = useState(false)
 
@@ -303,7 +305,14 @@ export function SettingsPanel({ onClose, isRemoteProfile = false, remoteOrigin =
     if (!switchWarningShown) {
       const confirmed = confirm(t('settings.accountSwitchingWarning'))
       if (!confirmed) return
-      await host.claude.accountMarkWarningShown()
+      // Best effort: only records that the warning was acknowledged. Letting it
+      // throw here would reject out of an un-awaited onClick, dropping the
+      // switch with no spinner and no error.
+      try {
+        await host.claude.accountMarkWarningShown()
+      } catch (e) {
+        host.debug.log?.(`[SettingsPanel] Could not record the switch warning: ${e}`)
+      }
       setSwitchWarningShown(true)
     }
     setAccountSwitchingId(accountId)
@@ -333,32 +342,43 @@ export function SettingsPanel({ onClose, isRemoteProfile = false, remoteOrigin =
     if (!account) return
     const confirmed = confirm(t('settings.accountSwitchingRemoveConfirm', { email: account.email }))
     if (!confirmed) return
-    const success = await host.claude.accountRemove(accountId)
-    if (success) {
-      await loadAccounts()
-    }
-  }
-
-  const handleAccountLoginNew = async () => {
-    setAccountLoginLoading(true)
-    setAccountStatusMsg(t('settings.accountSwitchingOpeningLogin'))
+    setAccountRemovingId(accountId)
+    setAccountStatusMsg('')
     setAccountStatusIsError(false)
     try {
-      const result = await host.claude.accountLoginNew()
-      if (result.success) {
+      const success = await host.claude.accountRemove(accountId)
+      if (success) {
         await loadAccounts()
-        setAccountStatusMsg(result.account ? t('settings.accountSwitchingAddedAccount', { email: result.account.email }) : t('settings.accountSwitchingAccountAdded'))
-        setAccountStatusIsError(false)
       } else {
-        setAccountStatusMsg(t('settings.accountSwitchingLoginFailed', { error: result.error || t('common.unknownError', 'unknown error') }))
+        setAccountStatusMsg(t('settings.accountSwitchingRemoveFailed'))
         setAccountStatusIsError(true)
       }
     } catch (e) {
-      host.debug.log?.(`[SettingsPanel] Account login failed: ${e}`)
+      host.debug.log?.(`[SettingsPanel] Account remove failed: ${e}`)
       setAccountStatusMsg(t('settings.accountSwitchingError', { error: e instanceof Error ? e.message : t('common.unknownError', 'unknown error') }))
       setAccountStatusIsError(true)
+    } finally {
+      setAccountRemovingId(null)
     }
-    setAccountLoginLoading(false)
+  }
+
+  // `claude auth login` redirects to a hosted callback page rather than a
+  // localhost port, so nothing here can observe completion — the user pastes the
+  // code back through the sign-in dialog. The host opens the browser itself (see
+  // claude_auth_login_start), and registers the new account on success.
+  const handleAccountLoginNew = () => {
+    setAccountStatusMsg('')
+    setAccountStatusIsError(false)
+    setAccountLoginOpen(true)
+  }
+
+  const handleAccountLoginSuccess = async () => {
+    setAccountLoginOpen(false)
+    await loadAccounts()
+    setAccountStatusMsg(t('settings.accountSwitchingAccountAdded'))
+    setAccountStatusIsError(false)
+    // Refresh the workspace account chip, which is rendered outside this panel.
+    window.dispatchEvent(new CustomEvent('claude-account-switched', { detail: {} }))
   }
 
   const handleShellChange = (shell: ShellType) => {
@@ -1469,13 +1489,20 @@ Reference: https://github.com/ind-igo/cx`
                               <button
                                 className="statusline-template-btn"
                                 style={{ fontSize: '11px' }}
-                                onClick={() => handleAccountSwitch(account.id)}
-                                disabled={accountSwitchingId !== null}
+                                onClick={() => void handleAccountSwitch(account.id)}
+                                disabled={accountSwitchingId !== null || accountRemovingId !== null}
                               >
                                 {accountSwitchingId === account.id ? t('settings.accountSwitchingSwitching') : t('settings.accountSwitchingSwitch')}
                               </button>
                               {!account.isDefault && (
-                                <button className="statusline-template-btn" style={{ fontSize: '11px', color: '#f85149' }} onClick={() => handleAccountRemove(account.id)}>{t('settings.accountSwitchingRemove')}</button>
+                                <button
+                                  className="statusline-template-btn"
+                                  style={{ fontSize: '11px', color: '#f85149' }}
+                                  onClick={() => void handleAccountRemove(account.id)}
+                                  disabled={accountSwitchingId !== null || accountRemovingId !== null}
+                                >
+                                  {accountRemovingId === account.id ? t('settings.accountSwitchingRemoving') : t('settings.accountSwitchingRemove')}
+                                </button>
                               )}
                             </>
                           )}
@@ -1483,8 +1510,8 @@ Reference: https://github.com/ind-igo/cx`
                       ))}
                     </div>
                   )}
-                  <button className="statusline-template-btn" style={{ marginTop: '10px', fontSize: '12px' }} onClick={handleAccountLoginNew} disabled={accountLoginLoading}>
-                    {accountLoginLoading ? t('settings.accountSwitchingOpeningLoginShort') : t('settings.accountSwitchingAddAccount')}
+                  <button className="statusline-template-btn" style={{ marginTop: '10px', fontSize: '12px' }} onClick={handleAccountLoginNew} disabled={accountLoginOpen}>
+                    {accountLoginOpen ? t('settings.accountSwitchingOpeningLoginShort') : t('settings.accountSwitchingAddAccount')}
                   </button>
                   {accountStatusMsg && (
                     <p style={{ fontSize: '11px', color: accountStatusIsError ? '#f85149' : 'var(--text-secondary)', marginTop: '6px' }}>
@@ -1741,6 +1768,18 @@ Reference: https://github.com/ind-igo/cx`
         <div className="settings-footer">
           <p className="settings-note">{t('settings.footerNote')}</p>
         </div>
+
+        {/* Inside .settings-panel so the dialog's own overlay click stops at the
+            panel's stopPropagation handler instead of closing Settings too. */}
+        {accountLoginOpen && (
+          <LoginDialog
+            kind="claude"
+            target={isRemoteProfile ? 'remote' : 'local'}
+            hostLabel={remoteOrigin || undefined}
+            onClose={() => setAccountLoginOpen(false)}
+            onSuccess={() => void handleAccountLoginSuccess()}
+          />
+        )}
       </div>
     </div>
   )

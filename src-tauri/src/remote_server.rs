@@ -1597,66 +1597,20 @@ fn invoke_sidecar_for_remote(
     finished
 }
 
+// Shared with the desktop paste-code commands — see
+// claude_cmd::finish_claude_login_stage for the bookkeeping itself.
 fn finish_remote_claude_login(
     ctx: &HostContext,
     channel: &str,
-    mut result: Value,
+    result: Value,
 ) -> Result<Value, String> {
-    let terminal = result
-        .get("terminal")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let succeeded = result
-        .get("success")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let started = result.get("ok").and_then(Value::as_bool).unwrap_or(false);
-    if channel == "claude:auth-login-start" && started {
-        let data_dir = remote_app_data_dir(ctx, channel)?;
-        account_store::snapshot_active_account_credential(&data_dir)
-            .map_err(|err| format!("could not preserve the active Claude account: {err}"))?;
-    } else if channel == "claude:auth-login-submit-code" && succeeded {
-        let data_dir = remote_app_data_dir(ctx, channel)?;
-        let account = (|| {
-            let status_value = claude_cmd::fetch_auth_status_native(ctx);
-            let status = account_store::auth_status_from_value(&status_value).ok_or_else(|| {
-                "Claude login completed but the host could not verify it".to_string()
-            })?;
-            let credential = account_store::read_cli_credentials().ok_or_else(|| {
-                "Claude login completed but the host credential was unavailable".to_string()
-            })?;
-            account_store::activate_new_login_account(&data_dir, status, credential)
-                .map_err(|err| err.to_string())
-        })();
-        match account {
-            Ok(account) => {
-                if let Value::Object(map) = &mut result {
-                    map.insert(
-                        "account".to_string(),
-                        serde_json::to_value(account).unwrap_or(Value::Null),
-                    );
-                }
-            }
-            Err(err) => {
-                let _ = account_store::restore_active_account_credential(&data_dir);
-                return Err(format!(
-                    "Claude login completed but the account could not be registered: {err}"
-                ));
-            }
-        }
-    } else if terminal
-        && matches!(
-            channel,
-            "claude:auth-login-start"
-                | "claude:auth-login-submit-code"
-                | "claude:auth-login-cancel"
-        )
-    {
-        if let Ok(data_dir) = remote_app_data_dir(ctx, channel) {
-            let _ = account_store::restore_active_account_credential(&data_dir);
-        }
-    }
-    Ok(result)
+    let stage = match channel {
+        "claude:auth-login-start" => claude_cmd::ClaudeLoginStage::Start,
+        "claude:auth-login-submit-code" => claude_cmd::ClaudeLoginStage::SubmitCode,
+        "claude:auth-login-cancel" => claude_cmd::ClaudeLoginStage::Cancel,
+        _ => return Ok(result),
+    };
+    claude_cmd::finish_claude_login_stage(ctx, stage, channel, result)
 }
 
 fn profile_id_from_params(channel: &str, params: &Value) -> Result<String, String> {
@@ -2108,20 +2062,30 @@ fn invoke_rust_for_remote(
             serde_json::to_value(account_store::read_index(&data_dir))
                 .map_err(|err| format!("{channel} serialization failed: {err}"))
         }),
+        // These three mutate host-owned account state on behalf of one client,
+        // so they announce the result to *everyone* — the requesting client
+        // gets its answer via the invoke reply, and the host's own windows plus
+        // any other connected client repaint off the broadcast.
         "claude:account-switch" => while_claude_remote_login_idle(|| {
             string_param(params, "accountId", channel).and_then(|account_id| {
                 let data_dir = remote_app_data_dir(ctx, channel)?;
-                account_store::switch_account(&data_dir, &account_id)
-                    .map(Value::Bool)
-                    .map_err(|err| err.to_string())
+                let ok = account_store::switch_account(&data_dir, &account_id)
+                    .map_err(|err| err.to_string())?;
+                if ok {
+                    claude_cmd::broadcast_account_changed(ctx, "claude", Some(&account_id));
+                }
+                Ok(Value::Bool(ok))
             })
         }),
         "claude:account-remove" => while_claude_remote_login_idle(|| {
             string_param(params, "accountId", channel).and_then(|account_id| {
                 let data_dir = remote_app_data_dir(ctx, channel)?;
-                account_store::remove_account(&data_dir, &account_id)
-                    .map(Value::Bool)
-                    .map_err(|err| err.to_string())
+                let ok = account_store::remove_account(&data_dir, &account_id)
+                    .map_err(|err| err.to_string())?;
+                if ok {
+                    claude_cmd::broadcast_account_changed(ctx, "claude", Some(&account_id));
+                }
+                Ok(Value::Bool(ok))
             })
         }),
         "codex:account-list" => {
@@ -2131,7 +2095,11 @@ fn invoke_rust_for_remote(
         "codex:account-switch" => {
             string_param(params, "codexHome", channel).and_then(|codex_home| {
                 let codex = ctx.state::<CodexAppServerState>();
-                codex.switch_account(&ctx, codex_home)
+                let result = codex.switch_account(&ctx, codex_home)?;
+                if result.get("success").and_then(Value::as_bool) == Some(true) {
+                    claude_cmd::broadcast_account_changed(ctx, "codex", None);
+                }
+                Ok(result)
             })
         }
         "codex:auth-login-device-start" => {
