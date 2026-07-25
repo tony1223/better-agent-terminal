@@ -13,6 +13,7 @@ import { loadAnthropicSdk } from '../lib/sdk-loader.mjs'
 import { sessions, buildSessionMeta } from '../lib/state.mjs'
 import { CLAUDE_BUILTIN_MODELS, CLAUDE_BUILTIN_DEDUP_KEYS } from '../lib/models.mjs'
 import { scanSkills } from '../lib/skills.mjs'
+import { stripTaskNotifications, isHarnessNoiseUserText } from '../lib/harness-noise.mjs'
 import { activeWorktrees, worktreeStatus, worktreeRemove } from './worktree.mjs'
 import {
   cleanupCodexWorktree,
@@ -103,10 +104,10 @@ export async function listSessionsFallback(cwd) {
 }
 
 function normalizeSessionHintText(value) {
-  const text = String(value || '').replace(/\s+/g, ' ').trim()
-  if (!text) return ''
-  if (text === '[Request interrupted by user for tool use]') return ''
-  if (text.startsWith('<local-command-caveat>')) return ''
+  // Strip before collapsing whitespace, so removing a block from the middle of a
+  // prompt does not leave the double space its surrounding spaces would.
+  const text = stripTaskNotifications(value).replace(/\s+/g, ' ').trim()
+  if (isHarnessNoiseUserText(text)) return ''
   return text.slice(0, PREVIEW_CHARS)
 }
 

@@ -10,6 +10,7 @@ import { sessions, buildSessionMeta, resetSessionTranscript } from '../lib/state
 import { __resolveProjectsDir, archiveFilePath, resolveDataDir } from '../lib/data-paths.mjs'
 import { loadAnthropicSdk } from '../lib/sdk-loader.mjs'
 import { warn as logWarn } from '../lib/logger.mjs'
+import { stripTaskNotifications, isHarnessNoiseUserText } from '../lib/harness-noise.mjs'
 import { resolveClaudeCliBinaryWithInstall } from './claude-auth.mjs'
 
 function historyProjectDirCandidates(cwd) {
@@ -84,7 +85,7 @@ function historyItemsFromJsonl(raw, sessionId) {
     const ts = obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now()
     if (obj.type === 'user' && obj.message?.role === 'user') {
       const content = obj.message.content
-      const text = textFromContent(content)
+      const text = stripTaskNotifications(textFromContent(content))
       if (Array.isArray(content)) {
         for (const block of content) {
           if (block && block.type === 'tool_result' && typeof block.tool_use_id === 'string') {
@@ -98,10 +99,7 @@ function historyItemsFromJsonl(raw, sessionId) {
           }
         }
       }
-      const isNoise = !text
-        || text === '[Request interrupted by user for tool use]'
-        || text.startsWith('<local-command-caveat>')
-      if (!isNoise) {
+      if (!isHarnessNoiseUserText(text)) {
         items.push({
           id: obj.uuid || `hist-user-${items.length}`,
           sessionId,
@@ -429,13 +427,11 @@ registerHandler('claude.fetchSubagentMessages', async (params) => {
           }
         }
       }
-      const isNoise = !text
-        || text === '[Request interrupted by user for tool use]'
-        || text.startsWith('<local-command-caveat>')
-      if (!isNoise) {
+      const userText = stripTaskNotifications(text)
+      if (!isHarnessNoiseUserText(userText)) {
         items.push({
           id: `sa-user-${items.length}`,
-          sessionId, role: 'user', content: text,
+          sessionId, role: 'user', content: userText,
           parentToolUseId: agentToolUseId, timestamp: ts,
         })
       }

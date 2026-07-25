@@ -21,6 +21,8 @@
 // This module is intentionally self-contained (no dependency on the channel
 // path), so the channel experiment can be removed/replaced without touching it.
 
+import { stripTaskNotifications, isHarnessNoiseUserText } from '../lib/harness-noise.mjs'
+
 export const FRAME_KINDS = Object.freeze({
   USER: 'user',          // category: you
   ASSISTANT: 'assistant', // category: message
@@ -114,7 +116,11 @@ function frameForBlock(block, role, msgId, meta) {
       // A 'text' block under role=user is the human's message (you); under
       // role=assistant it is the assistant's reply (message).
       const kind = role === 'user' ? FRAME_KINDS.USER : FRAME_KINDS.ASSISTANT
-      return { kind, payload: { id: msgId, text }, meta }
+      if (kind !== FRAME_KINDS.USER) return { kind, payload: { id: msgId, text }, meta }
+      // Harness-injected pseudo-user turns share the transcript's role=user
+      // shape, so without this they render as a "you" bubble of raw XML.
+      if (isHarnessNoiseUserText(text)) return null
+      return { kind, payload: { id: msgId, text: stripTaskNotifications(text) }, meta }
     }
     case 'image': {
       // Image input from the human → "you" (no text). Marked so the UI can
@@ -139,9 +145,11 @@ export function framesFromTranscriptObject(obj) {
 
   const content = msg.content
   if (typeof content === 'string') {
-    if (content.length > 0) {
-      const kind = role === 'user' ? FRAME_KINDS.USER : FRAME_KINDS.ASSISTANT
-      frames.push({ kind, payload: { id: msgId, text: content }, meta: { ...meta, blockIndex: 0 } })
+    const kind = role === 'user' ? FRAME_KINDS.USER : FRAME_KINDS.ASSISTANT
+    const isNoise = kind === FRAME_KINDS.USER && isHarnessNoiseUserText(content)
+    const text = kind === FRAME_KINDS.USER ? stripTaskNotifications(content) : content
+    if (text.length > 0 && !isNoise) {
+      frames.push({ kind, payload: { id: msgId, text }, meta: { ...meta, blockIndex: 0 } })
     }
   } else if (Array.isArray(content)) {
     // Give each frame its own meta carrying the block index. Multiple blocks

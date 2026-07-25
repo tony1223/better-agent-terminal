@@ -1206,8 +1206,34 @@ struct ClaudeSessionPreview {
     summary: Option<String>,
 }
 
+const TASK_NOTIFICATION_OPEN: &str = "<task-notification>";
+const TASK_NOTIFICATION_CLOSE: &str = "</task-notification>";
+
+/// Mirrors `stripTaskNotifications` in `node-sidecar/src/lib/harness-noise.mjs`:
+/// removes the harness's injected background-task updates while keeping whatever
+/// the human wrote around them. An unterminated block swallows the rest of the
+/// text, because half an XML tag in a session preview reads worse than a dropped
+/// notification whose end we cannot find.
+fn strip_task_notifications(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(TASK_NOTIFICATION_OPEN) {
+        out.push_str(&rest[..start]);
+        let after_open = &rest[start + TASK_NOTIFICATION_OPEN.len()..];
+        match after_open.find(TASK_NOTIFICATION_CLOSE) {
+            Some(end) => rest = &after_open[end + TASK_NOTIFICATION_CLOSE.len()..],
+            None => return out.trim().to_string(),
+        }
+    }
+    out.push_str(rest);
+    out.trim().to_string()
+}
+
 fn normalize_session_hint_text(text: &str) -> Option<String> {
-    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    // Strip before collapsing whitespace, so removing a block from the middle of
+    // a prompt does not leave the double space its surrounding spaces would.
+    let stripped = strip_task_notifications(text);
+    let normalized = stripped.split_whitespace().collect::<Vec<_>>().join(" ");
     if normalized.is_empty()
         || normalized == "[Request interrupted by user for tool use]"
         || normalized.starts_with("<local-command-caveat>")
@@ -5438,6 +5464,54 @@ mod tests {
     use super::*;
     use std::env;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    // Mirrors node-sidecar/tests/harness-noise.test.mjs. Harness-injected
+    // background-task updates arrive as role=user records, so a session preview
+    // would otherwise read as raw XML instead of the user's last prompt.
+    #[test]
+    fn session_hint_text_drops_harness_task_notifications() {
+        let notification = "<task-notification><task-id>b4b43fb3i</task-id>\
+            <summary>Monitor event</summary><event>起始 pid=5390</event></task-notification>";
+        assert_eq!(normalize_session_hint_text(notification), None);
+        // Whitespace-collapsed and repeated forms are still fully removed.
+        assert_eq!(
+            normalize_session_hint_text(&format!("\n {notification} \n{notification}")),
+            None
+        );
+        // A real prompt wrapped around a notification keeps only the prompt.
+        assert_eq!(
+            normalize_session_hint_text(&format!("please fix the build\n{notification}")),
+            Some("please fix the build".to_string())
+        );
+        assert_eq!(
+            normalize_session_hint_text(&format!("before {notification} after")),
+            Some("before after".to_string())
+        );
+        // Truncated block: swallow the tail rather than leak half a tag.
+        assert_eq!(
+            normalize_session_hint_text("keep me <task-notification><summary>cut"),
+            Some("keep me".to_string())
+        );
+        assert_eq!(
+            normalize_session_hint_text("<task-notification>only, unterminated"),
+            None
+        );
+        // A stray closing tag is not an opener, so nothing is removed.
+        assert_eq!(
+            normalize_session_hint_text("</task-notification> tail"),
+            Some("</task-notification> tail".to_string())
+        );
+        // Ordinary prompts and the other two markers behave as before.
+        assert_eq!(
+            normalize_session_hint_text("release new tag version"),
+            Some("release new tag version".to_string())
+        );
+        assert_eq!(
+            normalize_session_hint_text("[Request interrupted by user for tool use]"),
+            None
+        );
+        assert_eq!(normalize_session_hint_text("   "), None);
+    }
 
     #[test]
     fn is_trusted_claude_login_url_rejects_untrusted_hosts() {
