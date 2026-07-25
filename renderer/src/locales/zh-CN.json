@@ -527,7 +527,6 @@
     "modelPickerHint": "↑↓ 选模型 · ←→ 选压缩阈值 · Enter 应用",
     "escToCancel": "按 Esc 取消",
     "model1mHint": "1M context 通过 SDK 的 cache 效率较低。对成本敏感的工作，建议直接使用 Claude CLI。",
-    "codexModelChangeWarning": "切换模型会开始新的 Codex session，并清除当前对话。是否继续？",
     "v2ModelChangeWarning": "在 V2 中切换模型将会重建 session 并重新应用 context，可能会产生额外的 token 成本。是否继续？",
     "v1Model1mWarning": "在 Claude Agent 中使用 1M context 模型，cache 效率仅约 25%，可能导致大量无意义的 token 消耗。建议改用 CLI 以获得更好的 cache 效率。是否继续？",
     "v2ModelListHint": "在 V2 中切换模型将会重建 session 并重新读取 context，可能会消耗额外的 token，请谨慎使用。",

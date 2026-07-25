@@ -2111,10 +2111,9 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
   usePanelActiveEffect(activation, focusActiveTextarea)
 
   const handleModelSelect = useCallback(async (modelValue: string) => {
-    if (isCodexSession && modelValue !== currentModel) {
-      const ok = await host.dialog.confirm(t('claude.codexModelChangeWarning'))
-      if (!ok) return
-    }
+    // Codex needs no warning or teardown: turn/start carries `model` as a
+    // sticky per-turn override, so the new model picks up the same thread
+    // with its history intact.
     // V2: warn that model change will recreate session and re-apply context
     if (!isCodexSession && isV2Session && modelValue !== currentModel) {
       const ok = await host.dialog.confirm(t('claude.v2ModelChangeWarning'))
@@ -2130,22 +2129,6 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
     setTimeout(() => textareaRef.current?.focus(), 0)
     await host.claude.setModel(sessionId, modelValue, settingsStore.getSettings().autoCompactWindow)
     workspaceStore.updateTerminalModel(sessionId, modelValue)
-    if (isCodexSession && modelValue !== currentModel) {
-      historyItemsReceivedRef.current = false
-      autoLoadedArchiveSessionRef.current = null
-      setMessages([])
-      setLoadedArchive([])
-      archivedCountRef.current = 0
-      loadedFromArchiveRef.current = 0
-      setHasMoreArchived(false)
-      setStreamingText('')
-      setStreamingThinking('')
-      setIsStreaming(false)
-      cacheHistoryRef.current = []
-      lastResultRef.current = null
-      setCacheCountdown(null)
-      await host.claude.resetSession(sessionId)
-    }
   }, [sessionId, isCodexSession, isV2Session, currentModel, t])
 
   const handleResumeSelect = useCallback(async (sdkSessionId: string) => {

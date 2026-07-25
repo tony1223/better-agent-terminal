@@ -2349,10 +2349,9 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
 
   const handleModelSelect = useCallback(async (modelValue: string) => {
     const selectedModel = normalizeClaudeModelSelection(modelValue) || modelValue
-    if (isCodexSession && selectedModel !== currentModel) {
-      const ok = await host.dialog.confirm(t('claude.codexModelChangeWarning'))
-      if (!ok) return
-    }
+    // Codex needs no warning or teardown: turn/start carries `model` as a
+    // sticky per-turn override, so the new model picks up the same thread
+    // with its history intact.
     // V2: warn that model change will recreate session and re-apply context
     if (!isCodexSession && isV2Session && selectedModel !== currentModel) {
       const ok = await host.dialog.confirm(t('claude.v2ModelChangeWarning'))
@@ -2368,20 +2367,6 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
     setTimeout(() => textareaRef.current?.focus(), 0)
     await host.claude.setModel(sessionId, selectedModel, getAutoCompactWindowForModel(selectedModel, settingsStore.getSettings().autoCompactWindow) || undefined)
     workspaceStore.updateTerminalModel(sessionId, selectedModel)
-    if (isCodexSession && selectedModel !== currentModel) {
-      setMessages([])
-      setLoadedArchive([])
-      archivedCountRef.current = 0
-      loadedFromArchiveRef.current = 0
-      setHasMoreArchived(false)
-      setStreamingText('')
-      setStreamingThinking('')
-      setIsStreaming(false)
-      cacheHistoryRef.current = []
-      lastResultRef.current = null
-      setCacheCountdown(null)
-      await host.claude.resetSession(sessionId)
-    }
   }, [sessionId, isCodexSession, isV2Session, currentModel, t])
 
   const handleResumeSelect = useCallback(async (sdkSessionId: string) => {

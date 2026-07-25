@@ -551,7 +551,6 @@
     "modelPickerHint": "↑↓ model · ←→ compact window · Enter to apply",
     "escToCancel": "Esc to cancel",
     "model1mHint": "1M context has lower cache efficiency via SDK. For cost-sensitive workloads, consider using Claude CLI directly.",
-    "codexModelChangeWarning": "Switching models will start a new Codex session and clear the current conversation. Continue?",
     "v2ModelChangeWarning": "Switching models in V2 will recreate the session and re-apply context, which may incur additional token costs. Continue?",
     "v1Model1mWarning": "1M context models in Claude Agent may cause significant unnecessary token consumption due to low cache efficiency (~25%). Consider using CLI for better cache performance. Continue?",
     "v2ModelListHint": "Switching model in V2 will recreate the session and re-apply context, which may consume additional tokens. Please switch with caution.",
