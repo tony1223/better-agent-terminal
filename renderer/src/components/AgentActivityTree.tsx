@@ -73,16 +73,18 @@ export function AgentActivityTree({
     </>
   )
 
+  // The header/bar row itself toggles, so the buttons stop propagation to
+  // avoid double-firing the toggle.
   const controls = (
     <span className="claude-agent-tree-controls">
       <button
         className="claude-agent-tree-btn"
-        onClick={onToggleExpanded}
+        onClick={(e) => { e.stopPropagation(); onToggleExpanded() }}
         title={t('claude.agentTreeToggle')}
       >{expanded ? '▾' : '▸'}</button>
       <button
         className="claude-agent-tree-btn"
-        onClick={onHide}
+        onClick={(e) => { e.stopPropagation(); onHide() }}
         title={t('claude.agentTreeHide')}
       >&times;</button>
     </span>
@@ -92,7 +94,11 @@ export function AgentActivityTree({
     // Collapsed bar: same chip layout as the old active-tasks bar, with
     // running chips first and the finished summary appended.
     return (
-      <div className="claude-active-tasks claude-agent-tree-bar">
+      <div
+        className="claude-active-tasks claude-agent-tree-bar"
+        // Empty space in the bar expands too; task chips keep their own click.
+        onClick={(e) => { if (e.target === e.currentTarget) onToggleExpanded() }}
+      >
         {roots.filter(node => node.status === 'running').map(node => {
           const rawProgress = node.progressText || ''
           const isStalled = rawProgress.startsWith('[stalled]')
@@ -169,7 +175,11 @@ export function AgentActivityTree({
 
   return (
     <div className="claude-agent-tree">
-      <div className="claude-agent-tree-header">
+      <div
+        className="claude-agent-tree-header"
+        onClick={onToggleExpanded}
+        title={t('claude.agentTreeToggle')}
+      >
         <span className="claude-agent-tree-title">{t('claude.agentTreeTitle')}</span>
         {summary.running > 0 && (
           <span className="claude-agent-tree-chip is-running">{t('claude.agentsRunning', { count: summary.running })}</span>

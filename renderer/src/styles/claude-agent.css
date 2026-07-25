@@ -157,6 +157,10 @@
 }
 
 /* Agent activity tree (expanded view of the active-tasks bar) */
+.claude-agent-tree-bar {
+  cursor: pointer;
+}
+
 .claude-agent-tree-bar .claude-agent-tree-controls {
   margin-left: auto;
 }
@@ -177,6 +181,10 @@
   gap: 8px;
   padding: 4px 8px 4px 40px;
   border-bottom: 1px solid rgba(224, 153, 86, 0.15);
+  cursor: pointer;
+}
+.claude-agent-tree-header:hover {
+  background: rgba(224, 153, 86, 0.06);
 }
 
 .claude-agent-tree-title {
