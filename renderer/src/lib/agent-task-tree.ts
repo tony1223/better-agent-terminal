@@ -250,6 +250,42 @@ export function buildAgentTaskTree(
   return roots
 }
 
+/**
+ * Depth-first lookup by node id. Detail views are opened from any depth of the
+ * tree, so they can't re-derive a node's merged status/timing from the main
+ * message list — nested agents never appear there.
+ */
+export function findAgentNode(roots: readonly AgentTaskNode[], id: string): AgentTaskNode | null {
+  for (const node of roots) {
+    if (node.id === id) return node
+    const hit = findAgentNode(node.children, id)
+    if (hit) return hit
+  }
+  return null
+}
+
+/** `M:SS` clock for a millisecond span. */
+export function formatTaskClock(ms: number): string {
+  const secs = Math.max(0, Math.floor(ms / 1000))
+  const m = Math.floor(secs / 60)
+  const s = secs % 60
+  return `${m}:${String(s).padStart(2, '0')}`
+}
+
+/**
+ * Elapsed clock for a node: a live count-up while running, the measured span
+ * once finished. Empty when the span is unknown — lifecycle-only nodes may
+ * carry neither a start nor an end.
+ */
+export function formatAgentNodeElapsed(node: AgentTaskNode, now: number): string {
+  if (!node.timestamp) return ''
+  if (node.status === 'running') return formatTaskClock(now - node.timestamp)
+  if (node.endTimestamp && node.endTimestamp > node.timestamp) {
+    return formatTaskClock(node.endTimestamp - node.timestamp)
+  }
+  return ''
+}
+
 export function summarizeAgentTree(roots: readonly AgentTaskNode[]): AgentTreeSummary {
   const summary: AgentTreeSummary = { running: 0, completed: 0, error: 0, total: 0 }
   const walk = (nodes: readonly AgentTaskNode[]) => {

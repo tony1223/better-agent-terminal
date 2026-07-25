@@ -2920,6 +2920,57 @@
   margin-right: 12px;
 }
 
+/* Prompt / result sections above the transcript: the parts of an agent run
+   that survive even when its inner message stream was never captured. */
+.claude-subagent-detail {
+  padding: 8px 12px 0;
+}
+
+.claude-subagent-detail .claude-task-result-text {
+  max-height: 320px;
+}
+
+.claude-subagent-section-copy {
+  margin-left: auto;
+  margin-right: 8px;
+  padding: 0 4px;
+  border: none;
+  background: none;
+  color: var(--text-secondary);
+  font-size: calc(var(--claude-font-size) - 2px);
+  cursor: pointer;
+}
+
+.claude-subagent-section-copy:hover { color: var(--text-primary); }
+.claude-subagent-section-copy.copied { color: #10b981; }
+
+.claude-subagent-divider {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 0 0;
+  color: var(--text-secondary);
+  font-family: 'Cascadia Code', 'SF Mono', Consolas, monospace;
+  font-size: calc(var(--claude-font-size) - 3px);
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  opacity: 0.7;
+}
+
+.claude-subagent-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border-color);
+}
+
+.claude-subagent-empty {
+  padding: 12px;
+  color: var(--text-secondary);
+  font-size: calc(var(--claude-font-size) - 1px);
+  text-align: center;
+}
+
 .claude-subagent-view-btn {
   font-size: calc(var(--claude-font-size) - 2px);
   color: var(--claude-accent);

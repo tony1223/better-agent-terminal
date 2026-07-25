@@ -582,6 +582,8 @@
     "agentsDone": "{{count}}件完了",
     "agentsFailed": "{{count}}件失敗",
     "messages": "{{count}}件のメッセージ",
+    "subagentTranscript": "実行ログ",
+    "subagentNoTranscript": "このエージェントの実行ログは記録されていません",
     "promptHistory": "プロンプト履歴（{{count}}）",
     "copyAll": "すべてコピー",
     "copyAllPrompts": "すべてのプロンプトをコピー",

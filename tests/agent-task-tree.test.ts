@@ -1,10 +1,14 @@
 import * as assert from 'node:assert/strict'
 import {
   buildAgentTaskTree,
+  findAgentNode,
+  formatAgentNodeElapsed,
+  formatTaskClock,
   isTerminalTaskStatus,
   lastStreamLine,
   summarizeAgentTree,
   terminateLifecycleEntries,
+  type AgentTaskNode,
   type TaskLifecycle,
 } from '../renderer/src/lib/agent-task-tree.ts'
 import type { ClaudeMessage, ClaudeToolCall } from '../renderer/src/types/claude-agent.ts'
@@ -243,6 +247,43 @@ const msg = (overrides: Partial<ClaudeMessage> & { id: string }): ClaudeMessage 
   assert.equal(lastStreamLine(undefined), '')
   assert.equal(lastStreamLine('one\ntwo\n\n  '), 'two')
   assert.equal(lastStreamLine('x'.repeat(200), 10), `…${'x'.repeat(10)}`)
+}
+
+// --- findAgentNode: the detail view resolves nodes at any depth, because a
+// --- nested agent's tool block never reaches the main message list ---
+{
+  const messages: MessageItem[] = [tool({ id: 'root', input: { description: 'parent' } })]
+  const buckets = new Map<string, MessageItem[]>([
+    ['root', [tool({ id: 'child', parentToolUseId: 'root', input: { description: 'nested' } })]],
+    ['child', [tool({ id: 'grandchild', parentToolUseId: 'child', input: { description: 'deep' } })]],
+  ])
+  const roots = buildAgentTaskTree(messages, buckets)
+  assert.equal(findAgentNode(roots, 'root')!.label, 'parent')
+  assert.equal(findAgentNode(roots, 'child')!.label, 'nested')
+  assert.equal(findAgentNode(roots, 'grandchild')!.label, 'deep')
+  assert.equal(findAgentNode(roots, 'missing'), null)
+  assert.equal(findAgentNode([], 'root'), null)
+}
+
+// --- formatAgentNodeElapsed: live clock while running, measured span once done ---
+{
+  const node = (over: Partial<AgentTaskNode>): AgentTaskNode => ({
+    id: 'n', kind: 'task', label: 'n', status: 'running', timestamp: 0, children: [], ...over,
+  })
+  const now = 100_000
+  assert.equal(formatAgentNodeElapsed(node({ timestamp: now - 95_000 }), now), '1:35')
+  assert.equal(
+    formatAgentNodeElapsed(node({ status: 'completed', timestamp: 1000, endTimestamp: 175_000 }), now),
+    '2:54',
+  )
+  // Unknown span (lifecycle-only node, or an end that predates the start).
+  assert.equal(formatAgentNodeElapsed(node({ status: 'completed', timestamp: 0 }), now), '')
+  assert.equal(formatAgentNodeElapsed(node({ status: 'completed', timestamp: 5000 }), now), '')
+  assert.equal(formatAgentNodeElapsed(node({ status: 'error', timestamp: 5000, endTimestamp: 4000 }), now), '')
+  // A clock never runs backwards even if the tree is a tick ahead of `now`.
+  assert.equal(formatAgentNodeElapsed(node({ timestamp: now + 5000 }), now), '0:00')
+  assert.equal(formatTaskClock(0), '0:00')
+  assert.equal(formatTaskClock(3_599_000), '59:59')
 }
 
 console.log('agent task tree regression: passed')

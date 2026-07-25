@@ -600,6 +600,8 @@
     "agentsDone": "{{count}} 已完成",
     "agentsFailed": "{{count}} 失敗",
     "messages": "{{count}} 則訊息",
+    "subagentTranscript": "執行紀錄",
+    "subagentNoTranscript": "未記錄此代理的執行紀錄",
     "promptHistory": "提示詞紀錄（{{count}}）",
     "copyAll": "全部複製",
     "copyAllPrompts": "複製所有提示詞",

@@ -9,7 +9,12 @@
 // Pure presentational component; the panel owns tree building and state.
 import { useState } from 'react'
 import type { TFunction } from 'i18next'
-import { lastStreamLine, type AgentTaskNode, type AgentTreeSummary } from '../lib/agent-task-tree'
+import {
+  formatAgentNodeElapsed,
+  lastStreamLine,
+  type AgentTaskNode,
+  type AgentTreeSummary,
+} from '../lib/agent-task-tree'
 
 export interface AgentActivityTreeProps {
   roots: AgentTaskNode[]
@@ -21,22 +26,6 @@ export interface AgentActivityTreeProps {
   onOpenTask: (node: AgentTaskNode) => void
   onStopTask: (id: string) => void
   t: TFunction
-}
-
-function formatClock(ms: number): string {
-  const secs = Math.max(0, Math.floor(ms / 1000))
-  const m = Math.floor(secs / 60)
-  const s = secs % 60
-  return `${m}:${String(s).padStart(2, '0')}`
-}
-
-function nodeElapsed(node: AgentTaskNode): string {
-  if (!node.timestamp) return ''
-  if (node.status === 'running') return formatClock(Date.now() - node.timestamp)
-  if (node.endTimestamp && node.endTimestamp > node.timestamp) {
-    return formatClock(node.endTimestamp - node.timestamp)
-  }
-  return ''
 }
 
 function statusGlyph(status: AgentTaskNode['status']): JSX.Element {
@@ -115,7 +104,7 @@ export function AgentActivityTree({
               {progressDesc && !isStalled && <span className="claude-active-task-progress">{progressDesc}</span>}
               {!progressDesc && liveLine && <span className="claude-active-task-progress">{liveLine}</span>}
               {isStalled && <span className="claude-active-task-stalled">{t('claude.stalled')}</span>}
-              {node.timestamp > 0 && <span className="claude-active-task-time">{formatClock(Date.now() - node.timestamp)}</span>}
+              {node.timestamp > 0 && <span className="claude-active-task-time">{formatAgentNodeElapsed(node, Date.now())}</span>}
               {node.isBackground && <span className="claude-task-tag">{t('claude.bg')}</span>}
               <button className="claude-task-stop-btn" onClick={(e) => { e.stopPropagation(); onStopTask(node.id) }}>Stop</button>
             </div>
@@ -134,7 +123,7 @@ export function AgentActivityTree({
     const isStalled = rawProgress.startsWith('[stalled]')
     const progressDesc = rawProgress.trim() === node.label.trim() ? '' : rawProgress
     const liveLine = node.status === 'running' ? lastStreamLine(streamingText.get(node.id)) : ''
-    const elapsed = nodeElapsed(node)
+    const elapsed = formatAgentNodeElapsed(node, Date.now())
     return (
       <div key={node.id} className="claude-agent-tree-node">
         <div
