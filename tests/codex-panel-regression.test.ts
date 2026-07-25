@@ -3,11 +3,29 @@ import { readFile } from 'fs/promises'
 import { rateLimitsFromHostUsage, type HostUsageSnapshot } from '../renderer/src/utils/claude-usage-cache'
 import { normalizeReasoningSummary } from '../renderer/src/utils/reasoning-summary'
 import { agentSendResultError, isMissingSessionCwdError } from '../renderer/src/utils/agent-send-recovery'
+import {
+  autoCompactWindowForClaudeSelection,
+  contextWindowForClaudeSelection,
+  displayNameForClaudeSelection,
+  normalizeClaudeModelSelection,
+  sdkModelForClaudeSelection,
+} from '../renderer/src/utils/claude-model-presets'
 
 async function main() {
   const source = await readFile('renderer/src/components/CodexAgentPanel.tsx', 'utf8')
   const claudeSource = await readFile('renderer/src/components/ClaudeAgentPanel.tsx', 'utf8')
   const messageSkipSource = await readFile('renderer/src/components/messageSkip.tsx', 'utf8')
+
+  assert.equal(normalizeClaudeModelSelection('claude-opus-5'), 'claude-opus-5:1m')
+  assert.equal(normalizeClaudeModelSelection('claude-opus-5[1m]'), 'claude-opus-5:1m')
+  assert.equal(sdkModelForClaudeSelection('claude-opus-5:auto-compact-200k'), 'claude-opus-5')
+  assert.equal(autoCompactWindowForClaudeSelection('claude-opus-5:auto-compact-200k'), 200000)
+  assert.equal(autoCompactWindowForClaudeSelection('claude-opus-5:1m'), null)
+  assert.equal(contextWindowForClaudeSelection('claude-opus-5:1m'), 1000000)
+  assert.equal(displayNameForClaudeSelection('claude-opus-5:1m'), 'Opus 5 · 1M')
+  for (const panelSource of [source, claudeSource]) {
+    assert.match(panelSource, /'opus-5':\s+P\(5, 25\)/, 'Opus 5 pricing should be $5/$25 per MTok')
+  }
 
   assert.equal(
     source.includes('!isCodexSession && showResumeList'),

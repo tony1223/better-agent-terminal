@@ -442,7 +442,7 @@ async function inProcess() {
   const arrayMatch = presetsFile.match(/CLAUDE_BUILTIN_MODELS:[^=]*=\s*\[([\s\S]*?)\n\]/m)
   assert.ok(arrayMatch, 'could not locate CLAUDE_BUILTIN_MODELS array in source')
   const arrayBody = arrayMatch[1]
-  const tsValues = [...arrayBody.matchAll(/value:\s*(?:((?:CLAUDE_OPUS_(?:47|48)|CLAUDE_FABLE_5|CLAUDE_SONNET_5)_\w+)|'([^']+)')/g)]
+  const tsValues = [...arrayBody.matchAll(/value:\s*(?:((?:CLAUDE_OPUS_(?:5|47|48)|CLAUDE_FABLE_5|CLAUDE_SONNET_5)_\w+)|'([^']+)')/g)]
     .map(m => {
       if (m[1]) {
         // Resolve the symbolic constant via a regex-extracted assignment.
@@ -3169,6 +3169,9 @@ async function inProcess() {
   const { sdkModelForClaudeSelection, dataUrlToContentBlock } = mod
   assert.equal(sdkModelForClaudeSelection(undefined), undefined)
   assert.equal(sdkModelForClaudeSelection('claude-sonnet-4-6'), 'claude-sonnet-4-6')
+  assert.equal(sdkModelForClaudeSelection('claude-opus-5:auto-compact-200k'), 'claude-opus-5')
+  assert.equal(sdkModelForClaudeSelection('claude-opus-5:auto-compact-300k'), 'claude-opus-5')
+  assert.equal(sdkModelForClaudeSelection('claude-opus-5:1m'), 'claude-opus-5')
   assert.equal(sdkModelForClaudeSelection('claude-opus-4-8:auto-compact-200k'), 'claude-opus-4-8')
   assert.equal(sdkModelForClaudeSelection('claude-opus-4-8:auto-compact-300k'), 'claude-opus-4-8')
   assert.equal(sdkModelForClaudeSelection('claude-opus-4-8:1m'), 'claude-opus-4-8')
@@ -3203,6 +3206,9 @@ async function inProcess() {
   }
   // Preset entries must exist with a positive number.
   for (const presetId of [
+    'claude-opus-5:auto-compact-200k',
+    'claude-opus-5:auto-compact-300k',
+    'claude-opus-5:1m',
     'claude-opus-4-8:auto-compact-200k',
     'claude-opus-4-8:auto-compact-300k',
     'claude-opus-4-8:1m',
@@ -3217,6 +3223,7 @@ async function inProcess() {
 
   // Spot-check a few well-known values + expectedContextWindowForModel
   // base-id fallback semantics.
+  assert.equal(CLAUDE_MODEL_CONTEXT_WINDOWS.get('claude-opus-5'), 1000000)
   assert.equal(CLAUDE_MODEL_CONTEXT_WINDOWS.get('claude-opus-4-8'), 1000000)
   assert.equal(CLAUDE_MODEL_CONTEXT_WINDOWS.get('claude-opus-4-7'), 1000000)
   assert.equal(CLAUDE_MODEL_CONTEXT_WINDOWS.get('claude-haiku-4-5-20251001'), 200000)
@@ -3224,6 +3231,7 @@ async function inProcess() {
   assert.equal(CLAUDE_MODEL_CONTEXT_WINDOWS.get('claude-opus-4-7:1m'), 1000000)
   // expectedContextWindowForModel: hits map; falls back to base id by
   // stripping [1m]; returns null for unknown.
+  assert.equal(expectedContextWindowForModel('claude-opus-5[1m]'), 1000000)
   assert.equal(expectedContextWindowForModel('claude-opus-4-8[1m]'), 1000000)
   assert.equal(expectedContextWindowForModel('claude-opus-4-7'), 1000000)
   assert.equal(expectedContextWindowForModel('claude-opus-4-7[1m]'), 1000000)

@@ -3,6 +3,11 @@ export const CLAUDE_FABLE_5_1M_SDK_MODEL = 'claude-fable-5[1m]'
 export const CLAUDE_FABLE_5_200K_PRESET = 'claude-fable-5:auto-compact-200k'
 export const CLAUDE_FABLE_5_300K_PRESET = 'claude-fable-5:auto-compact-300k'
 export const CLAUDE_FABLE_5_1M_PRESET = 'claude-fable-5:1m'
+export const CLAUDE_OPUS_5_MODEL = 'claude-opus-5'
+export const CLAUDE_OPUS_5_1M_SDK_MODEL = 'claude-opus-5[1m]'
+export const CLAUDE_OPUS_5_200K_PRESET = 'claude-opus-5:auto-compact-200k'
+export const CLAUDE_OPUS_5_300K_PRESET = 'claude-opus-5:auto-compact-300k'
+export const CLAUDE_OPUS_5_1M_PRESET = 'claude-opus-5:1m'
 export const CLAUDE_OPUS_48_MODEL = 'claude-opus-4-8'
 export const CLAUDE_OPUS_48_1M_SDK_MODEL = 'claude-opus-4-8[1m]'
 export const CLAUDE_OPUS_48_200K_PRESET = 'claude-opus-4-8:auto-compact-200k'
@@ -30,6 +35,9 @@ export const CLAUDE_BUILTIN_MODELS: ClaudeModelInfo[] = [
   { value: CLAUDE_FABLE_5_200K_PRESET, displayName: 'Fable 5 · 200K Auto-Compact', description: 'claude-fable-5 · compact at 200K tokens' },
   { value: CLAUDE_FABLE_5_300K_PRESET, displayName: 'Fable 5 · 300K Auto-Compact', description: 'claude-fable-5 · compact at 300K tokens' },
   { value: CLAUDE_FABLE_5_1M_PRESET, displayName: 'Fable 5 · 1M', description: 'claude-fable-5 · no early auto-compact' },
+  { value: CLAUDE_OPUS_5_200K_PRESET, displayName: 'Opus 5 · 200K Auto-Compact', description: 'claude-opus-5 · compact at 200K tokens' },
+  { value: CLAUDE_OPUS_5_300K_PRESET, displayName: 'Opus 5 · 300K Auto-Compact', description: 'claude-opus-5 · compact at 300K tokens' },
+  { value: CLAUDE_OPUS_5_1M_PRESET, displayName: 'Opus 5 · 1M', description: 'claude-opus-5 · no early auto-compact' },
   { value: CLAUDE_OPUS_48_200K_PRESET, displayName: 'Opus 4.8 · 200K Auto-Compact', description: 'claude-opus-4-8 · compact at 200K tokens' },
   { value: CLAUDE_OPUS_48_300K_PRESET, displayName: 'Opus 4.8 · 300K Auto-Compact', description: 'claude-opus-4-8 · compact at 300K tokens' },
   { value: CLAUDE_OPUS_48_1M_PRESET, displayName: 'Opus 4.8 · 1M', description: 'claude-opus-4-8 · no early auto-compact' },
@@ -48,6 +56,8 @@ export const CLAUDE_BUILTIN_MODELS: ClaudeModelInfo[] = [
 export const CLAUDE_BUILTIN_MODEL_CONTEXT_WINDOWS = new Map<string, number>([
   ['claude-fable-5', 1000000],
   ['claude-fable-5[1m]', 1000000],
+  ['claude-opus-5', 1000000],
+  ['claude-opus-5[1m]', 1000000],
   ['claude-opus-4-8', 1000000],
   ['claude-opus-4-8[1m]', 1000000],
   ['claude-opus-4-7', 1000000],
@@ -65,6 +75,9 @@ const CLAUDE_PRESET_AUTO_COMPACT = new Map<string, number | null>([
   [CLAUDE_FABLE_5_200K_PRESET, 200000],
   [CLAUDE_FABLE_5_300K_PRESET, 300000],
   [CLAUDE_FABLE_5_1M_PRESET, null],
+  [CLAUDE_OPUS_5_200K_PRESET, 200000],
+  [CLAUDE_OPUS_5_300K_PRESET, 300000],
+  [CLAUDE_OPUS_5_1M_PRESET, null],
   [CLAUDE_OPUS_48_200K_PRESET, 200000],
   [CLAUDE_OPUS_48_300K_PRESET, 300000],
   [CLAUDE_OPUS_48_1M_PRESET, null],
@@ -81,6 +94,9 @@ const CLAUDE_PRESET_SDK_MODELS = new Map<string, string>([
   [CLAUDE_FABLE_5_200K_PRESET, CLAUDE_FABLE_5_MODEL],
   [CLAUDE_FABLE_5_300K_PRESET, CLAUDE_FABLE_5_MODEL],
   [CLAUDE_FABLE_5_1M_PRESET, CLAUDE_FABLE_5_MODEL],
+  [CLAUDE_OPUS_5_200K_PRESET, CLAUDE_OPUS_5_MODEL],
+  [CLAUDE_OPUS_5_300K_PRESET, CLAUDE_OPUS_5_MODEL],
+  [CLAUDE_OPUS_5_1M_PRESET, CLAUDE_OPUS_5_MODEL],
   [CLAUDE_OPUS_48_200K_PRESET, CLAUDE_OPUS_48_MODEL],
   [CLAUDE_OPUS_48_300K_PRESET, CLAUDE_OPUS_48_MODEL],
   [CLAUDE_OPUS_48_1M_PRESET, CLAUDE_OPUS_48_MODEL],
@@ -99,6 +115,7 @@ export function isClaudeModelPreset(model?: string): boolean {
 
 export function normalizeClaudeModelSelection(model?: string): string | undefined {
   if (model === CLAUDE_FABLE_5_MODEL || model === CLAUDE_FABLE_5_1M_SDK_MODEL) return CLAUDE_FABLE_5_1M_PRESET
+  if (model === CLAUDE_OPUS_5_MODEL || model === CLAUDE_OPUS_5_1M_SDK_MODEL) return CLAUDE_OPUS_5_1M_PRESET
   if (model === CLAUDE_OPUS_48_MODEL || model === CLAUDE_OPUS_48_1M_SDK_MODEL) return CLAUDE_OPUS_48_1M_PRESET
   if (model === CLAUDE_SONNET_5_MODEL || model === CLAUDE_SONNET_5_1M_SDK_MODEL) return CLAUDE_SONNET_5_1M_PRESET
   return model === CLAUDE_OPUS_47_MODEL || model === CLAUDE_OPUS_47_1M_SDK_MODEL
@@ -126,6 +143,8 @@ export function contextWindowForClaudeSelection(model?: string): number | undefi
   if (!sdkModel) return undefined
   if (sdkModel === CLAUDE_FABLE_5_MODEL) return 1000000
   if (sdkModel === CLAUDE_FABLE_5_1M_SDK_MODEL) return 1000000
+  if (sdkModel === CLAUDE_OPUS_5_MODEL) return 1000000
+  if (sdkModel === CLAUDE_OPUS_5_1M_SDK_MODEL) return 1000000
   if (sdkModel === CLAUDE_OPUS_48_MODEL) return 1000000
   if (sdkModel === 'claude-opus-4-8[1m]') return 1000000
   if (sdkModel === CLAUDE_OPUS_47_MODEL) return 1000000
@@ -144,6 +163,9 @@ export function displayNameForClaudeSelection(model?: string): string {
   if (model === CLAUDE_FABLE_5_200K_PRESET) return 'Fable 5 · 200K Auto-Compact'
   if (model === CLAUDE_FABLE_5_300K_PRESET) return 'Fable 5 · 300K Auto-Compact'
   if (model === CLAUDE_FABLE_5_MODEL || model === CLAUDE_FABLE_5_1M_SDK_MODEL || model === CLAUDE_FABLE_5_1M_PRESET) return 'Fable 5 · 1M'
+  if (model === CLAUDE_OPUS_5_200K_PRESET) return 'Opus 5 · 200K Auto-Compact'
+  if (model === CLAUDE_OPUS_5_300K_PRESET) return 'Opus 5 · 300K Auto-Compact'
+  if (model === CLAUDE_OPUS_5_MODEL || model === CLAUDE_OPUS_5_1M_SDK_MODEL || model === CLAUDE_OPUS_5_1M_PRESET) return 'Opus 5 · 1M'
   if (model === CLAUDE_OPUS_48_200K_PRESET) return 'Opus 4.8 · 200K Auto-Compact'
   if (model === CLAUDE_OPUS_48_300K_PRESET) return 'Opus 4.8 · 300K Auto-Compact'
   if (model === CLAUDE_OPUS_48_MODEL || model === CLAUDE_OPUS_48_1M_SDK_MODEL || model === CLAUDE_OPUS_48_1M_PRESET) return 'Opus 4.8 · 1M'

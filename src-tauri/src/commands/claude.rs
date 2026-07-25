@@ -1382,6 +1382,24 @@ pub(crate) fn claude_builtin_models_native() -> Value {
             "source": "builtin"
         },
         {
+            "value": "claude-opus-5:auto-compact-200k",
+            "displayName": "Opus 5 · 200K Auto-Compact",
+            "description": "claude-opus-5 · compact at 200K tokens",
+            "source": "builtin"
+        },
+        {
+            "value": "claude-opus-5:auto-compact-300k",
+            "displayName": "Opus 5 · 300K Auto-Compact",
+            "description": "claude-opus-5 · compact at 300K tokens",
+            "source": "builtin"
+        },
+        {
+            "value": "claude-opus-5:1m",
+            "displayName": "Opus 5 · 1M",
+            "description": "claude-opus-5 · no early auto-compact",
+            "source": "builtin"
+        },
+        {
             "value": "claude-opus-4-8:auto-compact-200k",
             "displayName": "Opus 4.8 · 200K Auto-Compact",
             "description": "claude-opus-4-8 · compact at 200K tokens",
@@ -1467,6 +1485,9 @@ fn claude_context_window_for_model(model: Option<&str>) -> u64 {
         "claude-fable-5"
         | "claude-fable-5[1m]"
         | "claude-fable-5:1m"
+        | "claude-opus-5"
+        | "claude-opus-5[1m]"
+        | "claude-opus-5:1m"
         | "claude-opus-4-8"
         | "claude-opus-4-8[1m]"
         | "claude-opus-4-8:1m"
@@ -1483,6 +1504,8 @@ fn claude_context_window_for_model(model: Option<&str>) -> u64 {
         "claude-haiku-4-5-20251001" => 200_000,
         "claude-fable-5:auto-compact-200k" => 200_000,
         "claude-fable-5:auto-compact-300k" => 300_000,
+        "claude-opus-5:auto-compact-200k" => 200_000,
+        "claude-opus-5:auto-compact-300k" => 300_000,
         "claude-opus-4-8:auto-compact-200k" => 200_000,
         "claude-opus-4-8:auto-compact-300k" => 300_000,
         "claude-opus-4-7:auto-compact-200k" => 200_000,
@@ -5707,6 +5730,7 @@ mod tests {
             .iter()
             .map(|model| model["value"].as_str().unwrap())
             .collect::<Vec<_>>();
+        assert!(values.contains(&"claude-opus-5:auto-compact-200k"));
         assert!(values.contains(&"claude-opus-4-8:auto-compact-200k"));
         assert!(values.contains(&"claude-opus-4-7:auto-compact-200k"));
         assert!(values.contains(&"claude-sonnet-4-6"));
