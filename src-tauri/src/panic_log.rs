@@ -1,4 +1,4 @@
-use crate::log_file::append_line;
+use crate::log_file::append_line_blocking;
 use std::any::Any;
 use std::path::PathBuf;
 use std::sync::Once;
@@ -36,7 +36,9 @@ pub fn install(data_dir: PathBuf) {
             let line = format!(
                 "{millis} [rust-panic] thread={thread_name} location={location} message={message}\n"
             );
-            let _ = append_line(&log_path, &line);
+            // Blocking on purpose: the queued writer would not survive the
+            // process going down right after this hook returns.
+            let _ = append_line_blocking(&log_path, &line);
             previous_hook(info);
         }));
     });

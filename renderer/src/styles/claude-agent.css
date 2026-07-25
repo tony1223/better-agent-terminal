@@ -374,6 +374,19 @@
   position: relative;
   padding: 6px 0 6px 40px;
   min-height: 28px;
+  /* A long session leaves hundreds of these in the DOM at once, and today a
+     single re-render makes the engine lay out and paint every one of them.
+     Skipping the off-screen ones makes that cost track what is actually on
+     screen instead of the length of the transcript.
+
+     The `auto` in contain-intrinsic-size is what keeps the scrollbar honest:
+     once an item has been on screen the engine reuses its real height instead
+     of the placeholder, so only never-yet-seen history is estimated. Nothing
+     inside a message escapes its box (the dot and its shadow sit inside the
+     40px gutter, and every modal is rendered at panel level), so the paint
+     containment this turns on is not observable. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 64px;
 }
 
 /* Vertical line */

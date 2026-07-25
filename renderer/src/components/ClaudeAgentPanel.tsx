@@ -1049,6 +1049,13 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
     setIsLoadingMore(true)
     const container = messagesContainerRef.current
     const prevScrollHeight = container?.scrollHeight ?? 0
+    // Anchor on the item that is currently at the top rather than on a
+    // scrollHeight delta. Items off screen are size-estimated until they
+    // scroll in, so the total height is not a stable reference across the
+    // await — but a node that is already on screen has a real height, and
+    // holding it still is what the user actually perceives as "kept my place".
+    const anchor = container?.querySelector<HTMLElement>('.tl-item') ?? null
+    const anchorTop = anchor?.getBoundingClientRect().top ?? 0
     try {
       const result = await host.claude.loadArchived(sessionId, loadedFromArchiveRef.current, LOAD_BATCH)
       if (result.messages.length > 0) {
@@ -1058,9 +1065,13 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
         setHasMoreArchived(result.hasMore)
         // Preserve scroll position after prepending
         requestAnimationFrame(() => {
-          if (container) {
-            const newScrollHeight = container.scrollHeight
-            container.scrollTop += newScrollHeight - prevScrollHeight
+          if (!container) return
+          if (anchor?.isConnected) {
+            container.scrollTop += anchor.getBoundingClientRect().top - anchorTop
+          } else {
+            // React dropped the anchor (index-keyed rows remount on prepend);
+            // fall back to the height delta.
+            container.scrollTop += container.scrollHeight - prevScrollHeight
           }
         })
       } else {
