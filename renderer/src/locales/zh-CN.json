@@ -576,6 +576,8 @@
     "agentsDone": "{{count}} 已完成",
     "agentsFailed": "{{count}} 失败",
     "messages": "{{count}} 条消息",
+    "subagentTranscript": "执行记录",
+    "subagentNoTranscript": "未记录此代理的执行记录",
     "promptHistory": "提示词记录（{{count}}）",
     "copyAll": "全部复制",
     "copyAllPrompts": "复制所有提示词",

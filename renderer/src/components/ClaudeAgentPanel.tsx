@@ -33,7 +33,7 @@ import { dispatchWorkerCommand, parseWorkerSlashCommand } from '../utils/worker-
 import { buildCollapsedOutputPreview, formatContentSize, parseShellInvocation, stringifyToolResult, summarizeToolCommandInput, summarizeToolSearchResult, truncateMiddle } from './CodexAgentPanel.helpers'
 import { normalizePendingAskUser, summarizeAskUserInput, wrapPreviewHtml } from './AskUserQuestion.helpers'
 import { AgentActivityTree } from './AgentActivityTree'
-import { buildAgentTaskTree, summarizeAgentTree, terminateLifecycleEntries, type TaskLifecycle } from '../lib/agent-task-tree'
+import { buildAgentTaskTree, findAgentNode, formatAgentNodeElapsed, summarizeAgentTree, terminateLifecycleEntries, type TaskLifecycle } from '../lib/agent-task-tree'
 import { usePanelActivation, usePanelActiveEffect, type PanelActivation } from '../utils/panel-activation'
 import { prepareFilePickerResults, type FilePickerSearchEntry } from '../utils/file-picker-search'
 
@@ -456,6 +456,8 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
   const [subagentStreamingThinking, setSubagentStreamingThinking] = useState<Map<string, string>>(new Map())
   const [taskModal, setTaskModal] = useState<{ taskId: string; label: string; subagentType?: string } | null>(null)
   const [taskModalTick, setTaskModalTick] = useState(0)
+  // Task id whose stored transcript is currently being read back from the SDK.
+  const [taskTranscriptLoading, setTaskTranscriptLoading] = useState<string | null>(null)
   // Best-effort `claude:task` lifecycle entries (workflow name / terminal
   // status), merged into the agent activity tree. Keyed by task id.
   const [taskLifecycle, setTaskLifecycle] = useState<Map<string, TaskLifecycle>>(new Map())
@@ -1267,7 +1269,11 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
           if (idx !== -1) {
             bucket[idx] = { ...bucket[idx], ...updates } as ClaudeToolCall
             foundInSubagent = true
-            if (taskModal?.taskId === parentId) setTaskModalTick(t => t + 1)
+            // Buckets live in a ref, so the modal only redraws when told to:
+            // for the parent whose transcript gained a row, and for the tool
+            // itself when it is a nested agent whose own detail view is open
+            // (that update carries its result).
+            if (taskModal?.taskId === parentId || taskModal?.taskId === id) setTaskModalTick(t => t + 1)
             break
           }
         }
@@ -2156,20 +2162,49 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
   }, [cwd])
   usePanelActiveEffect(activation, watchActiveGitBranch)
 
+  // Resolve the Task/Agent tool_use block behind a task detail view. Nested
+  // subagents never reach `allMessages` — they live in their parent's bucket —
+  // so the lookup has to walk the buckets too, or the modal loses the prompt,
+  // the result and the elapsed time for every child agent.
+  const findTaskToolCall = useCallback((taskId: string): ClaudeToolCall | undefined => {
+    const inMain = allMessages.find(m => isToolCall(m) && m.id === taskId)
+    if (inMain) return inMain as ClaudeToolCall
+    for (const bucket of subagentMessagesRef.current.values()) {
+      const inBucket = bucket.find(m => isToolCall(m) && m.id === taskId)
+      if (inBucket) return inBucket as ClaudeToolCall
+    }
+    return undefined
+  }, [allMessages])
+
+  // The activity-tree node behind the open modal: its status/timing already
+  // merge the tool block with `claude:task` lifecycle metadata, and it is the
+  // only source that covers nested and lifecycle-only nodes.
+  const taskModalNode = useMemo(
+    () => (taskModal ? findAgentNode(agentTree, taskModal.taskId) : null),
+    [agentTree, taskModal?.taskId], // eslint-disable-line react-hooks/exhaustive-deps
+  )
+
   // Fetch subagent messages from SDK when task modal opens (for completed tasks with no streamed messages)
   useEffect(() => {
     if (!taskModal) return
     const existing = subagentMessagesRef.current.get(taskModal.taskId)
     if (existing && existing.length > 0) return // already have streamed messages
-    const parentTask = allMessages.find(m => isToolCall(m) && m.id === taskModal.taskId) as ClaudeToolCall | undefined
-    if (parentTask?.status === 'running') return // still streaming, don't fetch
-    host.claude.fetchSubagentMessages(sessionId, taskModal.taskId).then((msgs: unknown[]) => {
+    if (taskModalNode?.status === 'running') return // still streaming, don't fetch
+    const taskId = taskModal.taskId
+    // Tracked so the transcript area can say "loading" instead of claiming
+    // nothing was captured while the read is still in flight.
+    setTaskTranscriptLoading(taskId)
+    host.claude.fetchSubagentMessages(sessionId, taskId).then((msgs: unknown[]) => {
       if (msgs && msgs.length > 0) {
-        subagentMessagesRef.current.set(taskModal.taskId, msgs as MessageItem[])
+        subagentMessagesRef.current.set(taskId, msgs as MessageItem[])
         setTaskModalTick(t => t + 1)
       }
-    }).catch(() => {})
-  }, [taskModal?.taskId]) // eslint-disable-line react-hooks/exhaustive-deps
+    }).catch(() => {}).finally(() => {
+      setTaskTranscriptLoading(prev => (prev === taskId ? null : prev))
+    })
+    // Status is a dep so a task that finishes while its modal is open gets its
+    // transcript pulled once streaming can no longer deliver it.
+  }, [taskModal?.taskId, taskModalNode?.status]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Cache alarm timer — update every 30s, only show after 1min idle
   useEffect(() => {
@@ -5665,14 +5700,34 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
         )
       })()}
 
-      {/* Subagent Modal */}
+      {/* Subagent Modal — the agent activity tree's detail view. Shows the whole
+          record of one agent run: what it was asked (prompt), what it reported
+          back (result) and what it did in between (inner message stream). The
+          inner stream is the one part that can go missing (transcript shard
+          gone, history reload, remote client), so prompt/result are rendered
+          straight off the tool block and the stream area degrades to an
+          explicit empty state instead of leaving the modal blank. */}
       {taskModal && (() => {
-        const existingMsgs = subagentMessagesRef.current.get(taskModal.taskId) || []
-        const taskMsgs = existingMsgs
+        const taskMsgs = subagentMessagesRef.current.get(taskModal.taskId) || []
         const streamText = subagentStreamingText.get(taskModal.taskId) || ''
         const streamThink = subagentStreamingThinking.get(taskModal.taskId) || ''
-        const parentTask = allMessages.find(m => isToolCall(m) && m.id === taskModal.taskId) as ClaudeToolCall | undefined
-        const isRunning = parentTask?.status === 'running'
+        const taskTool = findTaskToolCall(taskModal.taskId)
+        const node = taskModalNode
+        const isRunning = node ? node.status === 'running' : taskTool?.status === 'running'
+        const subagentType = taskModal.subagentType || node?.subagentType
+        const elapsed = node
+          ? formatAgentNodeElapsed(node, Date.now())
+          : taskTool && taskTool.timestamp > 0 ? formatElapsed(taskTool.timestamp) : ''
+        const prompt = taskTool ? String(taskTool.input.prompt || '') : ''
+        const promptLines = prompt.split('\n')
+        const isLongPrompt = promptLines.length > 3 || prompt.length > 200
+        const promptKey = `task-modal-prompt-${taskModal.taskId}`
+        const resultKey = `task-modal-result-${taskModal.taskId}`
+        const isPromptExpanded = expandedTools.has(promptKey)
+        const resultRaw = taskTool?.result ? stringifyToolResult(taskTool.result) : ''
+        const { content: resultTextRaw, errors: resultErrors } = splitSystemReminders(resultRaw)
+        const resultText = parseContentBlocks(resultTextRaw)
+        const hasDetail = Boolean(prompt || resultText || resultErrors.length > 0)
         // Force re-render dependency
         void taskModalTick
 
@@ -5682,11 +5737,11 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
               <div className="claude-plan-modal-header">
                 {isRunning && <span className="claude-active-task-dot" />}
                 <span className="claude-tool-name" style={{ marginRight: 4 }}>Task</span>
-                {taskModal.subagentType && <span className="claude-tool-badge" style={{ marginRight: 6 }}>{taskModal.subagentType}</span>}
+                {subagentType && <span className="claude-tool-badge" style={{ marginRight: 6 }}>{subagentType}</span>}
                 <span className="claude-plan-modal-title">{taskModal.label}</span>
                 <span className="claude-subagent-meta">
-                  {taskMsgs.length} messages
-                  {parentTask && parentTask.timestamp > 0 ? ` · ${formatElapsed(parentTask.timestamp)}` : ''}
+                  {t('claude.messages', { count: taskMsgs.length })}
+                  {elapsed ? ` · ${elapsed}` : ''}
                 </span>
                 <button className="claude-plan-modal-close" onClick={() => setTaskModal(null)}>&times;</button>
               </div>
@@ -5699,8 +5754,64 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
                   requestAnimationFrame(() => { body.scrollTop = body.scrollHeight })
                 }
               }}>
+                {hasDetail && (
+                  <div className="claude-subagent-detail">
+                    {prompt && (
+                      <div className="claude-task-prompt">
+                        <div className="claude-task-section-header" onClick={() => toggleTool(promptKey)}>
+                          <span className="claude-task-section-label">{t('claude.prompt')}</span>
+                          <button
+                            className={`claude-subagent-section-copy ${copiedId === promptKey ? 'copied' : ''}`}
+                            title={t('common.copy')}
+                            onClick={(e) => { e.stopPropagation(); handleCopyBlock(prompt, promptKey) }}
+                          >{copiedId === promptKey ? '✓' : '⧉'}</button>
+                          <span className={`claude-tool-chevron ${isPromptExpanded ? 'expanded' : ''}`}>&#9654;</span>
+                        </div>
+                        <pre className="claude-task-prompt-text">
+                          {isPromptExpanded || !isLongPrompt
+                            ? prompt
+                            : promptLines.slice(0, 3).join('\n').slice(0, 200) + '...'}
+                        </pre>
+                      </div>
+                    )}
+                    {resultErrors.map((err, i) => (
+                      <div key={`task-modal-err-${i}`} className="claude-tool-blocks"><div className="claude-tool-row claude-tool-error-row">
+                        <span className="claude-tool-row-label claude-error-label">{t('claude.err')}</span>
+                        <span className="claude-tool-row-content">{err}</span>
+                      </div></div>
+                    ))}
+                    {node?.error && (
+                      <div className="claude-tool-blocks"><div className="claude-tool-row claude-tool-error-row">
+                        <span className="claude-tool-row-label claude-error-label">{t('claude.err')}</span>
+                        <span className="claude-tool-row-content">{node.error}</span>
+                      </div></div>
+                    )}
+                    {/* The result is what this view exists for — never collapsed. */}
+                    {resultText && (
+                      <div className="claude-task-result">
+                        <div className="claude-task-section-header">
+                          <span className="claude-task-section-label">{t('claude.result')}</span>
+                          <button
+                            className={`claude-subagent-section-copy ${copiedId === resultKey ? 'copied' : ''}`}
+                            title={t('common.copy')}
+                            onClick={() => handleCopyBlock(resultText, resultKey)}
+                          >{copiedId === resultKey ? '✓' : '⧉'}</button>
+                        </div>
+                        <div className="claude-task-result-text"><LinkedText text={resultText} /></div>
+                      </div>
+                    )}
+                    <div className="claude-subagent-divider">{t('claude.subagentTranscript')}</div>
+                  </div>
+                )}
                 <div className="claude-messages claude-timeline">
                   {taskMsgs.map((item, i) => renderMessage(item, i))}
+                  {!isRunning && taskMsgs.length === 0 && (
+                    <div className="claude-subagent-empty">
+                      {taskTranscriptLoading === taskModal.taskId
+                        ? t('common.loading')
+                        : t('claude.subagentNoTranscript')}
+                    </div>
+                  )}
                   {isRunning && streamThink && (
                     <div className="tl-item">
                       <div className="tl-dot dot-thinking" />

@@ -600,6 +600,8 @@
     "agentsDone": "{{count}} done",
     "agentsFailed": "{{count}} failed",
     "messages": "{{count}} messages",
+    "subagentTranscript": "TRANSCRIPT",
+    "subagentNoTranscript": "No transcript captured for this agent",
     "promptHistory": "Prompt History ({{count}})",
     "copyAll": "copy all",
     "copyAllPrompts": "Copy all prompts",
