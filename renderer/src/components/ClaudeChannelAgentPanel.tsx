@@ -6,9 +6,12 @@ import { CLAUDE_EFFORT_MODES, effortLevelForClaudeMode, isUltracodeEffortMode } 
 import {
   CLAUDE_BUILTIN_MODELS,
   autoCompactWindowForClaudeSelection,
+  claudeModelValueForRow,
   displayNameForClaudeSelection,
+  groupClaudeModelRows,
   normalizeClaudeModelSelection,
   sdkModelForClaudeSelection,
+  type ClaudeCompactWindow,
 } from '../utils/claude-model-presets'
 import {
   type ClaudeChannelCapabilities,
@@ -269,15 +272,22 @@ export const ClaudeChannelAgentPanel = memo(function ClaudeChannelAgentPanel({
   const effortOptions = useMemo(() => includeCurrentOption(CLAUDE_EFFORT_MODES, controls.effort), [controls.effort])
   const currentModelLabel = useMemo(() => displayNameForClaudeSelection(controls.model), [controls.model])
   const currentSdkModel = useMemo(() => sdkModelForClaudeSelection(controls.model) || controls.model, [controls.model])
-  const modelOptions = useMemo(() => {
+  const modelRows = useMemo(() => {
     const seen = new Set<string>()
-    return CLAUDE_BUILTIN_MODELS
-      .filter(model => {
-        if (!model.value || seen.has(model.value)) return false
-        seen.add(model.value)
-        return true
-      })
+    return groupClaudeModelRows(CLAUDE_BUILTIN_MODELS.filter(model => {
+      if (!model.value || seen.has(model.value)) return false
+      seen.add(model.value)
+      return true
+    }))
   }, [])
+  // Compact window of the current selection, carried over when switching models.
+  const activeCompactWindow = useMemo<ClaudeCompactWindow | undefined>(() => {
+    for (const row of modelRows) {
+      const option = row.options.find(candidate => candidate.value === controls.model)
+      if (option) return option.window
+    }
+    return undefined
+  }, [modelRows, controls.model])
 
   const selectModel = useCallback((model: string) => {
     const normalized = normalizeClaudeModelSelection(model) || model
@@ -476,18 +486,41 @@ export const ClaudeChannelAgentPanel = memo(function ClaudeChannelAgentPanel({
         <div className="claude-resume-card">
           <div className="claude-permission-title">Select a model</div>
           <div className="claude-resume-list">
-            {modelOptions.map(model => (
-              <div
-                key={model.value}
-                className={`claude-resume-item${model.value === controls.model ? ' active' : ''}`}
-                onClick={() => selectModel(model.value)}
-              >
-                <div className="claude-resume-item-header">
-                  <span className="claude-resume-item-id">{model.displayName}</span>
+            {modelRows.map(row => {
+              const selected = row.key === controls.model || row.options.some(option => option.value === controls.model)
+              return (
+                <div
+                  key={row.key}
+                  className={`claude-model-row${selected ? ' active' : ''}`}
+                  onClick={() => selectModel(claudeModelValueForRow(row, activeCompactWindow))}
+                >
+                  <div className="claude-model-row-main">
+                    <span className="claude-model-row-label">{row.label}</span>
+                    <span className="claude-model-row-desc">{row.description}</span>
+                  </div>
+                  {row.options.length > 0 && (
+                    <div className="claude-model-row-windows">
+                      {row.options.map(option => (
+                        <button
+                          key={option.value}
+                          type="button"
+                          className={`claude-model-window${option.value === controls.model ? ' active' : ''}`}
+                          title={option.window === null
+                            ? `${row.key} · no early auto-compact`
+                            : `${row.key} · auto-compact at ${option.window.toLocaleString()} tokens`}
+                          onClick={event => {
+                            event.stopPropagation()
+                            selectModel(option.value)
+                          }}
+                        >
+                          {option.label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
-                <div className="claude-resume-item-preview">{model.description}</div>
-              </div>
-            ))}
+              )
+            })}
           </div>
           <div className="claude-permission-hint">Restart applies model changes to the channel session. Esc to cancel.</div>
         </div>

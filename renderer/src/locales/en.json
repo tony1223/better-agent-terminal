@@ -548,6 +548,7 @@
     "no": "No",
     "tellClaudeInstead": "Tell Claude what to do instead",
     "tellAgentInstead": "Tell the agent what to do instead",
+    "modelPickerHint": "↑↓ model · ←→ compact window · Enter to apply",
     "escToCancel": "Esc to cancel",
     "model1mHint": "1M context has lower cache efficiency via SDK. For cost-sensitive workloads, consider using Claude CLI directly.",
     "codexModelChangeWarning": "Switching models will start a new Codex session and clear the current conversation. Continue?",

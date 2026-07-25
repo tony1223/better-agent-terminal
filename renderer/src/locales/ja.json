@@ -529,6 +529,7 @@
     "no": "いいえ",
     "tellClaudeInstead": "代わりにすべきことを Claude に伝える",
     "tellAgentInstead": "代わりにすべきことをエージェントに伝える",
+    "modelPickerHint": "↑↓ モデル · ←→ 圧縮しきい値 · Enter で適用",
     "escToCancel": "Escでキャンセル",
     "model1mHint": "1Mコンテキストは SDK 経由でのキャッシュ効率が低くなります。コストを重視するワークロードでは、Claude CLI を直接使用することを検討してください。",
     "codexModelChangeWarning": "モデルを切り替えると新しい Codex セッションが開始され、現在の会話が消去されます。続行しますか？",

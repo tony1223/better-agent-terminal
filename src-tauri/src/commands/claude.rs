@@ -1361,163 +1361,153 @@ pub(crate) fn list_sessions_native(cwd: &str, agent_kind: Option<&str>) -> Vec<S
     list_claude_sessions_in_projects(cwd, &home.join(".claude").join("projects"))
 }
 
+/// Mirror of renderer/src/utils/claude-model-presets.ts CLAUDE_MODEL_TABLE.
+/// `windows` lists the auto-compact presets a model offers, in tokens; `None`
+/// is the `:1m` preset (no early compaction), and an empty slice means the
+/// model has no presets and its bare id is selected directly.
+struct ClaudeModelDef {
+    id: &'static str,
+    label: &'static str,
+    context_window: u64,
+    windows: &'static [Option<u64>],
+    /// Description for preset-less models; preset rows derive their own.
+    description: Option<&'static str>,
+}
+
+const CLAUDE_MODEL_TABLE: &[ClaudeModelDef] = &[
+    ClaudeModelDef {
+        id: "claude-fable-5",
+        label: "Fable 5",
+        context_window: 1_000_000,
+        windows: &[Some(200_000), Some(300_000), None],
+        description: None,
+    },
+    ClaudeModelDef {
+        id: "claude-opus-5",
+        label: "Opus 5",
+        context_window: 1_000_000,
+        windows: &[Some(200_000), Some(300_000), None],
+        description: None,
+    },
+    ClaudeModelDef {
+        id: "claude-opus-4-8",
+        label: "Opus 4.8",
+        context_window: 1_000_000,
+        windows: &[Some(200_000), Some(300_000), None],
+        description: None,
+    },
+    ClaudeModelDef {
+        id: "claude-opus-4-7",
+        label: "Opus 4.7",
+        context_window: 1_000_000,
+        windows: &[Some(200_000), Some(300_000), Some(400_000), None],
+        description: None,
+    },
+    ClaudeModelDef {
+        id: "claude-opus-4-6",
+        label: "Opus 4.6 (1M)",
+        context_window: 1_000_000,
+        windows: &[],
+        description: None,
+    },
+    ClaudeModelDef {
+        id: "claude-sonnet-5",
+        label: "Sonnet 5",
+        context_window: 1_000_000,
+        windows: &[Some(200_000), Some(300_000), None],
+        description: None,
+    },
+    ClaudeModelDef {
+        id: "claude-sonnet-4-6",
+        label: "Sonnet 4.6 (1M)",
+        context_window: 1_000_000,
+        windows: &[],
+        description: None,
+    },
+    ClaudeModelDef {
+        id: "claude-haiku-4-5-20251001",
+        label: "Haiku 4.5",
+        context_window: 200_000,
+        windows: &[],
+        description: Some("claude-haiku-4-5 · fast & lightweight"),
+    },
+];
+
+/// Preset id naming convention: `<base>:auto-compact-<N>k` compacts at N*1000
+/// tokens; `<base>:<N>m` disables early auto-compact on an N-million window.
+fn claude_compact_preset_id(def: &ClaudeModelDef, window: Option<u64>) -> String {
+    match window {
+        Some(tokens) => format!("{}:auto-compact-{}k", def.id, tokens / 1000),
+        None => format!("{}:{}m", def.id, def.context_window / 1_000_000),
+    }
+}
+
+fn claude_compact_window_label(def: &ClaudeModelDef, window: Option<u64>) -> String {
+    match window {
+        Some(tokens) => format!("{}K", tokens / 1000),
+        None => format!("{}M", def.context_window / 1_000_000),
+    }
+}
+
 pub(crate) fn claude_builtin_models_native() -> Value {
-    json!([
-        {
-            "value": "claude-fable-5:auto-compact-200k",
-            "displayName": "Fable 5 · 200K Auto-Compact",
-            "description": "claude-fable-5 · compact at 200K tokens",
-            "source": "builtin"
-        },
-        {
-            "value": "claude-fable-5:auto-compact-300k",
-            "displayName": "Fable 5 · 300K Auto-Compact",
-            "description": "claude-fable-5 · compact at 300K tokens",
-            "source": "builtin"
-        },
-        {
-            "value": "claude-fable-5:1m",
-            "displayName": "Fable 5 · 1M",
-            "description": "claude-fable-5 · no early auto-compact",
-            "source": "builtin"
-        },
-        {
-            "value": "claude-opus-5:auto-compact-200k",
-            "displayName": "Opus 5 · 200K Auto-Compact",
-            "description": "claude-opus-5 · compact at 200K tokens",
-            "source": "builtin"
-        },
-        {
-            "value": "claude-opus-5:auto-compact-300k",
-            "displayName": "Opus 5 · 300K Auto-Compact",
-            "description": "claude-opus-5 · compact at 300K tokens",
-            "source": "builtin"
-        },
-        {
-            "value": "claude-opus-5:1m",
-            "displayName": "Opus 5 · 1M",
-            "description": "claude-opus-5 · no early auto-compact",
-            "source": "builtin"
-        },
-        {
-            "value": "claude-opus-4-8:auto-compact-200k",
-            "displayName": "Opus 4.8 · 200K Auto-Compact",
-            "description": "claude-opus-4-8 · compact at 200K tokens",
-            "source": "builtin"
-        },
-        {
-            "value": "claude-opus-4-8:auto-compact-300k",
-            "displayName": "Opus 4.8 · 300K Auto-Compact",
-            "description": "claude-opus-4-8 · compact at 300K tokens",
-            "source": "builtin"
-        },
-        {
-            "value": "claude-opus-4-8:1m",
-            "displayName": "Opus 4.8 · 1M",
-            "description": "claude-opus-4-8 · no early auto-compact",
-            "source": "builtin"
-        },
-        {
-            "value": "claude-opus-4-7:auto-compact-200k",
-            "displayName": "Opus 4.7 · 200K Auto-Compact",
-            "description": "claude-opus-4-7 · compact at 200K tokens",
-            "source": "builtin"
-        },
-        {
-            "value": "claude-opus-4-7:auto-compact-300k",
-            "displayName": "Opus 4.7 · 300K Auto-Compact",
-            "description": "claude-opus-4-7 · compact at 300K tokens",
-            "source": "builtin"
-        },
-        {
-            "value": "claude-opus-4-7:auto-compact-400k",
-            "displayName": "Opus 4.7 · 400K Auto-Compact",
-            "description": "claude-opus-4-7 · compact at 400K tokens",
-            "source": "builtin"
-        },
-        {
-            "value": "claude-opus-4-7:1m",
-            "displayName": "Opus 4.7 · 1M",
-            "description": "claude-opus-4-7 · no early auto-compact",
-            "source": "builtin"
-        },
-        {
-            "value": "claude-opus-4-6",
-            "displayName": "Opus 4.6 (1M)",
-            "description": "claude-opus-4-6 · 1M context",
-            "source": "builtin"
-        },
-        {
-            "value": "claude-sonnet-5:auto-compact-200k",
-            "displayName": "Sonnet 5 · 200K Auto-Compact",
-            "description": "claude-sonnet-5 · compact at 200K tokens",
-            "source": "builtin"
-        },
-        {
-            "value": "claude-sonnet-5:auto-compact-300k",
-            "displayName": "Sonnet 5 · 300K Auto-Compact",
-            "description": "claude-sonnet-5 · compact at 300K tokens",
-            "source": "builtin"
-        },
-        {
-            "value": "claude-sonnet-5:1m",
-            "displayName": "Sonnet 5 · 1M",
-            "description": "claude-sonnet-5 · no early auto-compact",
-            "source": "builtin"
-        },
-        {
-            "value": "claude-sonnet-4-6",
-            "displayName": "Sonnet 4.6 (1M)",
-            "description": "claude-sonnet-4-6 · 1M context",
-            "source": "builtin"
-        },
-        {
-            "value": "claude-haiku-4-5-20251001",
-            "displayName": "Haiku 4.5",
-            "description": "claude-haiku-4-5 · fast & lightweight",
-            "source": "builtin"
-        }
-    ])
+    let models = CLAUDE_MODEL_TABLE
+        .iter()
+        .flat_map(|def| {
+            if def.windows.is_empty() {
+                let description = def.description.map(str::to_string).unwrap_or_else(|| {
+                    format!("{} · {}M context", def.id, def.context_window / 1_000_000)
+                });
+                return vec![json!({
+                    "value": def.id,
+                    "displayName": def.label,
+                    "description": description,
+                    "source": "builtin"
+                })];
+            }
+            def.windows
+                .iter()
+                .map(|&window| {
+                    let label = claude_compact_window_label(def, window);
+                    let (display_name, description) = match window {
+                        Some(_) => (
+                            format!("{} · {} Auto-Compact", def.label, label),
+                            format!("{} · compact at {} tokens", def.id, label),
+                        ),
+                        None => (
+                            format!("{} · {}", def.label, label),
+                            format!("{} · no early auto-compact", def.id),
+                        ),
+                    };
+                    json!({
+                        "value": claude_compact_preset_id(def, window),
+                        "displayName": display_name,
+                        "description": description,
+                        "source": "builtin"
+                    })
+                })
+                .collect()
+        })
+        .collect::<Vec<_>>();
+    Value::Array(models)
 }
 
 fn claude_context_window_for_model(model: Option<&str>) -> u64 {
-    match model.unwrap_or_default() {
-        "claude-fable-5"
-        | "claude-fable-5[1m]"
-        | "claude-fable-5:1m"
-        | "claude-opus-5"
-        | "claude-opus-5[1m]"
-        | "claude-opus-5:1m"
-        | "claude-opus-4-8"
-        | "claude-opus-4-8[1m]"
-        | "claude-opus-4-8:1m"
-        | "claude-opus-4-7"
-        | "claude-opus-4-7[1m]"
-        | "claude-opus-4-7:1m"
-        | "claude-opus-4-6"
-        | "claude-opus-4-6[1m]"
-        | "claude-sonnet-5"
-        | "claude-sonnet-5[1m]"
-        | "claude-sonnet-5:1m"
-        | "claude-sonnet-4-6"
-        | "claude-sonnet-4-6[1m]" => 1_000_000,
-        "claude-haiku-4-5-20251001" => 200_000,
-        "claude-fable-5:auto-compact-200k" => 200_000,
-        "claude-fable-5:auto-compact-300k" => 300_000,
-        "claude-opus-5:auto-compact-200k" => 200_000,
-        "claude-opus-5:auto-compact-300k" => 300_000,
-        "claude-opus-4-8:auto-compact-200k" => 200_000,
-        "claude-opus-4-8:auto-compact-300k" => 300_000,
-        "claude-opus-4-7:auto-compact-200k" => 200_000,
-        "claude-opus-4-7:auto-compact-300k" => 300_000,
-        "claude-opus-4-7:auto-compact-400k" => 400_000,
-        "claude-sonnet-5:auto-compact-200k" => 200_000,
-        "claude-sonnet-5:auto-compact-300k" => 300_000,
-        value if value.ends_with("[1m]") => {
-            claude_context_window_for_model(Some(value.trim_end_matches("[1m]")))
+    let Some(model) = model else { return 0 };
+    // A bare id or its `[1m]` alias resolves to the physical window; an
+    // auto-compact preset resolves to its compact target, which is the budget
+    // the session actually runs against.
+    let base = model.trim_end_matches("[1m]");
+    for def in CLAUDE_MODEL_TABLE {
+        if base == def.id {
+            return def.context_window;
         }
-        _ => 0,
+        for &window in def.windows {
+            if claude_compact_preset_id(def, window) == model {
+                return window.unwrap_or(def.context_window);
+            }
+        }
     }
+    0
 }
 
 pub(crate) fn session_meta_from_notification_snapshot(

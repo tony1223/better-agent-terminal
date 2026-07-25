@@ -1,88 +1,80 @@
-// Mirror of renderer/src/utils/claude-model-presets.ts CLAUDE_BUILTIN_MODELS.
+// Mirror of renderer/src/utils/claude-model-presets.ts CLAUDE_MODEL_TABLE.
+// Keep the table — and only the table — in sync; everything below is derived.
 // Drift guard: see node-sidecar/tests/server.test.mjs.
-export const CLAUDE_BUILTIN_MODELS = [
-  { value: 'claude-fable-5:auto-compact-200k', displayName: 'Fable 5 · 200K Auto-Compact', description: 'claude-fable-5 · compact at 200K tokens' },
-  { value: 'claude-fable-5:auto-compact-300k', displayName: 'Fable 5 · 300K Auto-Compact', description: 'claude-fable-5 · compact at 300K tokens' },
-  { value: 'claude-fable-5:1m', displayName: 'Fable 5 · 1M', description: 'claude-fable-5 · no early auto-compact' },
-  { value: 'claude-opus-5:auto-compact-200k', displayName: 'Opus 5 · 200K Auto-Compact', description: 'claude-opus-5 · compact at 200K tokens' },
-  { value: 'claude-opus-5:auto-compact-300k', displayName: 'Opus 5 · 300K Auto-Compact', description: 'claude-opus-5 · compact at 300K tokens' },
-  { value: 'claude-opus-5:1m', displayName: 'Opus 5 · 1M', description: 'claude-opus-5 · no early auto-compact' },
-  { value: 'claude-opus-4-8:auto-compact-200k', displayName: 'Opus 4.8 · 200K Auto-Compact', description: 'claude-opus-4-8 · compact at 200K tokens' },
-  { value: 'claude-opus-4-8:auto-compact-300k', displayName: 'Opus 4.8 · 300K Auto-Compact', description: 'claude-opus-4-8 · compact at 300K tokens' },
-  { value: 'claude-opus-4-8:1m', displayName: 'Opus 4.8 · 1M', description: 'claude-opus-4-8 · no early auto-compact' },
-  { value: 'claude-opus-4-7:auto-compact-200k', displayName: 'Opus 4.7 · 200K Auto-Compact', description: 'claude-opus-4-7 · compact at 200K tokens' },
-  { value: 'claude-opus-4-7:auto-compact-300k', displayName: 'Opus 4.7 · 300K Auto-Compact', description: 'claude-opus-4-7 · compact at 300K tokens' },
-  { value: 'claude-opus-4-7:auto-compact-400k', displayName: 'Opus 4.7 · 400K Auto-Compact', description: 'claude-opus-4-7 · compact at 400K tokens' },
-  { value: 'claude-opus-4-7:1m', displayName: 'Opus 4.7 · 1M', description: 'claude-opus-4-7 · no early auto-compact' },
-  { value: 'claude-opus-4-6', displayName: 'Opus 4.6 (1M)', description: 'claude-opus-4-6 · 1M context' },
-  { value: 'claude-sonnet-5:auto-compact-200k', displayName: 'Sonnet 5 · 200K Auto-Compact', description: 'claude-sonnet-5 · compact at 200K tokens' },
-  { value: 'claude-sonnet-5:auto-compact-300k', displayName: 'Sonnet 5 · 300K Auto-Compact', description: 'claude-sonnet-5 · compact at 300K tokens' },
-  { value: 'claude-sonnet-5:1m', displayName: 'Sonnet 5 · 1M', description: 'claude-sonnet-5 · no early auto-compact' },
-  { value: 'claude-sonnet-4-6', displayName: 'Sonnet 4.6 (1M)', description: 'claude-sonnet-4-6 · 1M context' },
-  { value: 'claude-haiku-4-5-20251001', displayName: 'Haiku 4.5', description: 'claude-haiku-4-5 · fast & lightweight' },
-]
-// Mirror of renderer/src/utils/claude-model-presets.ts CLAUDE_BUILTIN_MODEL_CONTEXT_WINDOWS
-// keys. This is the dedup set for SDK-discovered models — note it
-// includes [1m] variants of base IDs (which the builtin model list
-// itself doesn't carry, but the SDK does emit), so SDK results that
-// duplicate a builtin via either form get filtered. Drift guard test
-// validates this stays in sync with the renderer-side TS source.
-export const CLAUDE_BUILTIN_DEDUP_KEYS = [
-  'claude-fable-5',
-  'claude-fable-5[1m]',
-  'claude-opus-5',
-  'claude-opus-5[1m]',
-  'claude-opus-4-8',
-  'claude-opus-4-8[1m]',
-  'claude-opus-4-7',
-  'claude-opus-4-7[1m]',
-  'claude-opus-4-6',
-  'claude-opus-4-6[1m]',
-  'claude-sonnet-5',
-  'claude-sonnet-5[1m]',
-  'claude-sonnet-4-6',
-  'claude-sonnet-4-6[1m]',
-  'claude-haiku-4-5-20251001',
+//
+// Fields: id (SDK model id / preset base), label (picker row), contextWindow
+// (physical window), windows (auto-compact presets in tokens, null = the
+// `:1m` preset with no early compaction, empty = no presets at all),
+// description (preset-less models only; preset rows derive their own).
+export const CLAUDE_MODEL_TABLE = [
+  { id: 'claude-fable-5', label: 'Fable 5', contextWindow: 1_000_000, windows: [200_000, 300_000, null] },
+  { id: 'claude-opus-5', label: 'Opus 5', contextWindow: 1_000_000, windows: [200_000, 300_000, null] },
+  { id: 'claude-opus-4-8', label: 'Opus 4.8', contextWindow: 1_000_000, windows: [200_000, 300_000, null] },
+  { id: 'claude-opus-4-7', label: 'Opus 4.7', contextWindow: 1_000_000, windows: [200_000, 300_000, 400_000, null] },
+  { id: 'claude-opus-4-6', label: 'Opus 4.6 (1M)', contextWindow: 1_000_000, windows: [] },
+  { id: 'claude-sonnet-5', label: 'Sonnet 5', contextWindow: 1_000_000, windows: [200_000, 300_000, null] },
+  { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6 (1M)', contextWindow: 1_000_000, windows: [] },
+  {
+    id: 'claude-haiku-4-5-20251001',
+    label: 'Haiku 4.5',
+    contextWindow: 200_000,
+    windows: [],
+    description: 'claude-haiku-4-5 · fast & lightweight',
+  },
 ]
 
-// Mirror of renderer/src/utils/claude-model-presets.ts CLAUDE_BUILTIN_MODEL_CONTEXT_WINDOWS,
-// plus the auto-compact preset entries. Drift guard (test suite) re-reads
-// the TS file and sorted-equals the keys against this map. Used by
-// claude.getContextUsage to compute the maxTokens budget.
+// Preset id naming convention: `<base>:auto-compact-<N>k` compacts at N*1000
+// tokens; `<base>:<N>m` disables early auto-compact on an N-million window.
+function compactPresetId(def, window) {
+  return window === null
+    ? `${def.id}:${def.contextWindow / 1_000_000}m`
+    : `${def.id}:auto-compact-${window / 1000}k`
+}
+
+function compactWindowLabel(def, window) {
+  return window === null ? `${def.contextWindow / 1_000_000}M` : `${window / 1000}K`
+}
+
+export const CLAUDE_BUILTIN_MODELS = CLAUDE_MODEL_TABLE.flatMap(def =>
+  def.windows.length === 0
+    ? [{
+        value: def.id,
+        displayName: def.label,
+        description: def.description ?? `${def.id} · ${def.contextWindow / 1_000_000}M context`,
+      }]
+    : def.windows.map(window => ({
+        value: compactPresetId(def, window),
+        displayName: window === null
+          ? `${def.label} · ${compactWindowLabel(def, window)}`
+          : `${def.label} · ${compactWindowLabel(def, window)} Auto-Compact`,
+        description: window === null
+          ? `${def.id} · no early auto-compact`
+          : `${def.id} · compact at ${compactWindowLabel(def, window)} tokens`,
+      })),
+)
+
+// Dedup set for SDK-discovered models. Note it includes the `[1m]` variants of
+// base ids (which the builtin model list itself doesn't carry, but the SDK
+// does emit), so SDK results that duplicate a builtin via either form get
+// filtered. Mirrors the keys of the renderer-side
+// CLAUDE_BUILTIN_MODEL_CONTEXT_WINDOWS.
+export const CLAUDE_BUILTIN_DEDUP_KEYS = CLAUDE_MODEL_TABLE.flatMap(def =>
+  def.contextWindow >= 1_000_000 ? [def.id, `${def.id}[1m]`] : [def.id],
+)
+
+// Used by claude.getContextUsage to compute the maxTokens budget. Base ids map
+// to the physical window; preset ids map to the auto-compact target, since
+// that is the budget a session actually runs against (`:1m` has no early
+// compaction, so its budget is the full window).
 export const CLAUDE_MODEL_CONTEXT_WINDOWS = new Map([
-  ['claude-fable-5', 1000000],
-  ['claude-fable-5[1m]', 1000000],
-  ['claude-opus-5', 1000000],
-  ['claude-opus-5[1m]', 1000000],
-  ['claude-opus-4-8', 1000000],
-  ['claude-opus-4-8[1m]', 1000000],
-  ['claude-opus-4-7', 1000000],
-  ['claude-opus-4-7[1m]', 1000000],
-  ['claude-opus-4-6', 1000000],
-  ['claude-opus-4-6[1m]', 1000000],
-  ['claude-sonnet-5', 1000000],
-  ['claude-sonnet-5[1m]', 1000000],
-  ['claude-sonnet-4-6', 1000000],
-  ['claude-sonnet-4-6[1m]', 1000000],
-  ['claude-haiku-4-5-20251001', 200000],
-  // Preset variants — auto-compact wraps the underlying base model,
-  // so context window budget is the auto-compact target.
-  ['claude-fable-5:auto-compact-200k', 200000],
-  ['claude-fable-5:auto-compact-300k', 300000],
-  ['claude-fable-5:1m', 1000000],
-  ['claude-opus-5:auto-compact-200k', 200000],
-  ['claude-opus-5:auto-compact-300k', 300000],
-  ['claude-opus-5:1m', 1000000],
-  ['claude-opus-4-8:auto-compact-200k', 200000],
-  ['claude-opus-4-8:auto-compact-300k', 300000],
-  ['claude-opus-4-8:1m', 1000000],
-  ['claude-opus-4-7:auto-compact-200k', 200000],
-  ['claude-opus-4-7:auto-compact-300k', 300000],
-  ['claude-opus-4-7:auto-compact-400k', 400000],
-  ['claude-opus-4-7:1m', 1000000],
-  ['claude-sonnet-5:auto-compact-200k', 200000],
-  ['claude-sonnet-5:auto-compact-300k', 300000],
-  ['claude-sonnet-5:1m', 1000000],
+  ...CLAUDE_MODEL_TABLE.flatMap(def =>
+    def.contextWindow >= 1_000_000
+      ? [[def.id, def.contextWindow], [`${def.id}[1m]`, def.contextWindow]]
+      : [[def.id, def.contextWindow]],
+  ),
+  ...CLAUDE_MODEL_TABLE.flatMap(def =>
+    def.windows.map(window => [compactPresetId(def, window), window ?? def.contextWindow]),
+  ),
 ])
 
 export function expectedContextWindowForModel(model) {
@@ -94,31 +86,14 @@ export function expectedContextWindowForModel(model) {
   return null
 }
 
-// Mirror of renderer/src/utils/claude-model-presets.ts sdkModelForClaudeSelection.
-// Auto-compact presets wrap the underlying base model, and the compact
-// window is configured separately via CLAUDE_CODE_AUTO_COMPACT_WINDOW env.
-export const CLAUDE_PRESET_SDK_MODELS = new Map([
-  ['claude-fable-5:auto-compact-200k', 'claude-fable-5'],
-  ['claude-fable-5:auto-compact-300k', 'claude-fable-5'],
-  ['claude-fable-5:1m', 'claude-fable-5'],
-  ['claude-opus-5:auto-compact-200k', 'claude-opus-5'],
-  ['claude-opus-5:auto-compact-300k', 'claude-opus-5'],
-  ['claude-opus-5:1m', 'claude-opus-5'],
-  ['claude-opus-4-8:auto-compact-200k', 'claude-opus-4-8'],
-  ['claude-opus-4-8:auto-compact-300k', 'claude-opus-4-8'],
-  ['claude-opus-4-8:1m', 'claude-opus-4-8'],
-  ['claude-opus-4-7:auto-compact-200k', 'claude-opus-4-7'],
-  ['claude-opus-4-7:auto-compact-300k', 'claude-opus-4-7'],
-  ['claude-opus-4-7:auto-compact-400k', 'claude-opus-4-7'],
-  ['claude-opus-4-7:1m', 'claude-opus-4-7'],
-  ['claude-sonnet-5:auto-compact-200k', 'claude-sonnet-5'],
-  ['claude-sonnet-5:auto-compact-300k', 'claude-sonnet-5'],
-  ['claude-sonnet-5:1m', 'claude-sonnet-5'],
-])
-// Preset id naming convention: `<base>:auto-compact-<N>k` compacts at
-// N*1000 tokens; `<base>:<N>m` disables early auto-compact. The regex
-// fallbacks keep presets working for remote clients even when a preset id
-// is newer than the explicit maps above.
+// Auto-compact presets wrap the underlying base model, and the compact window
+// is configured separately via CLAUDE_CODE_AUTO_COMPACT_WINDOW env.
+export const CLAUDE_PRESET_SDK_MODELS = new Map(
+  CLAUDE_MODEL_TABLE.flatMap(def => def.windows.map(window => [compactPresetId(def, window), def.id])),
+)
+
+// The regex fallbacks keep presets working for remote clients even when a
+// preset id is newer than the table above.
 const AUTO_COMPACT_SUFFIX = /^(.+):auto-compact-(\d+)k$/
 const CONTEXT_ONLY_SUFFIX = /^(.+):\d+m$/
 

@@ -431,27 +431,47 @@ async function inProcess() {
 
   // agent preset list moved to Rust (commands/agent.rs).
 
-  // CLAUDE_BUILTIN_MODELS in the sidecar must mirror the renderer-side
-  // renderer/src/utils/claude-model-presets.ts constant. Re-read the TS file and
-  // diff the `value:` literals so a renderer-only addition fails here.
+  // Both sides derive their model lists from a hand-maintained
+  // CLAUDE_MODEL_TABLE, so diffing the two tables covers the whole product of
+  // models × auto-compact windows in one shot: a renderer-only addition fails
+  // here regardless of which derived list it would have shown up in.
   const { CLAUDE_BUILTIN_MODELS } = mod
+  const { CLAUDE_MODEL_TABLE } = await import('../src/lib/models.mjs')
   const presetsFile = await readFile(
     new URL('../../renderer/src/utils/claude-model-presets.ts', import.meta.url), 'utf-8',
   )
-  // Pull only entries inside the CLAUDE_BUILTIN_MODELS array literal.
-  const arrayMatch = presetsFile.match(/CLAUDE_BUILTIN_MODELS:[^=]*=\s*\[([\s\S]*?)\n\]/m)
-  assert.ok(arrayMatch, 'could not locate CLAUDE_BUILTIN_MODELS array in source')
-  const arrayBody = arrayMatch[1]
-  const tsValues = [...arrayBody.matchAll(/value:\s*(?:((?:CLAUDE_OPUS_(?:5|47|48)|CLAUDE_FABLE_5|CLAUDE_SONNET_5)_\w+)|'([^']+)')/g)]
-    .map(m => {
-      if (m[1]) {
-        // Resolve the symbolic constant via a regex-extracted assignment.
-        const constMatch = presetsFile.match(new RegExp(`${m[1]}\\s*=\\s*'([^']+)'`))
-        return constMatch ? constMatch[1] : null
-      }
-      return m[2]
-    })
-    .filter(Boolean)
+  const tableMatch = presetsFile.match(/CLAUDE_MODEL_TABLE[^=]*=\s*\[([\s\S]*?)\n\]/m)
+  assert.ok(tableMatch, 'could not locate CLAUDE_MODEL_TABLE in source')
+  const numeric = raw => Number(raw.replace(/_/g, ''))
+  // One object literal per model, and the table has no nested braces, so a
+  // brace-to-brace match is enough to split the entries.
+  const tsTable = [...tableMatch[1].matchAll(/\{([^{}]*)\}/g)].map(entry => {
+    const field = re => entry[1].match(re)?.[1]
+    return {
+      id: field(/id:\s*'([^']+)'/),
+      label: field(/label:\s*'([^']+)'/),
+      contextWindow: numeric(field(/contextWindow:\s*([\d_]+)/) ?? '0'),
+      windows: (field(/windows:\s*\[([^\]]*)\]/) ?? '')
+        .split(',').map(w => w.trim()).filter(Boolean)
+        .map(w => (w === 'null' ? null : numeric(w))),
+      description: field(/description:\s*'([^']*)'/) ?? null,
+    }
+  })
+  assert.ok(tsTable.length > 0, 'parsed an empty CLAUDE_MODEL_TABLE from source')
+  assert.deepStrictEqual(
+    CLAUDE_MODEL_TABLE.map(def => ({ ...def, description: def.description ?? null })),
+    tsTable,
+    'sidecar CLAUDE_MODEL_TABLE drifted from renderer/src/utils/claude-model-presets.ts',
+  )
+
+  // The derived lists get their own guards, with the expected side computed
+  // from the TS table — so drift in either the table or the sidecar's
+  // derivation of it is caught.
+  const tsPresetId = (def, window) => (window === null
+    ? `${def.id}:${def.contextWindow / 1_000_000}m`
+    : `${def.id}:auto-compact-${window / 1000}k`)
+  const tsValues = tsTable.flatMap(def =>
+    (def.windows.length === 0 ? [def.id] : def.windows.map(window => tsPresetId(def, window))))
   const sidecarValues = CLAUDE_BUILTIN_MODELS.map(m => m.value)
   assert.deepEqual(
     [...sidecarValues].sort(),
@@ -459,21 +479,19 @@ async function inProcess() {
     `sidecar CLAUDE_BUILTIN_MODELS drifted from renderer/src/utils/claude-model-presets.ts (sidecar=${sidecarValues}, ts=${tsValues})`,
   )
 
-  // Drift guard for the SDK-result dedup set: sidecar's
-  // CLAUDE_BUILTIN_DEDUP_KEYS must match the keys of the renderer-side
-  // CLAUDE_BUILTIN_MODEL_CONTEXT_WINDOWS map. Mismatch means
-  // getSupportedModels would either leak duplicate entries from the SDK
-  // or hide a legitimate SDK-only model from the picker.
+  // Dedup set for SDK results: every base id, plus the `[1m]` alias the SDK
+  // reports for 1M-capable models. Mismatch means getSupportedModels would
+  // either leak duplicate entries from the SDK or hide a legitimate SDK-only
+  // model from the picker.
   const { CLAUDE_BUILTIN_DEDUP_KEYS } = mod
-  const ctxMatch = presetsFile.match(
-    /CLAUDE_BUILTIN_MODEL_CONTEXT_WINDOWS[^=]*=\s*new Map[^[]*\[([\s\S]*?)\n\]\)/m,
-  )
-  assert.ok(ctxMatch, 'could not locate CLAUDE_BUILTIN_MODEL_CONTEXT_WINDOWS in source')
-  const ctxKeys = [...ctxMatch[1].matchAll(/\[\s*'([^']+)'/g)].map(m => m[1])
+  const tsCtxMap = new Map(tsTable.flatMap(def => (def.contextWindow >= 1_000_000
+    ? [[def.id, def.contextWindow], [`${def.id}[1m]`, def.contextWindow]]
+    : [[def.id, def.contextWindow]])))
+  const ctxKeys = [...tsCtxMap.keys()]
   assert.deepEqual(
     [...CLAUDE_BUILTIN_DEDUP_KEYS].sort(),
     [...ctxKeys].sort(),
-    `sidecar CLAUDE_BUILTIN_DEDUP_KEYS drifted from CLAUDE_BUILTIN_MODEL_CONTEXT_WINDOWS (sidecar=${CLAUDE_BUILTIN_DEDUP_KEYS}, ts=${ctxKeys})`,
+    `sidecar CLAUDE_BUILTIN_DEDUP_KEYS drifted from the renderer model table (sidecar=${CLAUDE_BUILTIN_DEDUP_KEYS}, ts=${ctxKeys})`,
   )
   // Round-trip the handler. Result may include SDK-discovered entries
   // when @anthropic-ai/claude-agent-sdk is importable (dev), or only
@@ -3185,40 +3203,28 @@ async function inProcess() {
   assert.equal(block?.source.media_type, 'image/png')
   assert.equal(block?.source.data, 'iVBORw0KGgo=')
 
-  // Drift guard: sidecar CLAUDE_MODEL_CONTEXT_WINDOWS must agree with
-  // renderer/src/utils/claude-model-presets.ts CLAUDE_BUILTIN_MODEL_CONTEXT_WINDOWS
-  // for every base-id key + value, AND must contain entries for all
-  // auto-compact preset ids (values are hand-derived from
-  // CLAUDE_PRESET_AUTO_COMPACT and don't exactly mirror that map —
-  // :1m has TS-side null (no auto-compact) but the actual context
-  // window is 1M, which is what we surface to maxTokens).
-  // Scope the match to the same map literal we located earlier (ctxMatch[1]).
+  // Drift guard: sidecar CLAUDE_MODEL_CONTEXT_WINDOWS must carry every base id
+  // (physical window) AND every preset id (auto-compact budget). Note the two
+  // don't line up with the renderer's own auto-compact map: `:1m` is null there
+  // (no early compaction) but 1M here, because this is what we surface to
+  // maxTokens. Reuses tsCtxMap / tsTable / tsPresetId parsed from TS earlier.
   const { CLAUDE_MODEL_CONTEXT_WINDOWS, expectedContextWindowForModel } = mod
-  const tsCtxMap = new Map()
-  for (const m of ctxMatch[1].matchAll(/\[\s*'([^']+)'\s*,\s*(\d+)\s*\]/g)) {
-    tsCtxMap.set(m[1], parseInt(m[2], 10))
-  }
   for (const [k, v] of tsCtxMap) {
     assert.equal(
       CLAUDE_MODEL_CONTEXT_WINDOWS.get(k), v,
       `sidecar CLAUDE_MODEL_CONTEXT_WINDOWS[${k}] (${CLAUDE_MODEL_CONTEXT_WINDOWS.get(k)}) drifted from TS (${v})`,
     )
   }
-  // Preset entries must exist with a positive number.
-  for (const presetId of [
-    'claude-opus-5:auto-compact-200k',
-    'claude-opus-5:auto-compact-300k',
-    'claude-opus-5:1m',
-    'claude-opus-4-8:auto-compact-200k',
-    'claude-opus-4-8:auto-compact-300k',
-    'claude-opus-4-8:1m',
-    'claude-opus-4-7:auto-compact-200k',
-    'claude-opus-4-7:auto-compact-300k',
-    'claude-opus-4-7:auto-compact-400k',
-    'claude-opus-4-7:1m',
-  ]) {
-    const v = CLAUDE_MODEL_CONTEXT_WINDOWS.get(presetId)
-    assert.ok(typeof v === 'number' && v > 0, `expected positive context window for ${presetId}, got ${v}`)
+  // Every preset id must map to the budget its session actually runs against:
+  // the auto-compact target, or the full window for the `:1m` presets.
+  for (const def of tsTable) {
+    for (const window of def.windows) {
+      const presetId = tsPresetId(def, window)
+      assert.equal(
+        CLAUDE_MODEL_CONTEXT_WINDOWS.get(presetId), window ?? def.contextWindow,
+        `sidecar CLAUDE_MODEL_CONTEXT_WINDOWS[${presetId}] (${CLAUDE_MODEL_CONTEXT_WINDOWS.get(presetId)}) drifted from TS (${window ?? def.contextWindow})`,
+      )
+    }
   }
 
   // Spot-check a few well-known values + expectedContextWindowForModel
