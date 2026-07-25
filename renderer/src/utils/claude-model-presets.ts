@@ -30,9 +30,10 @@ export type ClaudeModelDef = {
   description?: string
 }
 
+/** Ordered newest-first — the picker renders the rows in this order. */
 export const CLAUDE_MODEL_TABLE: ClaudeModelDef[] = [
-  { id: 'claude-fable-5', label: 'Fable 5', contextWindow: 1_000_000, windows: [200_000, 300_000, null] },
   { id: 'claude-opus-5', label: 'Opus 5', contextWindow: 1_000_000, windows: [200_000, 300_000, null] },
+  { id: 'claude-fable-5', label: 'Fable 5', contextWindow: 1_000_000, windows: [200_000, 300_000, null] },
   { id: 'claude-opus-4-8', label: 'Opus 4.8', contextWindow: 1_000_000, windows: [200_000, 300_000, null] },
   { id: 'claude-opus-4-7', label: 'Opus 4.7', contextWindow: 1_000_000, windows: [200_000, 300_000, 400_000, null] },
   { id: 'claude-opus-4-6', label: 'Opus 4.6 (1M)', contextWindow: 1_000_000, windows: [] },
@@ -202,12 +203,23 @@ export type ClaudeModelPickerRow = {
   options: ClaudeModelPickerOption[]
 }
 
+/** The SDK reports the full-window variant as `<base>[<N>m]`, not `<base>:<N>m`. */
+const SDK_CONTEXT_PRESET = /^(.+)\[(\d+)m\]$/
+/** Display names carry the variant as `Opus 5 · 300K` or as a `(1M)` suffix. */
+const TRAILING_WINDOW_PAREN = /\s*\(\d+[KM]\)$/
+
 function parsePresetId(value: string): { base: string; window: ClaudeCompactWindow; label: string } | null {
   const compact = AUTO_COMPACT_PRESET.exec(value)
   if (compact) return { base: compact[1], window: Number(compact[2]) * 1000, label: `${compact[2]}K` }
-  const full = CONTEXT_ONLY_PRESET.exec(value)
+  const full = CONTEXT_ONLY_PRESET.exec(value) || SDK_CONTEXT_PRESET.exec(value)
   if (full) return { base: full[1], window: null, label: `${full[2]}M` }
   return null
+}
+
+/** Row label: the model name without whatever window variant it was tagged with. */
+function rowLabelFor(displayName: string, fallback: string): string {
+  const base = (displayName || '').split(' · ')[0].replace(TRAILING_WINDOW_PAREN, '').trim()
+  return base || fallback
 }
 
 /**
@@ -221,8 +233,13 @@ export function groupClaudeModelRows(
   const labelById = new Map(CLAUDE_MODEL_TABLE.map(def => [def.id, def.label]))
   const rows: ClaudeModelPickerRow[] = []
   const byBase = new Map<string, ClaudeModelPickerRow>()
+  const seen = new Set<string>()
 
   for (const model of models) {
+    // Skip blanks rather than rendering an empty row, and drop repeats so a
+    // duplicated id can't produce two identical pills.
+    if (!model?.value || seen.has(model.value)) continue
+    seen.add(model.value)
     const source = model.source === 'sdk' ? 'sdk' : 'builtin'
     const parsed = parsePresetId(model.value)
     if (!parsed) {
@@ -239,7 +256,7 @@ export function groupClaudeModelRows(
     if (!row) {
       row = {
         key: parsed.base,
-        label: labelById.get(parsed.base) || model.displayName.split(' · ')[0],
+        label: labelById.get(parsed.base) || rowLabelFor(model.displayName, parsed.base),
         description: parsed.base,
         source,
         options: [],
@@ -249,6 +266,10 @@ export function groupClaudeModelRows(
     }
     row.options.push({ value: model.value, label: parsed.label, window: parsed.window })
   }
+  // Narrowest window first, no-early-compaction last. The builtin table is
+  // already in that order; SDK-discovered presets arrive in whatever order the
+  // host listed them.
+  for (const row of rows) row.options.sort((a, b) => optionSize(a) - optionSize(b))
   return rows
 }
 

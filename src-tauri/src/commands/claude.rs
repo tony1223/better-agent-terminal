@@ -1374,17 +1374,18 @@ struct ClaudeModelDef {
     description: Option<&'static str>,
 }
 
+/// Ordered newest-first — the picker renders the rows in this order.
 const CLAUDE_MODEL_TABLE: &[ClaudeModelDef] = &[
     ClaudeModelDef {
-        id: "claude-fable-5",
-        label: "Fable 5",
+        id: "claude-opus-5",
+        label: "Opus 5",
         context_window: 1_000_000,
         windows: &[Some(200_000), Some(300_000), None],
         description: None,
     },
     ClaudeModelDef {
-        id: "claude-opus-5",
-        label: "Opus 5",
+        id: "claude-fable-5",
+        label: "Fable 5",
         context_window: 1_000_000,
         windows: &[Some(200_000), Some(300_000), None],
         description: None,

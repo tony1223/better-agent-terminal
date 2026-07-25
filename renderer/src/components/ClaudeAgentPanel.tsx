@@ -22,7 +22,7 @@ import { isTauriNativeDropInside, listenTauriNativeDrop } from '../utils/tauri-n
 import { useRemoteDropUpload } from '../utils/remote-drop-upload'
 import { RemoteUploadConfirmDialog } from './RemoteUploadConfirmDialog'
 import { getHostUsageSnapshot, rateLimitsFromHostUsage, subscribeHostUsage } from '../utils/claude-usage-cache'
-import { autoCompactWindowForClaudeSelection, displayNameForClaudeSelection, normalizeClaudeModelSelection, sdkModelForClaudeSelection } from '../utils/claude-model-presets'
+import { autoCompactWindowForClaudeSelection, claudeModelValueForRow, displayNameForClaudeSelection, groupClaudeModelRows, normalizeClaudeModelSelection, pickClaudeModelOption, sdkModelForClaudeSelection, type ClaudeCompactWindow } from '../utils/claude-model-presets'
 import { shouldNavigateInputHistoryFromTextarea } from '../utils/input-history-navigation'
 import { buildSnippetContextPrompt, parseSnippetSlashCommand, type SnippetForContext } from '../utils/snippet-command'
 import { createToolRenderCache, getOrComputeToolRender, pruneToolRenderCache } from '../utils/tool-result-cache'
@@ -2062,6 +2062,53 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
     }
   }, [showModelList])  // eslint-disable-line react-hooks/exhaustive-deps
 
+  // The runtime speaks one flat preset id per model × compact-window pair; the
+  // picker splits that product back into a row per model with the windows as
+  // pills. Codex models carry no preset suffix, so they keep the flat rows.
+  const modelRows = useMemo(() => groupClaudeModelRows(availableModels), [availableModels])
+  const activeModelRow = useMemo(() => {
+    const idx = modelRows.findIndex(row =>
+      row.key === currentModel || row.options.some(option => option.value === currentModel))
+    return idx >= 0 ? idx : 0
+  }, [modelRows, currentModel])
+  // Compact window of the current selection, or undefined when the model has
+  // no presets. Carried over when the user switches models.
+  const activeCompactWindow = useMemo<ClaudeCompactWindow | undefined>(() => {
+    for (const row of modelRows) {
+      const option = row.options.find(candidate => candidate.value === currentModel)
+      if (option) return option.window
+    }
+    return undefined
+  }, [modelRows, currentModel])
+  // Keyboard focus inside the picker: a row plus a pending compact window that
+  // survives moving between rows. Arrows only move it — Enter or a click
+  // applies, so navigating never fires a session-recreating model change.
+  const [modelFocusRow, setModelFocusRow] = useState(0)
+  const [modelFocusWindow, setModelFocusWindow] = useState<ClaudeCompactWindow | undefined>(undefined)
+  const modelFocusSyncedRef = useRef(false)
+  const modelFocusScrollRef = useRef(false)
+  useEffect(() => {
+    if (!showModelList) {
+      modelFocusSyncedRef.current = false
+      return
+    }
+    // The model list is fetched after the picker opens, so the first render
+    // usually has no rows yet — snap focus onto the current model once they
+    // land, then leave it alone so arrows keep their position.
+    if (modelFocusSyncedRef.current || modelRows.length === 0) return
+    modelFocusSyncedRef.current = true
+    modelFocusScrollRef.current = true
+    setModelFocusRow(activeModelRow)
+    setModelFocusWindow(activeCompactWindow)
+  }, [showModelList, modelRows, activeModelRow, activeCompactWindow])
+  // Keeps the focused row visible, but only when focus moved by keyboard:
+  // scrolling on hover would slide the list out from under the cursor and
+  // re-trigger onMouseEnter. React re-runs the ref only when focus actually
+  // moves, so a row that is already visible is never yanked either way.
+  const scrollModelRowIntoView = useCallback((el: HTMLDivElement | null) => {
+    if (el && modelFocusScrollRef.current) el.scrollIntoView({ block: 'nearest' })
+  }, [])
+
   // Fetch account info and slash commands once session metadata arrives
   // Refresh account info when SettingsPanel switches account in this window.
   // Event is window-local (CustomEvent on window), so a remote window only
@@ -3383,6 +3430,32 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
           return
         }
       }
+      // Codex sessions keep the flat rows, which have no focus affordance —
+      // driving them from modelRows would move an invisible cursor.
+      if (showModelList && !isCodexSession && modelRows.length > 0) {
+        const row = modelRows[Math.min(modelFocusRow, modelRows.length - 1)]
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+          e.preventDefault()
+          const step = e.key === 'ArrowDown' ? 1 : -1
+          modelFocusScrollRef.current = true
+          setModelFocusRow(prev => Math.min(modelRows.length - 1, Math.max(0, prev + step)))
+          return
+        }
+        if ((e.key === 'ArrowRight' || e.key === 'ArrowLeft') && row.options.length > 0) {
+          e.preventDefault()
+          const step = e.key === 'ArrowRight' ? 1 : -1
+          const current = pickClaudeModelOption(row, modelFocusWindow)
+          const index = current ? row.options.indexOf(current) : 0
+          const next = Math.min(row.options.length - 1, Math.max(0, index + step))
+          setModelFocusWindow(row.options[next].window)
+          return
+        }
+        if (e.key === 'Enter') {
+          e.preventDefault()
+          void handleModelSelect(claudeModelValueForRow(row, modelFocusWindow))
+          return
+        }
+      }
       if (pendingPermission) {
         // If typing in custom text input, only handle Enter/Escape/ArrowUp
         if (permissionFocus === 3) {
@@ -3425,7 +3498,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
     }
     window.addEventListener('keydown', handleGlobalKeyDown)
     return () => window.removeEventListener('keydown', handleGlobalKeyDown)
-  }, [isStreaming, handleStop, pendingPermission, permissionFocus, handlePermissionSelect, showResumeList, showModelList, taskModal, contentModal, showFilePicker, filePickerPreview])
+  }, [isStreaming, handleStop, pendingPermission, permissionFocus, handlePermissionSelect, showResumeList, showModelList, taskModal, contentModal, showFilePicker, filePickerPreview, modelRows, modelFocusRow, modelFocusWindow, handleModelSelect])
   usePanelActiveEffect(activation, bindActiveKeyboard)
 
   const handleAskUserSubmit = useCallback(() => {
@@ -4874,18 +4947,69 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
                     <div className="claude-resume-item-preview">{m.description}</div>
                   </div>
                 )
+                // One row per model, its auto-compact windows as pills — keeps
+                // the list short as models keep gaining windows.
+                const renderRow = (row: typeof modelRows[number]) => {
+                  const index = modelRows.indexOf(row)
+                  const focused = index === modelFocusRow
+                  const pending = focused ? pickClaudeModelOption(row, modelFocusWindow) : undefined
+                  return (
+                    <div
+                      key={row.key}
+                      ref={focused ? scrollModelRowIntoView : undefined}
+                      className={`claude-model-row${index === activeModelRow ? ' active' : ''}${focused ? ' focused' : ''}`}
+                      onClick={() => handleModelSelect(claudeModelValueForRow(row, modelFocusWindow))}
+                      onMouseEnter={() => {
+                        modelFocusScrollRef.current = false
+                        setModelFocusRow(index)
+                      }}
+                    >
+                      <div className="claude-model-row-main">
+                        <span className="claude-model-row-label">{row.label}</span>
+                        <span className="claude-model-row-desc">{row.description}</span>
+                      </div>
+                      {row.options.length > 0 && (
+                        <div className="claude-model-row-windows">
+                          {row.options.map(option => (
+                            <button
+                              key={option.value}
+                              type="button"
+                              className={`claude-model-window${option.value === currentModel ? ' active' : ''}${option === pending ? ' pending' : ''}`}
+                              title={option.window === null
+                                ? `${row.key} · no early auto-compact`
+                                : `${row.key} · auto-compact at ${option.window.toLocaleString()} tokens`}
+                              onClick={event => {
+                                event.stopPropagation()
+                                setModelFocusWindow(option.window)
+                                void handleModelSelect(option.value)
+                              }}
+                            >
+                              {option.label}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )
+                }
+                // Grouping already carries each row's origin, and a row that
+                // merged a builtin with its SDK-reported alias belongs to the
+                // builtin group only — filtering by value would emit it twice.
+                const builtinRows = modelRows.filter(row => row.source !== 'sdk')
+                const sdkRows = modelRows.filter(row => row.source === 'sdk')
                 return (
                   <>
                     {builtins.length > 0 && (
                       <>
                         <div className="claude-model-group-label">Better Agent Terminal</div>
-                        {builtins.map(renderItem)}
+                        {/* Codex models have no context-window variants — keep the flat rows. */}
+                        {isCodexSession ? builtins.map(renderItem) : builtinRows.map(renderRow)}
                       </>
                     )}
                     {sdkModels.length > 0 && (
                       <>
                         <div className="claude-model-group-label">{isCodexSession ? 'Codex Agent' : 'Claude Agent'}</div>
-                        {sdkModels.map(renderItem)}
+                        {isCodexSession ? sdkModels.map(renderItem) : sdkRows.map(renderRow)}
                       </>
                     )}
                   </>
@@ -4899,7 +5023,10 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
           {!isCodexSession && !isV2Session && (
             <div className="claude-model-1m-hint">{t('claude.v1Model1mHint')}</div>
           )}
-          <div className="claude-permission-hint">{t('claude.escToCancel')}</div>
+          <div className="claude-permission-hint">
+            {!isCodexSession && <>{t('claude.modelPickerHint')} · </>}
+            {t('claude.escToCancel')}
+          </div>
         </div>
       )}
 
