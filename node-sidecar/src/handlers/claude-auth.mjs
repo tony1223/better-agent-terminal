@@ -16,10 +16,6 @@ import { invalidateAccountMetadataCache } from './claude-readonly.mjs'
 import runtimeCatalog from '../../../runtime-catalog.json' with { type: 'json' }
 
 export const AUTH_STATUS_TIMEOUT_MS = 10_000
-// auth login is interactive (browser-based OAuth, ~30-60s typical), so
-// we give it a generous ceiling. The CLI exits as soon as the OAuth
-// callback fires; if the user never completes the flow, we time out.
-export const AUTH_LOGIN_TIMEOUT_MS = 180_000
 export const CLAUDE_AGENT_SDK_NATIVE_VERSION = runtimeCatalog.claude.version
 
 // Per-platform Claude native package download catalog, derived from the
@@ -423,8 +419,6 @@ export function __setClaudeNativeDownloaderForTests(value) { _claudeNativeDownlo
 
 // --- handlers --------------------------------------------------------------
 
-const STUB_AUTH_ERR = 'claude account ops not yet wired through Tauri sidecar'
-
 // authStatus shells out to `claude auth status`, parses the JSON output,
 // returns null on any failure (CLI missing, not logged in, parse error).
 // This matches the Electron-side handler verbatim.
@@ -438,20 +432,12 @@ registerHandler('claude.authStatus', async () => fetchAuthStatus())
 // state correctly.
 registerHandler('claude.accountList', async () => readAccountIndex())
 
-// authLogin shells out to `claude auth login` (interactive, browser-based
-// OAuth). The CLI prints a URL, opens the user's browser, and exits when
-// the OAuth callback fires; we just wait for the process to exit. The
-// 180s ceiling is generous for a real-user flow but bounded so a stuck
-// flow eventually fails. Uses the bundled CLI when available so a fresh
-// setup-install release can authenticate without requiring system claude.
-registerHandler('claude.authLogin', async () => {
-  return new Promise((resolve) => {
-    spawnClaudeCli(['auth', 'login'], { timeout: AUTH_LOGIN_TIMEOUT_MS }, (err) => {
-      if (err) resolve({ success: false, error: err.message })
-      else resolve({ success: true })
-    }, { installManaged: true })
-  })
-})
+// There is deliberately no fire-and-forget `claude.authLogin` here. `claude
+// auth login` redirects to a hosted callback page (platform.claude.com), not a
+// localhost port, so spawning it and waiting for exit can only ever time out —
+// the code has to be pasted back into the CLI's stdin. That flow lives in
+// claude-auth-login.mjs and is what every host entry point drives.
+//
 // authLogout shells out to `claude auth logout` and reports the result.
 // 10s timeout — the CLI exits ~immediately on success. Failure usually
 // means the CLI isn't installed or auth state is corrupt; surface the
@@ -469,7 +455,6 @@ registerHandler('claude.authLogout', async () => {
   })
 })
 registerHandler('claude.accountImportCurrent', async () => null)
-registerHandler('claude.accountLoginNew', async () => ({ success: false, error: STUB_AUTH_ERR }))
 registerHandler('claude.accountSwitch', async (params) => {
   if (typeof params?.accountId !== 'string') {
     throw new Error('claude.accountSwitch: missing accountId')

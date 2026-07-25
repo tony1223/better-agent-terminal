@@ -803,6 +803,17 @@ export default function App() {
       })
     })
 
+    // The host announces every account switch / removal / new login, including
+    // ones another remote client made. Re-dispatch as the window CustomEvent the
+    // account chip and the agent panels already listen on, so one subscription
+    // here keeps every view in this window in sync with host-owned state.
+    const unsubAccountChanged = host.claude.onAccountChanged(payload => {
+      const kind = payload?.agent === 'codex' ? 'codex' : 'claude'
+      window.dispatchEvent(new CustomEvent(`${kind}-account-switched`, {
+        detail: { accountId: payload?.accountId ?? undefined },
+      }))
+    })
+
     return () => {
       unsubscribe()
       unsubscribeOutput()
@@ -810,6 +821,7 @@ export default function App() {
       unsubReload()
       unsubDetach()
       unsubReattach()
+      unsubAccountChanged()
     }
   }, [])
 

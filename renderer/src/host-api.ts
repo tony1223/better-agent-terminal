@@ -1095,9 +1095,11 @@ function createTauriHost(): BatAppAPI {
           })
         }
         // Account / auth ops.
-        if (key === 'authLogin') return () => getInvoke()<unknown>('claude_auth_login')
         if (key === 'authLogout') return () => getInvoke()<unknown>('claude_auth_logout')
-        // Interactive URL ("paste code") login — used for remote hosts.
+        // Interactive URL ("paste code") login. The host command runs the flow
+        // locally or forwards it to the remote host, so this is the only login
+        // path: `claude auth login` redirects to a hosted callback page, so
+        // nothing but the user can supply the code.
         if (key === 'authLoginStart') {
           return () => getInvoke()<{
             ok: boolean
@@ -1122,8 +1124,15 @@ function createTauriHost(): BatAppAPI {
         if (key === 'accountImportCurrent') {
           return () => getInvoke()<unknown>('claude_account_import_current')
         }
-        if (key === 'accountLoginNew') {
-          return () => getInvoke()<unknown>('claude_account_login_new')
+        // Account changes are host-owned: the host applies the switch/removal/
+        // login and then broadcasts here, so every window — including other
+        // remote clients that did not initiate it — repaints from one source.
+        if (key === 'onAccountChanged') {
+          return (cb: (payload: { agent?: string; accountId?: string | null }) => void) =>
+            listenAdapter<{ agent?: string; accountId?: string | null }>(
+              'claude:account-changed',
+              p => cb(p ?? {}),
+            )
         }
         if (key === 'accountSwitch') {
           return (accountId: string) =>

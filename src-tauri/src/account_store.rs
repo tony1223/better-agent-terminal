@@ -101,7 +101,17 @@ pub fn write_index(app_data_dir: &Path, index: &AccountIndex) -> Result<(), Acco
     fs::create_dir_all(app_data_dir)?;
     let path = account_index_path(app_data_dir);
     let clean = normalize_index(index.clone());
-    fs::write(path, serde_json::to_string_pretty(&clean)?)?;
+    // Write-then-rename: a torn write here would leave unparseable JSON, and
+    // read_index falls back to an empty index on a parse error, so the next
+    // mutation would persist "no accounts" over the real list. The credentials
+    // live in the OS keyring under ids that only this file records, so losing it
+    // strands them. fs::rename replaces the destination on both Windows and unix.
+    let temp = path.with_extension("json.tmp");
+    fs::write(&temp, serde_json::to_string_pretty(&clean)?)?;
+    if let Err(err) = fs::rename(&temp, &path) {
+        let _ = fs::remove_file(&temp);
+        return Err(err.into());
+    }
     Ok(())
 }
 
@@ -395,7 +405,14 @@ pub fn switch_account(app_data_dir: &Path, account_id: &str) -> Result<bool, Acc
     {
         return Ok(false);
     }
-    let _ = snapshot_active_account_credential(app_data_dir);
+    // Refuse the switch rather than swallow this. The snapshot is a no-op when
+    // there is no active account or no CLI credential to save, so the only way
+    // it errors is "there IS a live credential and the keyring rejected the
+    // write" — and the very next step overwrites that credential. Losing it
+    // leaves the outgoing account's stored copy stale, which once the CLI has
+    // rotated its refresh token means switching back lands on dead credentials
+    // and the account silently demands a fresh login.
+    snapshot_active_account_credential(app_data_dir)?;
     let Ok(credential) = load_account_credential(account_id) else {
         return Ok(false);
     };
@@ -420,7 +437,6 @@ pub fn remove_account(app_data_dir: &Path, account_id: &str) -> Result<bool, Acc
     if account.is_default {
         return Ok(false);
     }
-    delete_account_credential(account_id);
     index.accounts.retain(|account| account.id != account_id);
     if index.active_account_id.as_deref() == Some(account_id) {
         index.active_account_id = index
@@ -436,6 +452,10 @@ pub fn remove_account(app_data_dir: &Path, account_id: &str) -> Result<bool, Acc
         }
     }
     write_index(app_data_dir, &index)?;
+    // Only after the index no longer references it — dropping the credential
+    // first would strand a listed account with nothing to switch to if the
+    // index write failed.
+    delete_account_credential(account_id);
     Ok(true)
 }
 
@@ -477,6 +497,39 @@ mod tests {
         let read = read_index(&dir);
         assert_eq!(read.accounts.len(), 1);
         assert_eq!(read.active_account_id, None);
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn write_index_replaces_an_existing_file_and_leaves_no_temp_behind() {
+        let dir = temp_dir("atomic");
+        let account = |id: &str| ClaudeAccount {
+            id: id.into(),
+            email: format!("{id}@example.com"),
+            subscription_type: None,
+            is_default: false,
+            created_at: 1,
+        };
+        let mut index = AccountIndex {
+            accounts: vec![account("a1")],
+            active_account_id: Some("a1".into()),
+            switch_warning_shown: false,
+        };
+        write_index(&dir, &index).unwrap();
+        // Overwriting an existing index is the common case, and on Windows a
+        // rename onto an occupied path only succeeds with replace-existing
+        // semantics — pin that down so the write can't regress to a torn one.
+        index.accounts.push(account("a2"));
+        write_index(&dir, &index).unwrap();
+        assert_eq!(read_index(&dir).accounts.len(), 2);
+
+        let leftovers = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect::<Vec<_>>();
+        assert!(leftovers.is_empty(), "temp files left behind: {leftovers:?}");
         fs::remove_dir_all(dir).ok();
     }
 

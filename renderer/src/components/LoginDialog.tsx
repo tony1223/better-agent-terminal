@@ -5,9 +5,11 @@ import { host } from '../host-api'
 import { formatAuthErrorMessage } from '../utils/error-message'
 
 type LoginKind = 'claude' | 'codex'
+type LoginTarget = 'local' | 'remote'
 
-interface RemoteLoginDialogProps {
+interface LoginDialogProps {
   kind: LoginKind
+  target?: LoginTarget
   hostLabel?: string
   onClose: () => void
   onSuccess: () => void
@@ -15,17 +17,19 @@ interface RemoteLoginDialogProps {
 
 type Phase = 'starting' | 'awaiting-code' | 'awaiting-approval' | 'submitting' | 'error'
 
-// Sign-in flows against a remote host. Both run the agent CLI on the host and
-// surface its sign-in URL so a remote client can authenticate the host without
-// a browser there.
+// Sign-in flows that drive the agent CLI and surface its sign-in URL.
 //
-// - claude: `claude auth login` prints a URL + "paste code" prompt; the user
-//   signs in, copies the code the callback page shows, and pastes it back here.
-//   See node-sidecar/src/handlers/claude-auth-login.mjs.
+// - claude: `claude auth login` redirects to a hosted callback rather than a
+//   localhost port, so nothing local can observe completion — the user signs
+//   in, copies the code the page shows, and pastes it back here. That makes
+//   this the only workable flow for BOTH local and remote; on local the host
+//   also opens the browser for you (see claude_auth_login_start). See
+//   node-sidecar/src/handlers/claude-auth-login.mjs.
 // - codex: the host app-server returns a structured URL + one-time code and
 //   notifies completion after browser approval. No paste-back is required. See
-//   codex_app_server::account_login_device_start / _poll.
-export function RemoteLoginDialog({ kind, hostLabel, onClose, onSuccess }: Readonly<RemoteLoginDialogProps>) {
+//   codex_app_server::account_login_device_start / _poll. Local codex login has
+//   its own browser OAuth and does not come through here.
+export function LoginDialog({ kind, target = 'remote', hostLabel, onClose, onSuccess }: Readonly<LoginDialogProps>) {
   const { t } = useTranslation()
   const [phase, setPhase] = useState<Phase>('starting')
   const [url, setUrl] = useState<string>('')
@@ -42,17 +46,29 @@ export function RemoteLoginDialog({ kind, hostLabel, onClose, onSuccess }: Reado
   const pollTimerRef = useRef<number | null>(null)
 
   const label = kind === 'codex' ? 'Codex' : 'Claude'
+  const isLocal = target === 'local'
   const displayHost = hostLabel || t('workspace.remoteHostFallback')
+  const title = isLocal
+    ? t('workspace.localLoginTitle', { provider: label })
+    : t('workspace.remoteLoginTitle', { provider: label, host: displayHost })
+  const startingText = isLocal
+    ? t('workspace.localLoginStarting')
+    : t('workspace.remoteLoginStarting')
+  // On local the host already opened the browser, so the copy tells the user to
+  // come back with the code rather than to open the URL themselves.
+  const claudeStepsText = isLocal
+    ? t('workspace.localLoginClaudeSteps')
+    : t('workspace.remoteLoginClaudeSteps')
   const loginErrorText = (value: unknown, fallbackKey: string): string => {
     const message = formatAuthErrorMessage(value, t(fallbackKey))
     if (message === 'auth_in_progress') return t('workspace.remoteLoginInProgress')
     return message
   }
   const logLoginFailure = (stage: string, message: string) => {
-    void host.debug.log(`[RemoteLoginDialog] ${kind} ${stage} failed: ${message}`)
+    void host.debug.log(`[LoginDialog] ${target} ${kind} ${stage} failed: ${message}`)
   }
 
-  const cancelRemoteLogin = useCallback(() => {
+  const cancelLogin = useCallback(() => {
     if (cancelSentRef.current || completedRef.current || !ownsLoginRef.current) return
     cancelSentRef.current = true
     const loginId = loginIdRef.current || undefined
@@ -67,9 +83,9 @@ export function RemoteLoginDialog({ kind, hostLabel, onClose, onSuccess }: Reado
   const cancel = useCallback(() => {
     stoppedRef.current = true
     if (pollTimerRef.current !== null) window.clearTimeout(pollTimerRef.current)
-    cancelRemoteLogin()
+    cancelLogin()
     onClose()
-  }, [cancelRemoteLogin, onClose])
+  }, [cancelLogin, onClose])
 
   // Poll the host until the codex device login completes, fails, or times out.
   const pollCodex = useCallback(() => {
@@ -120,7 +136,7 @@ export function RemoteLoginDialog({ kind, hostLabel, onClose, onSuccess }: Reado
             loginIdRef.current = res.loginId
             ownsLoginRef.current = true
             if (stoppedRef.current) {
-              cancelRemoteLogin()
+              cancelLogin()
               return
             }
             setUrl(res.url)
@@ -145,7 +161,7 @@ export function RemoteLoginDialog({ kind, hostLabel, onClose, onSuccess }: Reado
       return () => {
         stoppedRef.current = true
         if (pollTimerRef.current !== null) window.clearTimeout(pollTimerRef.current)
-        cancelRemoteLogin()
+        cancelLogin()
       }
     }
 
@@ -158,7 +174,7 @@ export function RemoteLoginDialog({ kind, hostLabel, onClose, onSuccess }: Reado
           loginIdRef.current = res.loginId
           ownsLoginRef.current = true
           if (stoppedRef.current) {
-            cancelRemoteLogin()
+            cancelLogin()
             return
           }
           setUrl(res.url)
@@ -180,7 +196,7 @@ export function RemoteLoginDialog({ kind, hostLabel, onClose, onSuccess }: Reado
     })()
     return () => {
       stoppedRef.current = true
-      cancelRemoteLogin()
+      cancelLogin()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [kind])
@@ -239,10 +255,10 @@ export function RemoteLoginDialog({ kind, hostLabel, onClose, onSuccess }: Reado
   return (
     <div className="dialog-overlay" onClick={cancel}>
       <div className="dialog" onClick={e => e.stopPropagation()} style={{ maxWidth: 560 }}>
-        <h3>{t('workspace.remoteLoginTitle', { provider: label, host: displayHost })}</h3>
+        <h3>{title}</h3>
 
         {phase === 'starting' && (
-          <p>{t('workspace.remoteLoginStarting')}</p>
+          <p>{startingText}</p>
         )}
 
         {phase === 'error' && (
@@ -277,7 +293,7 @@ export function RemoteLoginDialog({ kind, hostLabel, onClose, onSuccess }: Reado
         {/* claude paste-code flow */}
         {kind === 'claude' && (phase === 'awaiting-code' || phase === 'submitting') && (
           <>
-            <p>{t('workspace.remoteLoginClaudeSteps')}</p>
+            <p>{claudeStepsText}</p>
             {urlBox}
             <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
               <button className="dialog-btn secondary" onClick={openUrl} type="button">{t('workspace.remoteLoginOpenBrowser')}</button>
