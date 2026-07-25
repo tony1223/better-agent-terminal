@@ -36,6 +36,45 @@ const MAX_ENV_COPY_ERRORS: usize = 8;
 const PNPM_LOG_TAIL_CHARS: usize = 4000;
 const WORKTREE_DIR: &str = ".bat-worktrees";
 
+/// The platforms pnpm resolution has to differ across.
+///
+/// Deliberately a runtime value rather than `#[cfg]`: it keeps every
+/// platform's rules compiling — and unit-testable — on every host, so the
+/// macOS and Linux behaviour is not left to whoever next builds on those
+/// machines.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PnpmHost {
+    Windows,
+    MacOs,
+    Linux,
+}
+
+impl PnpmHost {
+    fn current() -> Self {
+        if cfg!(windows) {
+            Self::Windows
+        } else if cfg!(target_os = "macos") {
+            Self::MacOs
+        } else {
+            Self::Linux
+        }
+    }
+
+    /// File names pnpm can have inside an install directory.
+    ///
+    /// Windows is the awkward one: `npm install -g pnpm` writes `pnpm.cmd`,
+    /// the standalone installer writes `pnpm.exe`, and the extensionless
+    /// `pnpm` npm drops alongside them is an sh script that CreateProcess
+    /// rejects with "not a valid Win32 application". Command does not apply
+    /// PATHEXT, so the extension has to be part of the path we hand it.
+    fn executable_names(self) -> &'static [&'static str] {
+        match self {
+            Self::Windows => &["pnpm.cmd", "pnpm.exe", "pnpm.bat"],
+            Self::MacOs | Self::Linux => &["pnpm"],
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct WorktreeState {
     inner: Arc<Mutex<HashMap<String, WorktreeInfo>>>,
@@ -626,7 +665,23 @@ fn spawn_pnpm_install_for_worktree(
     std::thread::spawn(move || {
         let store_dir = git_root.join(".bat-cache").join("pnpm-store");
         let _ = fs::create_dir_all(&store_dir);
-        let pnpm_bin = resolve_pnpm_binary().unwrap_or_else(|| PathBuf::from("pnpm"));
+        // Bail loudly rather than spawning a bare "pnpm": on Windows that name
+        // never resolves (Command does not apply PATHEXT), so the old fallback
+        // could only ever produce a confusing `program not found`.
+        let Some(pnpm_bin) = resolve_pnpm_binary() else {
+            if let Some(app) = app.as_ref() {
+                log_tauri(
+                    app,
+                    &format!(
+                        "[worktree] background pnpm install skipped cwd={} reason=pnpm-not-found searched={} path={}",
+                        worktree_path.display(),
+                        pnpm_search_summary(),
+                        std::env::var("PATH").unwrap_or_default()
+                    ),
+                );
+            }
+            return;
+        };
         let pnpm_path = augmented_path_for_pnpm(&pnpm_bin);
         let pnpm_path_text = pnpm_path
             .as_ref()
@@ -805,16 +860,123 @@ fn resolve_pnpm_binary() -> Option<PathBuf> {
         }
     }
     find_binary_on_path("pnpm").or_else(|| {
-        [
-            "/opt/homebrew/bin/pnpm",
-            "/usr/local/bin/pnpm",
-            "/usr/bin/pnpm",
-            "/bin/pnpm",
-        ]
-        .iter()
-        .map(PathBuf::from)
-        .find(|path| path.is_file())
+        pnpm_fallback_candidates()
+            .into_iter()
+            .find(|path| path.is_file())
     })
+}
+
+/// Directories pnpm installs into, most authoritative first.
+///
+/// Pure in its environment, and selected with `cfg!` rather than `#[cfg]`, so
+/// the macOS and Linux lists compile and can be asserted from any host. That
+/// matters more than it looks: nothing in CI runs `cargo test`, so a branch
+/// behind `#[cfg(target_os = "macos")]` is only ever checked by whoever
+/// happens to build on a Mac.
+///
+/// The lists exist because PATH is least trustworthy exactly where we need it.
+/// A macOS app opened from Finder inherits launchd's
+/// `/usr/bin:/bin:/usr/sbin:/sbin` and never the PATH a shell rc builds, and
+/// a Windows app started before `npm install -g pnpm` keeps the older
+/// registry PATH until the user signs out. In both cases pnpm is installed and
+/// working in a terminal while being invisible to us.
+fn pnpm_search_dirs<F>(host: PnpmHost, env: F) -> Vec<PathBuf>
+where
+    F: Fn(&str) -> Option<OsString>,
+{
+    let mut dirs = Vec::<PathBuf>::new();
+    let var = |name: &str| {
+        env(name)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    };
+
+    // PNPM_HOME is pnpm telling us where it put itself; trust it over guesses.
+    if let Some(home) = var("PNPM_HOME") {
+        push_unique_path(&mut dirs, home);
+    }
+
+    match host {
+        PnpmHost::Windows => {
+            // `npm install -g pnpm` writes into npm's global prefix.
+            if let Some(appdata) = var("APPDATA") {
+                push_unique_path(&mut dirs, appdata.join("npm"));
+            }
+            // The standalone installer's default home.
+            if let Some(local) = var("LOCALAPPDATA") {
+                push_unique_path(&mut dirs, local.join("pnpm"));
+            }
+            if let Some(program_files) = var("ProgramFiles") {
+                push_unique_path(&mut dirs, program_files.join("nodejs"));
+            }
+        }
+        PnpmHost::MacOs => {
+            if let Some(home) = var("HOME") {
+                // The standalone installer's default home on macOS.
+                push_unique_path(&mut dirs, home.join("Library").join("pnpm"));
+            }
+            push_unique_path(&mut dirs, PathBuf::from("/opt/homebrew/bin"));
+            push_unique_path(&mut dirs, PathBuf::from("/usr/local/bin"));
+            push_unique_path(&mut dirs, PathBuf::from("/usr/bin"));
+        }
+        PnpmHost::Linux => {
+            // The standalone installer follows the XDG data dir.
+            if let Some(data) = var("XDG_DATA_HOME") {
+                push_unique_path(&mut dirs, data.join("pnpm"));
+            } else if let Some(home) = var("HOME") {
+                push_unique_path(&mut dirs, home.join(".local").join("share").join("pnpm"));
+            }
+            push_unique_path(&mut dirs, PathBuf::from("/usr/local/bin"));
+            push_unique_path(&mut dirs, PathBuf::from("/home/linuxbrew/.linuxbrew/bin"));
+            push_unique_path(&mut dirs, PathBuf::from("/usr/bin"));
+            push_unique_path(&mut dirs, PathBuf::from("/bin"));
+        }
+    }
+
+    // Volta keeps stable shims outside its per-version directories.
+    if let Some(volta) = var("VOLTA_HOME") {
+        push_unique_path(&mut dirs, volta.join("bin"));
+    } else if let Some(home) = var("HOME") {
+        push_unique_path(&mut dirs, home.join(".volta").join("bin"));
+    }
+
+    // nvm, fnm, asdf and mise all put node in a per-version directory no fixed
+    // list can predict, and a global pnpm install lands beside it. Following
+    // node covers every one of them with a single rule.
+    if let Some(node_dir) = env("PATH")
+        .and_then(|path| find_node_on_path(&path))
+        .and_then(|node| node.parent().map(Path::to_path_buf))
+    {
+        push_unique_path(&mut dirs, node_dir);
+    }
+
+    dirs
+}
+
+/// Every path pnpm could be at on `host`, as full file paths ready to spawn.
+fn pnpm_candidates<F>(host: PnpmHost, env: F) -> Vec<PathBuf>
+where
+    F: Fn(&str) -> Option<OsString>,
+{
+    let names = host.executable_names();
+    pnpm_search_dirs(host, env)
+        .into_iter()
+        .flat_map(|dir| names.iter().map(move |name| dir.join(name)))
+        .collect()
+}
+
+fn pnpm_fallback_candidates() -> Vec<PathBuf> {
+    pnpm_candidates(PnpmHost::current(), |name| std::env::var_os(name))
+}
+
+/// The fallback list, for the log line that fires when pnpm cannot be found —
+/// so the log says where we looked instead of just that we failed.
+fn pnpm_search_summary() -> String {
+    pnpm_fallback_candidates()
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(";")
 }
 
 fn augmented_path_for_pnpm(pnpm_bin: &Path) -> Option<OsString> {
@@ -833,17 +995,9 @@ fn augmented_path_for_pnpm(pnpm_bin: &Path) -> Option<OsString> {
         push_unique_path(&mut dirs, node);
     }
 
-    #[cfg(target_os = "macos")]
-    let fallbacks: &[&str] = &["/opt/homebrew/bin", "/usr/local/bin"];
-    #[cfg(target_os = "linux")]
-    let fallbacks: &[&str] = &["/usr/local/bin", "/home/linuxbrew/.linuxbrew/bin"];
-    #[cfg(windows)]
-    let fallbacks: &[&str] = &[];
-
-    for fallback in fallbacks {
-        let path = PathBuf::from(fallback);
-        if path.is_dir() {
-            push_unique_path(&mut dirs, path);
+    for dir in pnpm_runtime_dirs(PnpmHost::current(), |name| std::env::var_os(name)) {
+        if dir.is_dir() {
+            push_unique_path(&mut dirs, dir);
         }
     }
 
@@ -854,6 +1008,47 @@ fn augmented_path_for_pnpm(pnpm_bin: &Path) -> Option<OsString> {
         push_unique_path(&mut dirs, entry);
     }
     std::env::join_paths(dirs).ok()
+}
+
+/// Directories to prepend to the child's PATH so pnpm can reach node.
+///
+/// Narrower than [`pnpm_search_dirs`] on purpose. These land *ahead* of the
+/// inherited PATH, so adding a general system directory here would let it
+/// shadow the node a version manager put earlier — finding pnpm somewhere is
+/// harmless, running it against the wrong node is not.
+fn pnpm_runtime_dirs<F>(host: PnpmHost, env: F) -> Vec<PathBuf>
+where
+    F: Fn(&str) -> Option<OsString>,
+{
+    let mut dirs = Vec::<PathBuf>::new();
+    let var = |name: &str| {
+        env(name)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    };
+
+    match host {
+        PnpmHost::Windows => {
+            // pnpm.cmd shells out to node, so the child needs node reachable
+            // even when we found pnpm somewhere PATH does not mention.
+            if let Some(appdata) = var("APPDATA") {
+                push_unique_path(&mut dirs, appdata.join("npm"));
+            }
+            if let Some(program_files) = var("ProgramFiles") {
+                push_unique_path(&mut dirs, program_files.join("nodejs"));
+            }
+        }
+        PnpmHost::MacOs => {
+            push_unique_path(&mut dirs, PathBuf::from("/opt/homebrew/bin"));
+            push_unique_path(&mut dirs, PathBuf::from("/usr/local/bin"));
+        }
+        PnpmHost::Linux => {
+            push_unique_path(&mut dirs, PathBuf::from("/usr/local/bin"));
+            push_unique_path(&mut dirs, PathBuf::from("/home/linuxbrew/.linuxbrew/bin"));
+        }
+    }
+
+    dirs
 }
 
 fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
@@ -1645,6 +1840,224 @@ mod tests {
         let root = worktree_git_root_from_path("C:/repo/.bat-worktrees/abc")
             .expect("root from worktree path");
         assert!(root.ends_with(Path::new("C:/repo")));
+    }
+
+    /// The contract worktree auto-install rests on: when pnpm is installed the
+    /// normal way, the background installer can actually run it.
+    ///
+    /// Resolving a path is not enough to assert. On Windows `npm install -g
+    /// pnpm` drops three shims in the same directory and only some are
+    /// spawnable — the extensionless one fails with "not a valid Win32
+    /// application" — so this drives the real Command the installer builds.
+    #[test]
+    fn resolved_pnpm_binary_actually_runs() {
+        let Some(pnpm_bin) = resolve_pnpm_binary() else {
+            eprintln!("skipping: pnpm is not installed on this machine");
+            return;
+        };
+
+        let mut command = Command::new(&pnpm_bin);
+        command
+            .arg("--version")
+            // Away from the repo so a workspace pnpm config cannot colour the result.
+            .current_dir(std::env::temp_dir())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(path) = augmented_path_for_pnpm(&pnpm_bin) {
+            command.env("PATH", path);
+        }
+        hide_console_window(&mut command);
+
+        let output = command
+            .output()
+            .unwrap_or_else(|err| panic!("could not spawn {}: {err}", pnpm_bin.display()));
+        assert!(
+            output.status.success(),
+            "{} --version exited {} stderr={}",
+            pnpm_bin.display(),
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+
+        let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        assert!(
+            version
+                .split('.')
+                .next()
+                .is_some_and(|major| major.parse::<u32>().is_ok()),
+            "expected a version from {}, got {version:?}",
+            pnpm_bin.display()
+        );
+        // Surfaced under --nocapture so a failure elsewhere shows which pnpm
+        // this machine actually resolved.
+        eprintln!("pnpm resolved to {} reporting {version}", pnpm_bin.display());
+    }
+
+    /// A stand-in environment, so each platform's rules can be asserted from
+    /// any host. That is the whole point of resolving pnpm through `PnpmHost`
+    /// instead of `#[cfg]`: CI builds on macOS and Linux but never runs
+    /// `cargo test`, so these branches would otherwise go unchecked until a
+    /// user hit them.
+    fn fake_env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<OsString> {
+        let map: HashMap<String, String> = pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect();
+        move |name| map.get(name).map(OsString::from)
+    }
+
+    const EVERY_HOST: [PnpmHost; 3] = [PnpmHost::Windows, PnpmHost::MacOs, PnpmHost::Linux];
+
+    /// `npm install -g pnpm` is the install these fallbacks exist to rescue,
+    /// and the one the user actually runs. Its prefix differs per platform.
+    #[test]
+    fn candidates_cover_the_npm_global_prefix_on_every_host() {
+        let windows = pnpm_candidates(
+            PnpmHost::Windows,
+            fake_env(&[("APPDATA", r"C:\Users\dev\AppData\Roaming")]),
+        );
+        assert!(
+            windows.contains(&PathBuf::from(r"C:\Users\dev\AppData\Roaming").join("npm").join("pnpm.cmd")),
+            "windows candidates missed npm's global prefix: {windows:?}"
+        );
+
+        // Homebrew is npm's global prefix for most Mac users, and it is
+        // invisible to a Finder-launched app because launchd's PATH is only
+        // /usr/bin:/bin:/usr/sbin:/sbin.
+        let macos = pnpm_candidates(PnpmHost::MacOs, fake_env(&[("HOME", "/Users/dev")]));
+        assert!(
+            macos.contains(&PathBuf::from("/opt/homebrew/bin").join("pnpm")),
+            "macos candidates missed Homebrew: {macos:?}"
+        );
+        assert!(
+            macos.contains(&PathBuf::from("/usr/local/bin").join("pnpm")),
+            "macos candidates missed the Intel Homebrew prefix: {macos:?}"
+        );
+
+        let linux = pnpm_candidates(PnpmHost::Linux, fake_env(&[("HOME", "/home/dev")]));
+        assert!(
+            linux.contains(&PathBuf::from("/usr/local/bin").join("pnpm")),
+            "linux candidates missed /usr/local/bin: {linux:?}"
+        );
+    }
+
+    /// The standalone installer picks a different home on each platform, and
+    /// on Linux follows XDG rather than a fixed path.
+    #[test]
+    fn candidates_cover_the_standalone_installer_home() {
+        let macos = pnpm_candidates(PnpmHost::MacOs, fake_env(&[("HOME", "/Users/dev")]));
+        assert!(
+            macos.contains(&PathBuf::from("/Users/dev").join("Library").join("pnpm").join("pnpm")),
+            "macos candidates missed ~/Library/pnpm: {macos:?}"
+        );
+
+        let linux = pnpm_candidates(PnpmHost::Linux, fake_env(&[("HOME", "/home/dev")]));
+        assert!(
+            linux.contains(
+                &PathBuf::from("/home/dev")
+                    .join(".local")
+                    .join("share")
+                    .join("pnpm")
+                    .join("pnpm")
+            ),
+            "linux candidates missed ~/.local/share/pnpm: {linux:?}"
+        );
+
+        let xdg = pnpm_candidates(
+            PnpmHost::Linux,
+            fake_env(&[("HOME", "/home/dev"), ("XDG_DATA_HOME", "/home/dev/.data")]),
+        );
+        assert!(
+            xdg.contains(&PathBuf::from("/home/dev/.data").join("pnpm").join("pnpm")),
+            "linux candidates ignored XDG_DATA_HOME: {xdg:?}"
+        );
+    }
+
+    /// PNPM_HOME is pnpm naming its own location, so it must win over the
+    /// guesses on every platform.
+    #[test]
+    fn pnpm_home_is_searched_first_on_every_host() {
+        for host in EVERY_HOST {
+            let candidates = pnpm_candidates(host, fake_env(&[("PNPM_HOME", "/opt/pnpm-home")]));
+            let first = candidates.first().expect("at least one candidate");
+            assert!(
+                first.starts_with(PathBuf::from("/opt/pnpm-home")),
+                "{host:?} searched {} before PNPM_HOME",
+                first.display()
+            );
+        }
+    }
+
+    /// `Command` does not apply PATHEXT, so a Windows candidate without an
+    /// extension can never be spawned however plausible the path looks. The
+    /// converse matters too: a `.cmd` suffix on Unix would match nothing.
+    #[test]
+    fn only_windows_candidates_carry_an_executable_extension() {
+        for host in EVERY_HOST {
+            for candidate in pnpm_candidates(host, fake_env(&[("PNPM_HOME", "/opt/pnpm-home")])) {
+                let extension = candidate
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .map(str::to_ascii_lowercase);
+                match host {
+                    PnpmHost::Windows => assert!(
+                        matches!(extension.as_deref(), Some("cmd" | "exe" | "bat")),
+                        "{} is not spawnable on Windows",
+                        candidate.display()
+                    ),
+                    PnpmHost::MacOs | PnpmHost::Linux => assert_eq!(
+                        extension, None,
+                        "{} would not exist on {host:?}",
+                        candidate.display()
+                    ),
+                }
+            }
+        }
+    }
+
+    /// nvm, fnm, asdf and mise put node in a per-version directory that no
+    /// fixed list predicts. Following node is the single rule that covers all
+    /// of them, so it has to actually fire.
+    #[test]
+    fn candidates_follow_node_for_version_managers() {
+        let version_dir = std::env::temp_dir().join(format!(
+            "bat-worktree-nodedir-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        fs::create_dir_all(&version_dir).expect("create fake version manager bin dir");
+        // find_node_on_path looks for whatever this host calls node.
+        let node_name = if cfg!(windows) { "node.exe" } else { "node" };
+        fs::write(version_dir.join(node_name), b"").expect("create fake node");
+
+        let path = version_dir.to_string_lossy().into_owned();
+        let candidates = pnpm_candidates(PnpmHost::current(), fake_env(&[("PATH", &path)]));
+        let expected = version_dir.join(PnpmHost::current().executable_names()[0]);
+
+        let _ = fs::remove_dir_all(&version_dir);
+        assert!(
+            candidates.contains(&expected),
+            "expected {} among {candidates:?}",
+            expected.display()
+        );
+    }
+
+    /// Runtime dirs are prepended *ahead* of the inherited PATH, so a general
+    /// system directory here would shadow the node a version manager put
+    /// earlier. Searching those directories for pnpm is fine; running pnpm
+    /// against the wrong node is not.
+    #[test]
+    fn runtime_dirs_never_shadow_the_system_node() {
+        for host in EVERY_HOST {
+            for dir in pnpm_runtime_dirs(host, fake_env(&[("HOME", "/home/dev")])) {
+                assert!(
+                    !matches!(dir.to_str(), Some("/usr/bin" | "/bin" | "/usr/sbin")),
+                    "{host:?} would prepend {} ahead of the inherited PATH",
+                    dir.display()
+                );
+            }
+        }
     }
 
     #[test]
