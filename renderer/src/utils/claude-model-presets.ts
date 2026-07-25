@@ -151,14 +151,39 @@ export function normalizeClaudeModelSelection(model?: string): string | undefine
   return CLAUDE_CANONICAL_PRESETS.get(model) || model
 }
 
+/**
+ * Claude Code takes the 1M window from a `[1m]` suffix on the model id and
+ * strips it again before the request reaches the provider, so a bare id runs
+ * at 200K however large the model's physical window is. `impliedWindow` is
+ * what the preset id itself asked for, used only when the table has never
+ * heard of the model.
+ */
+function withContextSuffix(baseId: string, impliedWindow = 0): string {
+  const window = CLAUDE_BUILTIN_MODEL_CONTEXT_WINDOWS.get(baseId) ?? impliedWindow
+  return window > 200_000 ? `${baseId}[1m]` : baseId
+}
+
+/**
+ * The model id to hand the CLI for a selection.
+ *
+ * Re-attaching `[1m]` is the whole point: dropping it made `:1m` and
+ * `:auto-compact-300k` both resolve to a bare id that silently ran at 200K,
+ * which in turn put the 300K compact target above the real window where it
+ * could never fire.
+ */
 export function sdkModelForClaudeSelection(model?: string): string | undefined {
   if (!model) return undefined
+  if (model.endsWith('[1m]')) return model
   const mapped = CLAUDE_PRESET_SDK_MODELS.get(model)
-  if (mapped) return mapped
+  if (mapped) return withContextSuffix(mapped)
   // Regex fallback so a preset minted by a newer host still resolves on an
-  // older remote client.
-  const parsed = AUTO_COMPACT_PRESET.exec(model) || CONTEXT_ONLY_PRESET.exec(model)
-  return parsed ? parsed[1] : model
+  // older remote client. Past the table the preset id still names the window
+  // it wants, and anything beyond 200K is only reachable on a 1M model.
+  const auto = AUTO_COMPACT_PRESET.exec(model)
+  if (auto) return withContextSuffix(auto[1], Number(auto[2]) * 1_000)
+  const contextOnly = CONTEXT_ONLY_PRESET.exec(model)
+  if (contextOnly) return withContextSuffix(contextOnly[1], Number(contextOnly[2]) * 1_000_000)
+  return withContextSuffix(model)
 }
 
 export function autoCompactWindowForClaudeSelection(

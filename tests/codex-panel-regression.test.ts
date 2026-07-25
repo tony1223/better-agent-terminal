@@ -18,7 +18,11 @@ async function main() {
 
   assert.equal(normalizeClaudeModelSelection('claude-opus-5'), 'claude-opus-5:1m')
   assert.equal(normalizeClaudeModelSelection('claude-opus-5[1m]'), 'claude-opus-5:1m')
-  assert.equal(sdkModelForClaudeSelection('claude-opus-5:auto-compact-200k'), 'claude-opus-5')
+  // The `[1m]` has to survive the round trip. The SDK emits `claude-opus-5[1m]`,
+  // we canonicalize it to the `:1m` preset for the picker, and handing it back
+  // without the suffix would drop the session to a 200K window.
+  assert.equal(sdkModelForClaudeSelection('claude-opus-5:auto-compact-200k'), 'claude-opus-5[1m]')
+  assert.equal(sdkModelForClaudeSelection(normalizeClaudeModelSelection('claude-opus-5[1m]')), 'claude-opus-5[1m]')
   assert.equal(autoCompactWindowForClaudeSelection('claude-opus-5:auto-compact-200k'), 200000)
   assert.equal(autoCompactWindowForClaudeSelection('claude-opus-5:1m'), null)
   assert.equal(contextWindowForClaudeSelection('claude-opus-5:1m'), 1000000)

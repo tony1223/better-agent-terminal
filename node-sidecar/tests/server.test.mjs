@@ -1684,10 +1684,11 @@ async function inProcess() {
     await dispatch({ jsonrpc: '2.0', id: 237, method: 'claude.setPermissionMode',
       params: { sessionId: 'ctrl-1', mode: 'bypassPlan' } })
     assert.deepEqual(ctrlCalls.permissionMode, ['plan', 'plan'])
-    // Model change forwards too.
+    // Model change forwards too, carrying the `[1m]` that keeps a mid-session
+    // switch on the same window a fresh session would have got.
     await dispatch({ jsonrpc: '2.0', id: 238, method: 'claude.setModel',
       params: { sessionId: 'ctrl-1', model: 'claude-opus-4-7' } })
-    assert.deepEqual(ctrlCalls.model, ['claude-opus-4-7'])
+    assert.deepEqual(ctrlCalls.model, ['claude-opus-4-7[1m]'])
     // autoCompactWindow change closes the current query (env var requires rebuild).
     await dispatch({ jsonrpc: '2.0', id: 239, method: 'claude.setModel',
       params: { sessionId: 'ctrl-1', autoCompactWindow: 200000 } })
@@ -2059,8 +2060,9 @@ async function inProcess() {
     const cappedOpts = resumeQueryCaptured[resumeQueryCaptured.length - 1].options
     assert.equal(cappedOpts.env?.CLAUDE_CODE_AUTO_COMPACT_WINDOW, '300000',
       'resumed session must spawn the CLI with the derived window env')
-    assert.equal(cappedOpts.model, 'claude-sonnet-4-6',
-      'preset id must still map to the base SDK model id')
+    assert.equal(cappedOpts.model, 'claude-sonnet-4-6[1m]',
+      'preset id must still map to the base SDK model id, with the [1m] that '
+      + 'gives the 300k cap a window large enough to sit under')
 
     // An explicit numeric option on resume wins over the preset suffix.
     await dispatch({ jsonrpc: '2.0', id: 29513, method: 'claude.resumeSession',
@@ -2821,8 +2823,9 @@ async function inProcess() {
     assert.deepEqual(opts.settings, { ultracode: true, enableWorkflows: true })
     assert.equal(opts.permissionMode, 'bypassPermissions')
     assert.equal(opts.allowDangerouslySkipPermissions, true)
-    // sdkModelForClaudeSelection maps the preset to the base id.
-    assert.equal(opts.model, 'claude-opus-4-7')
+    // sdkModelForClaudeSelection maps the preset to the base id, keeping the
+    // `[1m]` suffix that is what actually buys the 1M window.
+    assert.equal(opts.model, 'claude-opus-4-7[1m]')
     // autoCompactWindow → CLAUDE_CODE_AUTO_COMPACT_WINDOW env passthrough.
     assert.ok(opts.env, 'expected env on queryOptions when autoCompactWindow is set')
     assert.equal(opts.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, '200000')
@@ -3186,16 +3189,29 @@ async function inProcess() {
   // Helpers (sdkModelForClaudeSelection + dataUrlToContentBlock) sanity.
   const { sdkModelForClaudeSelection, dataUrlToContentBlock } = mod
   assert.equal(sdkModelForClaudeSelection(undefined), undefined)
-  assert.equal(sdkModelForClaudeSelection('claude-sonnet-4-6'), 'claude-sonnet-4-6')
-  assert.equal(sdkModelForClaudeSelection('claude-opus-5:auto-compact-200k'), 'claude-opus-5')
-  assert.equal(sdkModelForClaudeSelection('claude-opus-5:auto-compact-300k'), 'claude-opus-5')
-  assert.equal(sdkModelForClaudeSelection('claude-opus-5:1m'), 'claude-opus-5')
-  assert.equal(sdkModelForClaudeSelection('claude-opus-4-8:auto-compact-200k'), 'claude-opus-4-8')
-  assert.equal(sdkModelForClaudeSelection('claude-opus-4-8:auto-compact-300k'), 'claude-opus-4-8')
-  assert.equal(sdkModelForClaudeSelection('claude-opus-4-8:1m'), 'claude-opus-4-8')
-  assert.equal(sdkModelForClaudeSelection('claude-opus-4-7:auto-compact-200k'), 'claude-opus-4-7')
-  assert.equal(sdkModelForClaudeSelection('claude-opus-4-7:auto-compact-300k'), 'claude-opus-4-7')
-  assert.equal(sdkModelForClaudeSelection('claude-opus-4-7:1m'), 'claude-opus-4-7')
+  // Every 1M model has to keep the `[1m]` suffix: Claude Code reads the window
+  // off it and strips it before the request goes out, so a bare id runs at
+  // 200K and puts a 300K compact target above the window it must fire below.
+  assert.equal(sdkModelForClaudeSelection('claude-sonnet-4-6'), 'claude-sonnet-4-6[1m]')
+  assert.equal(sdkModelForClaudeSelection('claude-opus-5:auto-compact-200k'), 'claude-opus-5[1m]')
+  assert.equal(sdkModelForClaudeSelection('claude-opus-5:auto-compact-300k'), 'claude-opus-5[1m]')
+  assert.equal(sdkModelForClaudeSelection('claude-opus-5:1m'), 'claude-opus-5[1m]')
+  assert.equal(sdkModelForClaudeSelection('claude-opus-4-8:auto-compact-200k'), 'claude-opus-4-8[1m]')
+  assert.equal(sdkModelForClaudeSelection('claude-opus-4-8:auto-compact-300k'), 'claude-opus-4-8[1m]')
+  assert.equal(sdkModelForClaudeSelection('claude-opus-4-8:1m'), 'claude-opus-4-8[1m]')
+  assert.equal(sdkModelForClaudeSelection('claude-opus-4-7:auto-compact-200k'), 'claude-opus-4-7[1m]')
+  assert.equal(sdkModelForClaudeSelection('claude-opus-4-7:auto-compact-300k'), 'claude-opus-4-7[1m]')
+  assert.equal(sdkModelForClaudeSelection('claude-opus-4-7:1m'), 'claude-opus-4-7[1m]')
+  // A model whose physical window really is 200K must not claim 1M.
+  assert.equal(sdkModelForClaudeSelection('claude-haiku-4-5-20251001'), 'claude-haiku-4-5-20251001')
+  // Already-suffixed ids (the form the SDK itself emits) must not double up.
+  assert.equal(sdkModelForClaudeSelection('claude-opus-5[1m]'), 'claude-opus-5[1m]')
+  // Past the table the preset id is the only evidence of the window, so a
+  // target above 200K implies a 1M model and 200K or below cannot say.
+  assert.equal(sdkModelForClaudeSelection('claude-zeta-1:1m'), 'claude-zeta-1[1m]')
+  assert.equal(sdkModelForClaudeSelection('claude-zeta-1:auto-compact-300k'), 'claude-zeta-1[1m]')
+  assert.equal(sdkModelForClaudeSelection('claude-zeta-1:auto-compact-200k'), 'claude-zeta-1')
+  assert.equal(sdkModelForClaudeSelection('claude-zeta-1'), 'claude-zeta-1')
   assert.equal(dataUrlToContentBlock('not a data url'), null)
   assert.equal(dataUrlToContentBlock(''), null)
   const block = dataUrlToContentBlock('data:image/png;base64,iVBORw0KGgo=')

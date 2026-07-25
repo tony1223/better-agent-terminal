@@ -96,14 +96,49 @@ export const CLAUDE_PRESET_SDK_MODELS = new Map(
 // The regex fallbacks keep presets working for remote clients even when a
 // preset id is newer than the table above.
 const AUTO_COMPACT_SUFFIX = /^(.+):auto-compact-(\d+)k$/
-const CONTEXT_ONLY_SUFFIX = /^(.+):\d+m$/
+const CONTEXT_ONLY_SUFFIX = /^(.+):(\d+)m$/
 
+// Physical window per base id, plus the `[1m]` alias of it. Deliberately not
+// CLAUDE_MODEL_CONTEXT_WINDOWS, which maps preset ids to their compact target
+// rather than to the window the model actually has.
+const CLAUDE_BASE_CONTEXT_WINDOWS = new Map(
+  CLAUDE_MODEL_TABLE.flatMap(def =>
+    def.contextWindow >= 1_000_000
+      ? [[def.id, def.contextWindow], [`${def.id}[1m]`, def.contextWindow]]
+      : [[def.id, def.contextWindow]],
+  ),
+)
+
+// Claude Code takes the 1M window from a `[1m]` suffix on the model id and
+// strips it again before the request reaches the provider, so a bare id runs
+// at 200K however large the model's physical window is. `impliedWindow` is
+// what the preset id itself asked for, used only when the table has never
+// heard of the model.
+function withContextSuffix(baseId, impliedWindow = 0) {
+  const window = CLAUDE_BASE_CONTEXT_WINDOWS.get(baseId) ?? impliedWindow
+  return window > 200_000 ? `${baseId}[1m]` : baseId
+}
+
+/**
+ * The model id to hand the CLI for a selection.
+ *
+ * Re-attaching `[1m]` is the whole point: dropping it made `:1m` and
+ * `:auto-compact-300k` both resolve to a bare id that silently ran at 200K,
+ * which in turn put the 300K compact target above the real window where it
+ * could never fire.
+ */
 export function sdkModelForClaudeSelection(model) {
   if (!model) return undefined
+  if (model.endsWith('[1m]')) return model
   const mapped = CLAUDE_PRESET_SDK_MODELS.get(model)
-  if (mapped) return mapped
-  const m = AUTO_COMPACT_SUFFIX.exec(model) || CONTEXT_ONLY_SUFFIX.exec(model)
-  return m ? m[1] : model
+  if (mapped) return withContextSuffix(mapped)
+  // Past the table: the preset id still names the window it wants, and
+  // anything beyond 200K is only reachable on a 1M model.
+  const auto = AUTO_COMPACT_SUFFIX.exec(model)
+  if (auto) return withContextSuffix(auto[1], Number(auto[2]) * 1_000)
+  const contextOnly = CONTEXT_ONLY_SUFFIX.exec(model)
+  if (contextOnly) return withContextSuffix(contextOnly[1], Number(contextOnly[2]) * 1_000_000)
+  return withContextSuffix(model)
 }
 
 // Auto-compact window a preset id encodes: a number for auto-compact
