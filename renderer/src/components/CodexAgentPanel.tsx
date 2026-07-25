@@ -4105,6 +4105,12 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
       const inHiddenSummary = inLines.length > 3
         ? `+${inLines.length - 3} lines`
         : `+${Math.max(0, inContent.length - inPreview.length).toLocaleString()} chars`
+      // The header already prints the summary, and for single-field inputs
+      // (file_path / pattern / url / short commands) toolInputContent returns
+      // that exact same string — an IN row there costs a line and says nothing.
+      // The full input stays one click away via the header's expand toggle.
+      const headerSummary = desc ? '' : toolInputSummary(item.toolName, item.input)
+      const showInRow = !!inContent.trim() && inContent !== headerSummary
       return (
         <div key={item.id || index} className="tl-item" data-tool-id={item.id}>
           <div className={`tl-dot ${dotClass}`} />
@@ -4114,13 +4120,15 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
               {shellInvocation && <span className="claude-tool-shell">| {shellInvocation.shell} |</span>}
               {item.isDeferred && <span className="claude-tool-badge claude-deferred-badge">deferred</span>}
               {desc && <span className="claude-tool-desc">{desc}</span>}
-              {!desc && <span className="claude-tool-summary">{toolInputSummary(item.toolName, item.input)}</span>}
+              {!desc && <span className="claude-tool-summary">{headerSummary}</span>}
               {item.timestamp > 0 && <span className="claude-tool-time" title={formatFullTimestamp(item.timestamp)}>{formatTimestamp(item.timestamp)}</span>}
             </div>
             {item.denyReason && (
               <div className="claude-tool-reason">Reason: {item.denyReason}</div>
             )}
+            {(showInRow || !!item.result) && (
             <div className="claude-tool-blocks">
+              {showInRow && (
               <div
                 className="claude-tool-row"
                 onClick={() => handleCopyBlock(inContent, inBlockId)}
@@ -4142,6 +4150,7 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
                   {copiedId === inBlockId ? '✓' : '⧉'}
                 </span>
               </div>
+              )}
               {item.result && (() => {
                 const { outText, isLongOutput, outPreviewLines, reminders, errors } = getOrComputeToolRender(
                   toolRenderCacheRef.current,
@@ -4245,6 +4254,7 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
                 )
               })()}
             </div>
+            )}
             {item.denied && (
               <div className="claude-tool-interrupted">{t('claude.toolInterrupted')}</div>
             )}

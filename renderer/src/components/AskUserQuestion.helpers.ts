@@ -92,6 +92,43 @@ export function wrapPreviewHtml(inner: string): string {
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><style>html,body{margin:0;padding:8px;background:transparent;font-family:-apple-system,"Segoe UI",Roboto,sans-serif;}</style></head><body>${inner}</body></html>`
 }
 
+// The SDK reports the picks back to the model as
+// `Your questions have been answered: "<question>"="<answer>", …`, and that
+// result string is the only durable record of what the user chose: the
+// renderer stores the original `tool_use` input, and the `answers` the sidecar
+// merges into `updatedInput` never reach it. Parsing the result therefore also
+// survives a session replayed from a transcript.
+export function parseAskUserAnswers(resultText: string): Map<string, string> {
+  const answers = new Map<string, string>()
+  // Questions and answers are quoted, so stop each capture at the quote that
+  // is followed by `=` (question) or by `,` / `.` / end (answer).
+  const pairs = /"([^"]*)"\s*=\s*"([^"]*)"/g
+  for (const match of resultText.matchAll(pairs)) {
+    answers.set(match[1], match[2])
+  }
+  return answers
+}
+
+// Renders an answered AskUserQuestion as prompt-history text. The user's picks
+// steer the rest of the turn exactly like a typed prompt does, so the history
+// lists them alongside real prompts. Returns null while the tool is still
+// pending, since there is no answer to show yet.
+export function formatAskUserPrompt(input: Record<string, unknown>, resultText: string): string | null {
+  if (!resultText.trim()) return null
+  const rawQuestions = Array.isArray(input.questions) ? input.questions : []
+  const questions = rawQuestions
+    .map((question, index) => normalizeAskUserQuestion(question, index))
+    .filter((question): question is AskUserQuestion => !!question)
+  const answers = parseAskUserAnswers(resultText)
+  if (questions.length === 0 || answers.size === 0) return resultText.trim()
+
+  const blocks = questions.map(question => {
+    const answer = answers.get(question.question) ?? answers.get(question.header)
+    return `Q: ${question.question}\nA: ${answer ?? '(no answer recorded)'}`
+  })
+  return blocks.join('\n\n')
+}
+
 export function summarizeAskUserInput(input: Record<string, unknown>): string | null {
   const rawQuestions = Array.isArray(input.questions) ? input.questions : []
   const questions = rawQuestions
