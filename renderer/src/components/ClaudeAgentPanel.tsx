@@ -55,6 +55,10 @@ interface SessionMeta {
   callCacheRead?: number
   callCacheWrite?: number
   lastQueryCalls?: number
+  // Lifetime sums over every API request of the session. inputTokens /
+  // outputTokens above describe only the last request (the context window).
+  totalInputTokens?: number
+  totalOutputTokens?: number
   permissionMode?: string
   effort?: string
   modelUsage?: Record<string, { inputTokens: number; outputTokens: number; cacheReadInputTokens: number; cacheCreationInputTokens: number; costUSD: number }>
@@ -6104,7 +6108,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
           sandbox: () => null,
           approval: () => null,
           tokens: () => !sessionMeta ? null : (
-            <span key="tokens" className="claude-statusline-item claude-statusline-clickable" title={`context: ${(sessionMeta.contextTokens || 0).toLocaleString()} tok\ncumulative in: ${sessionMeta.inputTokens.toLocaleString()} / out: ${sessionMeta.outputTokens.toLocaleString()}\nclick to show context breakdown`}
+            <span key="tokens" className="claude-statusline-item claude-statusline-clickable" title={`context: ${(sessionMeta.contextTokens || 0).toLocaleString()} tok\nlast request in: ${sessionMeta.inputTokens.toLocaleString()} / out: ${sessionMeta.outputTokens.toLocaleString()}\nsession total in: ${(sessionMeta.totalInputTokens ?? 0).toLocaleString()} / out: ${(sessionMeta.totalOutputTokens ?? 0).toLocaleString()}\nclick to show context breakdown`}
               onClick={() => { host.claude.getContextUsage(sessionId).then(u => { if (u) setContextUsagePopup(u) }).catch(() => {}) }}>
               {(sessionMeta.contextTokens || (sessionMeta.inputTokens + sessionMeta.outputTokens)).toLocaleString()} tok
             </span>
@@ -6128,7 +6132,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
               ? `auto-compact threshold: ${compactWindow.toLocaleString()} tokens\nmodel context window: ${sessionMeta.contextWindow.toLocaleString()} tokens\npercentage uses the auto-compact threshold`
               : `model context window: ${sessionMeta.contextWindow.toLocaleString()} tokens`
             return (
-              <span key="contextPct" className="claude-statusline-item claude-statusline-clickable" style={{ color: ctxColor }} title={`context: ${ctxTokens.toLocaleString()} / ${effectiveWindow.toLocaleString()} tokens\n${denominatorLabel}\ntotal: ${(sessionMeta.inputTokens + sessionMeta.outputTokens).toLocaleString()} tok\nclick to show context breakdown`}
+              <span key="contextPct" className="claude-statusline-item claude-statusline-clickable" style={{ color: ctxColor }} title={`context: ${ctxTokens.toLocaleString()} / ${effectiveWindow.toLocaleString()} tokens\n${denominatorLabel}\nsession total: ${((sessionMeta.totalInputTokens ?? 0) + (sessionMeta.totalOutputTokens ?? 0)).toLocaleString()} tok\nclick to show context breakdown`}
                 onClick={() => { host.claude.getContextUsage(sessionId).then(u => { if (u) setContextUsagePopup(u) }).catch(() => {}) }}>
                 ctx {pct}%
               </span>

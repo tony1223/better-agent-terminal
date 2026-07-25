@@ -575,8 +575,8 @@ registerHandler('claude.getSessionMeta', async (params) => {
   return buildSessionMeta(s)
 })
 
-// claude.getContextUsage: surface the cached usage from the last
-// stream_event / result for this session in a shape the renderer's
+// claude.getContextUsage: surface the cached usage from the last API request
+// (lastUsage, never the result frame's lifetime sum) in a shape the renderer's
 // ContextUsagePopup understands (subset of SDKControlGetContextUsageResponse:
 // categories[], totalTokens, maxTokens, percentage, model, plus
 // optional apiUsage). We return null if no turn has completed yet —

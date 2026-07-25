@@ -3245,9 +3245,10 @@ async function inProcess() {
   assert.equal(expectedContextWindowForModel(undefined), null)
   assert.equal(expectedContextWindowForModel('totally-unknown-model'), null)
 
-  // claude.getContextUsage: cached usage from stream_event + result.
-  // Inject a fake SDK that streams a message_start with usage, a result
-  // with final usage, then verify the handler returns the right shape.
+  // claude.getContextUsage: cached usage from the LAST API request.
+  // Inject a fake SDK that streams a message_start with usage, then a result
+  // whose usage is the query's running total, and verify the handler reports
+  // the request footprint — not the lifetime sum.
   __setSdkOverrideForTests({
     query() {
       const messages = [
@@ -3267,20 +3268,34 @@ async function inProcess() {
       params: { sessionId: 'cu-1', options: { cwd: '/x', model: 'claude-sonnet-4-6' } } })
     const preReply = await dispatch({ jsonrpc: '2.0', id: 291, method: 'claude.getContextUsage', params: { sessionId: 'cu-1' } })
     assert.equal(preReply.result, null)
-    // Run a turn. result.usage should override the mid-stream estimate.
+    // Run a turn. SDKResultMessage.usage sums every API request of the query,
+    // so it must NOT override the message_start footprint — a long session
+    // otherwise reports millions of context tokens (statusline read "ctx 778%"
+    // of a 300K window for a session actually sitting at ~77K).
     await dispatch({ jsonrpc: '2.0', id: 292, method: 'claude.sendMessage', params: { sessionId: 'cu-1', prompt: 'hi' } })
     const postReply = await dispatch({ jsonrpc: '2.0', id: 293, method: 'claude.getContextUsage', params: { sessionId: 'cu-1' } })
     const cu = postReply.result
     assert.ok(cu, 'expected non-null context usage after turn')
-    assert.equal(cu.totalTokens, 150 + 50 + 250)  // input + creation + read
+    assert.equal(cu.totalTokens, 100 + 50 + 200)  // last request: input + creation + read
     assert.equal(cu.maxTokens, 1000000)  // claude-sonnet-4-6 = 1M
-    assert.equal(cu.percentage, Math.round((450 / 1000000) * 100))
+    assert.equal(cu.percentage, Math.round((350 / 1000000) * 100))
     assert.equal(cu.model, 'claude-sonnet-4-6')
-    assert.equal(cu.apiUsage.input_tokens, 150)
-    assert.equal(cu.apiUsage.output_tokens, 30)
+    assert.equal(cu.apiUsage.input_tokens, 100)
+    assert.equal(cu.apiUsage.output_tokens, 0)
     assert.equal(cu.apiUsage.cache_creation_input_tokens, 50)
-    assert.equal(cu.apiUsage.cache_read_input_tokens, 250)
-    assert.deepEqual(cu.categories, [{ name: 'Context', tokens: 450, color: '#8B5CF6' }])
+    assert.equal(cu.apiUsage.cache_read_input_tokens, 200)
+    assert.deepEqual(cu.categories, [{ name: 'Context', tokens: 350, color: '#8B5CF6' }])
+    // The same split in session meta: contextTokens/ctx% read the request
+    // footprint, while cost / turns / total*Tokens keep the lifetime sums.
+    const cuMeta = await dispatch({ jsonrpc: '2.0', id: 2931, method: 'claude.getSessionMeta', params: { sessionId: 'cu-1' } })
+    assert.equal(cuMeta.result.contextTokens, 350)
+    assert.equal(cuMeta.result.inputTokens, 100)
+    assert.equal(cuMeta.result.cacheReadTokens, 200)
+    assert.equal(cuMeta.result.cacheCreationTokens, 50)
+    assert.equal(cuMeta.result.totalInputTokens, 150 + 50 + 250)
+    assert.equal(cuMeta.result.totalOutputTokens, 30)
+    assert.equal(cuMeta.result.totalCost, 0.0042)
+    assert.equal(cuMeta.result.numTurns, 1)
   } finally {
     __setSdkOverrideForTests(undefined)
   }
