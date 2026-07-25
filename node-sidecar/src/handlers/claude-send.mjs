@@ -316,6 +316,42 @@ function currentContextTokens(s) {
     + (u.cache_read_input_tokens || 0)
 }
 
+function usageNumber(usage, key, fallback) {
+  const value = usage?.[key]
+  return typeof value === 'number' ? value : fallback
+}
+
+// One API request's usage — the live context footprint, never a running sum.
+// `base` carries the previous snapshot for the SAME request: message_delta
+// only reports the fields it changes (usually output_tokens), so merging keeps
+// the input/cache numbers message_start established instead of zeroing them.
+// Pass null whenever a new request starts.
+function requestUsageSnapshot(base, usage, model) {
+  const inputTokens = usageNumber(usage, 'input_tokens', base?.input_tokens ?? 0)
+  const outputTokens = usageNumber(usage, 'output_tokens', base?.output_tokens ?? 0)
+  const cacheCreationTokens = usageNumber(usage, 'cache_creation_input_tokens', base?.cache_creation_input_tokens ?? 0)
+  const cacheReadTokens = usageNumber(usage, 'cache_read_input_tokens', base?.cache_read_input_tokens ?? 0)
+  return {
+    input_tokens: inputTokens,
+    output_tokens: outputTokens,
+    cache_creation_input_tokens: cacheCreationTokens,
+    cache_read_input_tokens: cacheReadTokens,
+    totalTokens: inputTokens + cacheCreationTokens + cacheReadTokens,
+    model: model || base?.model || null,
+  }
+}
+
+// Sub-agent (Task) requests carry their own context, so their usage must not
+// overwrite the main thread's footprint. A zero request-side total means the
+// frame carried no real usage (synthetic/error assistant messages) — keeping
+// the previous snapshot beats dropping ctx% to 0.
+function noteRequestUsage(s, usage, { parentToolUseId, isNewRequest }) {
+  if (!usage || parentToolUseId) return
+  const snapshot = requestUsageSnapshot(isNewRequest ? null : s.lastUsage, usage, s.model)
+  if (snapshot.totalTokens <= 0) return
+  s.lastUsage = snapshot
+}
+
 function resultErrorMessage(msg) {
   for (const value of [msg?.message, msg?.error, msg?.result]) {
     if (typeof value === 'string' && value.trim()) return value.trim()
@@ -411,24 +447,16 @@ function processMessage(s, sessionId, msg) {
     return
   }
   if (t === 'stream_event') {
-    markRuntimeResponded(s, sessionId)
     const ev = msg.event
+    // Record usage before markRuntimeResponded so the status event it emits
+    // already carries this request's context footprint.
     if (ev && (ev.type === 'message_start' || ev.type === 'message_delta')) {
-      const u = ev.usage || ev.message?.usage
-      if (u && !msg.parent_tool_use_id) {
-        const inputTotal = (u.input_tokens || 0)
-          + (u.cache_creation_input_tokens || 0)
-          + (u.cache_read_input_tokens || 0)
-        s.lastUsage = {
-          input_tokens: u.input_tokens || 0,
-          output_tokens: u.output_tokens || s.lastUsage?.output_tokens || 0,
-          cache_creation_input_tokens: u.cache_creation_input_tokens || 0,
-          cache_read_input_tokens: u.cache_read_input_tokens || 0,
-          totalTokens: inputTotal,
-          model: s.model || s.lastUsage?.model || null,
-        }
-      }
+      noteRequestUsage(s, ev.usage || ev.message?.usage, {
+        parentToolUseId: msg.parent_tool_use_id,
+        isNewRequest: ev.type === 'message_start',
+      })
     }
+    markRuntimeResponded(s, sessionId)
     if (ev && ev.type === 'content_block_delta') {
       const d = ev.delta
       if (d?.text) {
@@ -455,6 +483,13 @@ function processMessage(s, sessionId, msg) {
     return
   }
   if (t === 'assistant') {
+    // The assistant frame carries the completed request's usage. Streaming
+    // builds already recorded it from message_start; capture it here too so
+    // ctx% still tracks the context window when partial messages are off.
+    noteRequestUsage(s, msg.message?.usage, {
+      parentToolUseId: msg.parent_tool_use_id,
+      isNewRequest: true,
+    })
     markRuntimeResponded(s, sessionId)
     // Flatten SDK content blocks so the renderer's ClaudeMessage shape
     // (flat `thinking` field) is populated even when streaming partials
@@ -552,19 +587,23 @@ function processMessage(s, sessionId, msg) {
   }
   if (t === 'result') {
     if (msg.usage) {
+      // SDKResultMessage.usage sums every API request of the query (each turn,
+      // each tool round-trip), so it is lifetime usage — not the context
+      // window. Writing it to lastUsage is what made the status line read
+      // "2,334,145 tok / ctx 778%" for a session sitting at ~77K of context.
       const u = msg.usage
       const inputTotal = (u.input_tokens || 0)
         + (u.cache_creation_input_tokens || 0)
         + (u.cache_read_input_tokens || 0)
-      s.lastUsage = {
+      s.totalUsage = {
         input_tokens: u.input_tokens || 0,
         output_tokens: u.output_tokens || 0,
         cache_creation_input_tokens: u.cache_creation_input_tokens || 0,
         cache_read_input_tokens: u.cache_read_input_tokens || 0,
         totalTokens: inputTotal,
-        model: s.model || s.lastUsage?.model || null,
-        totalCostUsd: msg.total_cost_usd ?? s.lastUsage?.totalCostUsd ?? 0,
-        numTurns: msg.num_turns ?? s.lastUsage?.numTurns ?? 0,
+        model: s.model || s.totalUsage?.model || null,
+        totalCostUsd: msg.total_cost_usd ?? s.totalUsage?.totalCostUsd ?? 0,
+        numTurns: msg.num_turns ?? s.totalUsage?.numTurns ?? 0,
       }
     }
     if (s.interruptRequested) {

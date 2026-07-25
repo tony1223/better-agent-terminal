@@ -651,10 +651,16 @@ export async function sendCodexMessage(params) {
         completed = true
         const turnId = codexEventTurnId(event) || session.currentTurnId
         const usage = event.usage || {}
-        session.metadata.inputTokens += usage.input_tokens || 0
-        session.metadata.outputTokens += usage.output_tokens || 0
+        const turnInputTokens = usage.input_tokens || 0
+        const turnOutputTokens = usage.output_tokens || 0
+        session.metadata.inputTokens += turnInputTokens
+        session.metadata.outputTokens += turnOutputTokens
         session.metadata.cacheReadTokens += usage.cached_input_tokens || 0
-        session.metadata.contextTokens = session.metadata.inputTokens + session.metadata.outputTokens + session.metadata.cacheReadTokens
+        // contextTokens is the latest turn's footprint, not the lifetime sum —
+        // ctx% divides it by one context window. Cached input is a subset of
+        // input_tokens in the Codex protocol, so adding it again double-counts.
+        // Mirrors CodexSession::metadata in src-tauri/src/codex_app_server.rs.
+        session.metadata.contextTokens = turnInputTokens + turnOutputTokens
         session.metadata.lastQueryCalls = 1
         session.metadata.durationMs = Date.now() - (session.startTime || startedAt)
         session.metadata.lastTurnDurationMs = Date.now() - startedAt

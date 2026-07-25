@@ -83,11 +83,16 @@ export function ensureSession(sessionId) {
       // clientMessageId must acknowledge the accepted turn instead of
       // queueing the prompt a second time.
       clientMessageRequests: new Map(),
-      // Cached usage stats updated from stream_event message_start /
-      // message_delta + the final SDKResultSuccess.usage. Surfaced to
-      // the renderer via claude.getContextUsage between turns; null
-      // until the first turn completes.
+      // One API request's usage — the live context footprint. Updated from
+      // stream_event message_start / message_delta and the assistant frame.
+      // Surfaced to the renderer via claude.getContextUsage; null until the
+      // first request responds.
       lastUsage: null,
+      // SDKResultMessage.usage: the running sum over every API request of the
+      // query, plus total cost / turn count. Deliberately kept apart from
+      // lastUsage — dividing a lifetime sum by one context window produced
+      // ctx% readings like 778%.
+      totalUsage: null,
       // Pending canUseTool / AskUserQuestion resolutions keyed by the
       // tool_use_id the SDK supplies. Populated when the canUseTool
       // callback emits a permission-request / ask-user event; the
@@ -165,10 +170,17 @@ export function updateSessionToolResult(session, toolId, updates) {
 // must always emit the full shape with 0 / null defaults.
 //
 // lastUsage is captured snake_case from SDK message_start/message_delta
-// /result events; translate to the camelCase shape the renderer expects.
+// /assistant events; translate to the camelCase shape the renderer expects.
+//
+// context*/input/output/cache fields describe the LAST API request, because
+// that is what occupies the context window and what the renderer's ctx% and
+// cache-hit ratio divide by. Lifetime numbers (cost, turns, total*Tokens) come
+// from totalUsage — the result frame's running sum — and must never feed
+// contextTokens.
 export function buildSessionMeta(s) {
   if (!s) return null
   const u = s.lastUsage
+  const total = s.totalUsage
   const inputTokens = u?.input_tokens ?? 0
   const outputTokens = u?.output_tokens ?? 0
   const cacheReadTokens = u?.cache_read_input_tokens ?? 0
@@ -183,16 +195,22 @@ export function buildSessionMeta(s) {
     autoCompactWindow: s.autoCompactWindow ?? null,
     sdkSessionId: s.sdkSessionId ?? null,
     cwd: (s.options && typeof s.options === 'object' && typeof s.options.cwd === 'string') ? s.options.cwd : null,
-    totalCost: u?.totalCostUsd ?? 0,
+    totalCost: total?.totalCostUsd ?? 0,
     inputTokens,
     outputTokens,
     durationMs: 0,
-    numTurns: u?.numTurns ?? 0,
+    numTurns: total?.numTurns ?? 0,
     contextWindow,
     maxOutputTokens: 0,
     contextTokens,
     cacheReadTokens,
     cacheCreationTokens,
+    // Lifetime totals for the tooltip: request-side (uncached + cache write +
+    // cache read) and output, summed over every request of the query.
+    totalInputTokens: (total?.input_tokens ?? 0)
+      + (total?.cache_creation_input_tokens ?? 0)
+      + (total?.cache_read_input_tokens ?? 0),
+    totalOutputTokens: total?.output_tokens ?? 0,
     callCacheRead: 0,
     callCacheWrite: 0,
     lastQueryCalls: 0,
