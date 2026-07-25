@@ -2,6 +2,18 @@
 // Report file count and byte size for resources listed in tauri.conf.json.
 // Use after `pnpm run prepare:tauri-bundle` to verify the packaged sidecar
 // resource surface is staying small enough for cold-start work.
+//
+// The all-in-one cap (--max-mb in package.json) measures UNCOMPRESSED resources
+// and is dominated by three vendored single-file binaries, each embedding its
+// own runtime: codex.exe (~343 MB), claude.exe (~253 MB), node.exe (~88 MB).
+// Those come verbatim from upstream npm platform packages, so the total tracks
+// upstream growth and must be raised when they legitimately grow — it is not a
+// budget we can trim from our own code. Size is also platform-dependent (the
+// win32-arm64 codex binary is ~49 MB smaller than win32-x64), so the cap has to
+// clear the largest platform. Keep enough headroom for upstream drift while
+// staying under ~1 GB, which is where a second platform's binaries leaking into
+// the bundle would land. User-facing installer limits are enforced separately
+// on the COMPRESSED artifacts by scripts/verify-release-asset-sizes.js.
 
 import { lstat, readdir, readFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'

@@ -15,7 +15,7 @@
     "verify:packaged-claude-binaries": "node scripts/verify-packaged-claude-binaries.js",
     "verify:release-asset-sizes": "node scripts/verify-release-asset-sizes.js",
     "verify:tauri-resources": "pnpm run verify:tauri-resources:all-in-one",
-    "verify:tauri-resources:all-in-one": "node scripts/check-tauri-resources.mjs --mode=all-in-one --strict-missing --max-files=7000 --max-mb=750",
+    "verify:tauri-resources:all-in-one": "node scripts/check-tauri-resources.mjs --mode=all-in-one --strict-missing --max-files=7000 --max-mb=850",
     "verify:tauri-resources:lightweight": "node scripts/check-tauri-resources.mjs --mode=lightweight --strict-missing --max-files=50 --max-mb=10",
     "verify:tauri-preview-readiness": "pnpm run verify:tauri-preview-readiness:all-in-one",
     "verify:tauri-preview-readiness:all-in-one": "node scripts/check-tauri-preview-readiness.mjs --mode=all-in-one",
