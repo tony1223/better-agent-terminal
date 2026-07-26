@@ -152,8 +152,29 @@ strip = "symbols"
 # assembly, process spawning and syscall-bound IO — the PTY reader is a blocking
 # 4 KB read() whose cost is the syscall, not the codegen.
 #
-# A package-scoped override also only changes THIS package's fingerprint, so the
-# seven cached dependency target dirs survive adopting it. Editing
-# [profile.release] above would invalidate all of them.
+# Adopting this cost exactly one release, and the note that used to sit here got
+# the reason wrong, so to be precise: scoping the override to this package does
+# keep CARGO's fingerprint local — the dependencies' artifacts stay valid and
+# cargo rebuilds only this crate. But that is not what decides whether CI has a
+# target dir to rebuild *into*. Swatinem/rust-cache derives its GHA cache key
+# from `JSON.stringify(toml.parse(Cargo.toml))` (config.ts), i.e. the whole
+# parsed manifest — so a new [profile.*] table is a new key, a new key restores
+# nothing, and all 806 dependencies compile from scratch.
+#
+# Measured on the same windows-latest leg, same rustc 1.97.1, Cargo.lock
+# untouched:
+#   v3.1.54-pre.1   cache hit     94s
+#   v3.1.54-pre.2   cache miss   908s   <- the cost of adopting this
+# One-time: pre.2 saved the cache under the new key and its retry hit it again.
+#
+# What that hashing does NOT include, from the same source: comments (TOML
+# parsing drops them) and package.version (normalised to "0.0.0"). Editing this
+# comment block, or bumping the version, is therefore free.
+#
+# The corollary is a window that was missed here. pre.2 invalidated all seven
+# target dirs anyway, which was exactly the moment codegen-units above should
+# have been dropped in the same commit, for nothing. It wasn't. Bundle it with
+# whatever invalidates the caches next — a Cargo.lock change or a toolchain bump
+# — rather than spending another full-rebuild release on ~4 seconds.
 [profile.release.package.better-agent-terminal]
 opt-level = "z"
