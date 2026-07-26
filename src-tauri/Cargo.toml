@@ -129,3 +129,31 @@ codegen-units = 256
 # Drop debug symbols from the shipped binary. Smaller .exe / .dmg, no
 # compile-time cost.
 strip = "symbols"
+
+# 97% of a release build is LLVM optimising this one crate. Measured on a 16-core
+# box, -j 4, dependencies warm so only our crate rebuilds — which is all CI ever
+# compiles:
+#   front-end (cargo check)              4.5s    3%
+#   LLVM optimising our code           120.8s   77%
+#   bin monomorphisation + link         33.8s   22%
+# So neither line count nor core count is the lever. The whole 34k-line crate
+# front-ends in 4.5s, and -j 1/2/4/8/16 measured 184/170/153/163/170s — 4 is the
+# peak and 16 is *slower*. opt-level is the lever. Interleaved, 3 reps each,
+# ranges not overlapping:
+#   opt-level 3    avg 196.9s (189.9-208.1)   49.9 MB exe
+#   opt-level "z"  avg 131.9s (129.4-135.4)   42.9 MB exe
+#
+# Scoped to this package deliberately: all 806 dependencies keep opt-level 3, so
+# every CPU-bound library still gets full optimisation — aes-gcm/aes/cbc/pbkdf2/
+# sha2, flate2, image's PNG decode, rustls, tungstenite framing, and serde_json's
+# parser (this crate deserialises into serde_json::Value rather than derived
+# structs nearly everywhere, so parsing stays inside serde_json instead of being
+# monomorphised in here). What remains in this crate is command dispatch, json!
+# assembly, process spawning and syscall-bound IO — the PTY reader is a blocking
+# 4 KB read() whose cost is the syscall, not the codegen.
+#
+# A package-scoped override also only changes THIS package's fingerprint, so the
+# seven cached dependency target dirs survive adopting it. Editing
+# [profile.release] above would invalidate all of them.
+[profile.release.package.better-agent-terminal]
+opt-level = "z"
