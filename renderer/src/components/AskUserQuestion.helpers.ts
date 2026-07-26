@@ -129,6 +129,81 @@ export function formatAskUserPrompt(input: Record<string, unknown>, resultText: 
   return blocks.join('\n\n')
 }
 
+export interface AskUserAnswerChip {
+  label: string
+  description: string
+  // True when the user typed this into "Other..." instead of picking an offered
+  // option, so the timeline can mark it as their own words.
+  custom: boolean
+}
+
+export interface AskUserQnA {
+  header: string
+  question: string
+  multiSelect: boolean
+  options: AskUserOption[]
+  // Empty while the tool is still pending — nothing was picked yet.
+  answers: AskUserAnswerChip[]
+}
+
+// A multi-select answer comes back as its labels joined with ", ", so the picks
+// cannot be recovered by splitting alone: a label may itself contain ", ".
+// Match the offered labels longest-first instead, and keep whatever is left
+// unmatched as the user's own text.
+function splitAnswerLabels(answerText: string, options: AskUserOption[]): AskUserAnswerChip[] {
+  const trimmed = answerText.trim()
+  if (!trimmed) return []
+  const byLabel = new Map(options.map(option => [option.label, option]))
+  const whole = byLabel.get(trimmed)
+  if (whole) return [{ label: whole.label, description: whole.description, custom: false }]
+
+  const parts = trimmed.split(', ')
+  const chips: AskUserAnswerChip[] = []
+  let start = 0
+  while (start < parts.length) {
+    let matched: AskUserOption | null = null
+    let end = start
+    for (let candidateEnd = parts.length; candidateEnd > start; candidateEnd--) {
+      const option = byLabel.get(parts.slice(start, candidateEnd).join(', '))
+      if (option) {
+        matched = option
+        end = candidateEnd
+        break
+      }
+    }
+    if (matched) {
+      chips.push({ label: matched.label, description: matched.description, custom: false })
+      start = end
+    } else {
+      chips.push({ label: parts[start], description: '', custom: true })
+      start += 1
+    }
+  }
+  return chips
+}
+
+// Pairs each question with what the user picked, so the timeline can render the
+// exchange as the Q&A it is instead of a JSON input next to the SDK's
+// "Your questions have been answered: …" sentence. Pass an empty result while
+// the tool is pending: every entry then carries no answers.
+export function buildAskUserQnA(input: Record<string, unknown>, resultText: string): AskUserQnA[] {
+  const rawQuestions = Array.isArray(input.questions) ? input.questions : []
+  const answers = parseAskUserAnswers(resultText)
+  return rawQuestions
+    .map((question, index) => normalizeAskUserQuestion(question, index))
+    .filter((question): question is AskUserQuestion => !!question)
+    .map(question => ({
+      header: question.header,
+      question: question.question,
+      multiSelect: question.multiSelect,
+      options: question.options,
+      answers: splitAnswerLabels(
+        answers.get(question.question) ?? answers.get(question.header) ?? '',
+        question.options,
+      ),
+    }))
+}
+
 export function summarizeAskUserInput(input: Record<string, unknown>): string | null {
   const rawQuestions = Array.isArray(input.questions) ? input.questions : []
   const questions = rawQuestions

@@ -566,6 +566,7 @@
     "other": "其他...",
     "optionPreview": "選項預覽",
     "multiSelectHint": "可多選",
+    "askAwaitingAnswer": "等待你的回答",
     "resumeSession": "恢復先前的工作階段",
     "loadingSessions": "載入工作階段中...",
     "noSessionsFound": "找不到工作階段",

@@ -567,6 +567,7 @@
     "other": "Other...",
     "optionPreview": "Option preview",
     "multiSelectHint": "Select all that apply",
+    "askAwaitingAnswer": "waiting for your answer",
     "resumeSession": "Resume a previous session",
     "loadingSessions": "Loading sessions...",
     "noSessionsFound": "No sessions found",

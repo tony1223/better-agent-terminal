@@ -548,6 +548,7 @@
     "other": "その他...",
     "optionPreview": "オプションのプレビュー",
     "multiSelectHint": "該当するものをすべて選択",
+    "askAwaitingAnswer": "回答を待っています",
     "resumeSession": "以前のセッションを再開",
     "loadingSessions": "セッションを読み込み中...",
     "noSessionsFound": "セッションが見つかりません",

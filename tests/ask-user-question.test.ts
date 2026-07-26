@@ -1,5 +1,6 @@
 import * as assert from 'assert'
 import {
+  buildAskUserQnA,
   formatAskUserPrompt,
   normalizePendingAskUser,
   parseAskUserAnswers,
@@ -86,5 +87,63 @@ assert.strictEqual(
   ),
   'answers recorded',
 )
+
+// The timeline renders the exchange as Q&A, so each question has to be paired
+// back with the option the user actually picked — description included, since
+// that is what the button explained.
+const qna = buildAskUserQnA(
+  {
+    questions: [
+      {
+        header: 'Mode',
+        question: 'Choose a mode',
+        options: [
+          { label: 'Compact rows', description: 'One line per tool' },
+          { label: 'Full rows', description: 'Everything expanded' },
+        ],
+      },
+      { header: 'Branch', question: 'Choose a branch', options: [{ label: 'main', description: '' }] },
+    ],
+  },
+  answeredResult,
+)
+assert.strictEqual(qna.length, 2)
+assert.deepStrictEqual(qna[0].answers, [
+  { label: 'Compact rows', description: 'One line per tool', custom: false },
+])
+assert.strictEqual(qna[0].options.length, 2)
+assert.deepStrictEqual(qna[1].answers, [{ label: 'main', description: '', custom: false }])
+
+// A multi-select answer arrives as its labels joined with ", " — including
+// labels that contain ", " themselves, so a plain split would shred them.
+// Matching the offered labels longest-first keeps them whole.
+const multi = buildAskUserQnA(
+  {
+    questions: [{
+      header: 'Scope',
+      question: 'What should we do?',
+      multiSelect: true,
+      options: [
+        { label: 'Fix the timeline, then ship', description: 'Comma lives inside the label' },
+        { label: 'Ship as is', description: '' },
+      ],
+    }],
+  },
+  'Your questions have been answered: "What should we do?"="Fix the timeline, then ship, Ship as is, roll it back".',
+)
+assert.deepStrictEqual(multi[0].answers, [
+  { label: 'Fix the timeline, then ship', description: 'Comma lives inside the label', custom: false },
+  { label: 'Ship as is', description: '', custom: false },
+  // Typed into "Other...", so it matches no option and is marked as the user's own words.
+  { label: 'roll it back', description: '', custom: true },
+])
+
+// Pending: the questions are known, the answers are not.
+const pendingQnA = buildAskUserQnA(
+  { questions: [{ header: 'Mode', question: 'Choose a mode', options: [{ label: 'A', description: '' }] }] },
+  '',
+)
+assert.strictEqual(pendingQnA.length, 1)
+assert.deepStrictEqual(pendingQnA[0].answers, [])
 
 console.log('AskUserQuestion normalization: passed')

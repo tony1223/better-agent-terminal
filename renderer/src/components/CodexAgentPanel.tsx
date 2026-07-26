@@ -31,7 +31,8 @@ import { useRafBatchedString } from '../utils/use-raf-batched-string'
 import { translateRuntimeMessage } from '../utils/runtime-status-message'
 import { agentSendResultError, isMissingSessionCwdError } from '../utils/agent-send-recovery'
 import { dispatchWorkerCommand, parseWorkerSlashCommand } from '../utils/worker-command'
-import { normalizePendingAskUser, wrapPreviewHtml } from './AskUserQuestion.helpers'
+import { buildAskUserQnA, normalizePendingAskUser, wrapPreviewHtml } from './AskUserQuestion.helpers'
+import { AgentAskUserQnA } from './AgentAskUserQnA'
 import { autoContinueTurnEndKey, buildCollapsedOutputPreview, formatContentSize, formatElapsed, formatFullTimestamp, formatTimestamp, parseContentBlocks, parseShellInvocation, shouldAutoContinueForTrigger, shouldShowTimeDivider, splitSystemReminders, stringifyToolResult, summarizeToolSearchResult, toolDescription, toolInputContent, toolInputSummary, truncateMiddle } from './CodexAgentPanel.helpers'
 import { toolRowLayout } from './CodexAgentPanel.helpers'
 import type { AutoContinueTrigger } from './CodexAgentPanel.helpers'
@@ -3627,6 +3628,56 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
 
       const dotClass = item.denied ? 'dot-denied' : item.isDeferred ? 'dot-deferred' : item.status === 'running' ? 'dot-running' : item.status === 'completed' ? 'dot-success' : 'dot-error'
       const desc = toolDescription(item.input)
+
+      // AskUserQuestion: render the exchange as Q&A. What the user picked is
+      // part of the conversation, not tool plumbing, so it should not have to be
+      // reconstructed from a JSON input next to the SDK's acknowledgement.
+      if (item.toolName === 'AskUserQuestion') {
+        const resultRaw = item.result ? stringifyToolResult(item.result) : ''
+        const { content: resultText, errors: resultErrors } = splitSystemReminders(parseContentBlocks(resultRaw))
+        const qna = buildAskUserQnA(item.input, resultText)
+        const rowExpanded = expandedTools.has(item.id)
+        // A payload we cannot read falls through to the generic row, which at
+        // least still shows the raw input and output.
+        if (qna.length > 0) {
+          return (
+            <div key={item.id || index} className="tl-item" data-tool-id={item.id}>
+              <div className={`tl-dot ${dotClass}`} />
+              <div className="tl-content">
+                <AgentToolRow
+                  toolName={item.toolName}
+                  isDeferred={item.isDeferred}
+                  desc={desc}
+                  summary={toolInputSummary(item.toolName, item.input)}
+                  timestamp={item.timestamp}
+                  expanded={rowExpanded}
+                  onToggle={() => toggleTool(item.id)}
+                />
+                <AgentAskUserQnA
+                  entries={qna}
+                  expanded={rowExpanded}
+                  onCopy={handleCopyBlock}
+                  copiedId={copiedId}
+                  idPrefix={`qna-${item.id}`}
+                />
+                {resultErrors.length > 0 && (
+                  <div className="claude-tool-blocks">
+                    {resultErrors.map((err, i) => (
+                      <div key={`err${i}`} className="claude-tool-row claude-tool-error-row">
+                        <span className="claude-tool-row-label claude-error-label">{t('claude.err')}</span>
+                        <span className="claude-tool-row-content">{err}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {item.denied && (
+                  <div className="claude-tool-interrupted">{t('claude.toolInterrupted')}</div>
+                )}
+              </div>
+            </div>
+          )
+        }
+      }
 
       if (item.toolName === 'image_gen') {
         const generatedImage = parseGeneratedImageResult(item.result)
