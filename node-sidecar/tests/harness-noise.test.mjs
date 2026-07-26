@@ -11,7 +11,7 @@
 
 import * as assert from 'node:assert/strict'
 
-import { stripTaskNotifications, isHarnessNoiseUserText } from '../src/lib/harness-noise.mjs'
+import { stripTaskNotifications, isHarnessNoiseUserText, isCompactSummaryUserText } from '../src/lib/harness-noise.mjs'
 import { parseTranscriptLine, FRAME_KINDS } from '../src/runtimes/claude-cli-frames.mjs'
 
 let failures = 0
@@ -89,6 +89,39 @@ test('malformed / unclosed tags do not throw and do not leak markup', () => {
   assert.equal(isHarnessNoiseUserText(undefined), true)
   assert.equal(stripTaskNotifications(null), '')
   assert.equal(stripTaskNotifications(42), '42')
+})
+
+// ---- compaction summary ----
+
+const COMPACT_SUMMARY = [
+  'This session is being continued from a previous conversation that ran out of context.',
+  'The summary below covers the earlier portion of the conversation.',
+  '',
+  'Summary:',
+  '1. Primary Request and Intent: ...',
+].join('\n')
+
+test('the compaction summary is tagged, not filtered away', () => {
+  // It is a real prompt — the model was continued with it — so it stays in the
+  // timeline. Only the tag tells the UI to fold it.
+  assert.equal(isCompactSummaryUserText(COMPACT_SUMMARY), true)
+  assert.equal(isHarnessNoiseUserText(COMPACT_SUMMARY), false)
+})
+
+test('the record flag beats the text', () => {
+  assert.equal(isCompactSummaryUserText('anything at all', { isCompactSummary: true }), true)
+  // A record without the flag falls back to the preamble, so old transcripts
+  // written before the flag existed are still recognised.
+  assert.equal(isCompactSummaryUserText(COMPACT_SUMMARY, { uuid: 'u1' }), true)
+})
+
+test('real prompts are not mistaken for a summary', () => {
+  assert.equal(isCompactSummaryUserText('continue from where you left off'), false)
+  // Asking *about* compaction is not being compacted.
+  assert.equal(isCompactSummaryUserText(`why did it print "${COMPACT_SUMMARY}"?`), false)
+  assert.equal(isCompactSummaryUserText(''), false)
+  assert.equal(isCompactSummaryUserText(null), false)
+  assert.equal(isCompactSummaryUserText(undefined, null), false)
 })
 
 // ---- CLI transcript classifier ----

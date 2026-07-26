@@ -18,6 +18,9 @@ export interface ClaudeMessage {
   // echoes the message back, then 'sent' (solid); 'failed' on a real send
   // error. Absent = confirmed / host-originated / local-mode message.
   status?: 'sending' | 'sent' | 'failed'
+  // The SDK's context-compaction summary, replayed as a user turn. A real
+  // prompt, but nothing the human wrote, so the timeline folds it shut.
+  isCompactSummary?: boolean
 }
 
 export interface ClaudeToolCall {

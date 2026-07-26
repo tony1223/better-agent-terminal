@@ -10,7 +10,7 @@ import { sessions, buildSessionMeta, resetSessionTranscript } from '../lib/state
 import { __resolveProjectsDir, archiveFilePath, resolveDataDir } from '../lib/data-paths.mjs'
 import { loadAnthropicSdk } from '../lib/sdk-loader.mjs'
 import { warn as logWarn } from '../lib/logger.mjs'
-import { stripTaskNotifications, isHarnessNoiseUserText } from '../lib/harness-noise.mjs'
+import { stripTaskNotifications, isHarnessNoiseUserText, isCompactSummaryUserText } from '../lib/harness-noise.mjs'
 import { resolveClaudeCliBinaryWithInstall } from './claude-auth.mjs'
 
 function historyProjectDirCandidates(cwd) {
@@ -106,6 +106,10 @@ function historyItemsFromJsonl(raw, sessionId) {
           role: 'user',
           content: text,
           timestamp: ts,
+          // Kept in the timeline (the model really was prompted with it) but
+          // tagged, so the UI folds it instead of passing a 15k-character
+          // summary off as something the human typed.
+          ...(isCompactSummaryUserText(text, obj) ? { isCompactSummary: true } : {}),
         })
       }
       continue
@@ -433,6 +437,7 @@ registerHandler('claude.fetchSubagentMessages', async (params) => {
           id: `sa-user-${items.length}`,
           sessionId, role: 'user', content: userText,
           parentToolUseId: agentToolUseId, timestamp: ts,
+          ...(isCompactSummaryUserText(userText, msg) ? { isCompactSummary: true } : {}),
         })
       }
     } else if (msg?.type === 'assistant') {

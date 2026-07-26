@@ -1229,6 +1229,12 @@ fn strip_task_notifications(text: &str) -> String {
     out.trim().to_string()
 }
 
+/// Mirrors `isCompactSummaryUserText` in `node-sidecar/src/lib/harness-noise.mjs`.
+/// A session resumed from a compacted transcript opens with the summary, and
+/// naming the row after it would label every such session identically.
+const COMPACT_SUMMARY_PREAMBLE: &str =
+    "this session is being continued from a previous conversation";
+
 fn normalize_session_hint_text(text: &str) -> Option<String> {
     // Strip before collapsing whitespace, so removing a block from the middle of
     // a prompt does not leave the double space its surrounding spaces would.
@@ -1237,6 +1243,14 @@ fn normalize_session_hint_text(text: &str) -> Option<String> {
     if normalized.is_empty()
         || normalized == "[Request interrupted by user for tool use]"
         || normalized.starts_with("<local-command-caveat>")
+    {
+        return None;
+    }
+    // `get` rather than a slice: the preamble length can land mid-codepoint on
+    // a CJK prompt, and indexing there panics.
+    if normalized
+        .get(..COMPACT_SUMMARY_PREAMBLE.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(COMPACT_SUMMARY_PREAMBLE))
     {
         return None;
     }
@@ -5511,6 +5525,35 @@ mod tests {
             None
         );
         assert_eq!(normalize_session_hint_text("   "), None);
+    }
+
+    #[test]
+    fn normalize_session_hint_text_skips_the_compaction_summary() {
+        // A session resumed from a compacted transcript opens with this, and it
+        // would otherwise become the row's name.
+        assert_eq!(
+            normalize_session_hint_text(
+                "This session is being continued from a previous conversation that ran out of \
+                 context. The summary below covers the earlier portion of the conversation."
+            ),
+            None
+        );
+        // Leading whitespace and casing must not smuggle it past.
+        assert_eq!(
+            normalize_session_hint_text(
+                "\n  this SESSION is being continued from a previous conversation ..."
+            ),
+            None
+        );
+        // Shorter than the preamble, and CJK before the cut-off: neither may panic.
+        assert_eq!(
+            normalize_session_hint_text("This session"),
+            Some("This session".to_string())
+        );
+        assert_eq!(
+            normalize_session_hint_text("這個 session 為什麼會被壓縮？我想知道上下文怎麼算的"),
+            Some("這個 session 為什麼會被壓縮？我想知道上下文怎麼算的".to_string())
+        );
     }
 
     #[test]

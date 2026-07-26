@@ -4528,6 +4528,27 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
         </div>
       )
     }
+    // Auto-compaction replays a summary of the whole conversation as a user
+    // turn. Folded shut by default: it belongs in the timeline (the model was
+    // prompted with it) but shown raw it buries the session under itself.
+    if (msg.role === 'user' && msg.isCompactSummary) {
+      return (
+        <div
+          key={msg.id || index}
+          className="tl-item tl-item-user"
+          data-user-msg-id={msg.id}
+          ref={(el) => setUserMsgRef(msg.id, el)}
+        >
+          <div className="tl-dot dot-user" />
+          <div className="tl-content">
+            <details className="claude-compact-summary">
+              <summary>Context summary (auto-compacted)</summary>
+              <div className="claude-compact-summary-body">{msg.content}</div>
+            </details>
+          </div>
+        </div>
+      )
+    }
     if (msg.role === 'user') {
       return (
         <div
