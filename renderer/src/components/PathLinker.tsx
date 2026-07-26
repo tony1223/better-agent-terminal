@@ -1,6 +1,9 @@
 import { host } from '../host-api'
 import { useState, useEffect, useCallback, useRef, Fragment } from 'react'
 import { useTranslation } from 'react-i18next'
+import { RevealPathMenu, type RevealPathTarget } from './RevealPathMenu'
+import { formatErrorMessage } from '../utils/error-message'
+import { stripLineSuffix } from '../utils/file-path'
 import hljs from 'highlight.js/lib/core'
 import 'highlight.js/styles/vs2015.css'
 // Register only the languages we actually use (saves ~800KB vs full highlight.js)
@@ -196,31 +199,8 @@ interface FilePreviewModalProps {
   onClose: () => void
 }
 
-// Strip a trailing ":line" or ":line:col" hint from a path. Handles Windows
-// drive letters (e.g. "C:\foo\bar.cs:50") by only stripping after a non-drive
-// colon. Some callers (chat citations, stdout pastes) include the line suffix;
-// fs.stat / fs.readFile would reject it on Windows because ':' is invalid in
-// file names.
-// Tauri rejects commands with a plain object, a bare string, or an Error
-// depending on where the failure happened, so every call site needs the same
-// unwrapping before it can show the user anything useful.
-function errorMessage(err: unknown, fallback: string): string {
-  if (err instanceof Error) return err.message
-  if (typeof err === 'string') return err
-  if (err && typeof err === 'object' && 'message' in err) {
-    return String((err as { message: unknown }).message)
-  }
-  return fallback
-}
-
-function stripLineSuffix(p: string): { path: string; line?: number; column?: number } {
-  if (!p) return { path: p }
-  const m = p.match(/^(.+?\.[A-Za-z0-9]{1,10}):(\d+)(?::(\d+))?$/)
-  if (!m) return { path: p }
-  return { path: m[1], line: Number(m[2]), column: m[3] ? Number(m[3]) : undefined }
-}
-
 export function FilePreviewModal({ filePath: rawFilePath, onClose }: FilePreviewModalProps) {
+  const { t } = useTranslation()
   const { path: filePath } = stripLineSuffix(rawFilePath)
   const [content, setContent] = useState<string | null>(null)
   const [imageUrl, setImageUrl] = useState<string | null>(null)
@@ -276,9 +256,23 @@ export function FilePreviewModal({ filePath: rawFilePath, onClose }: FilePreview
     try {
       await host.shell.openPath(filePath)
     } catch (openPathError) {
-      const message = errorMessage(openPathError, 'Unable to open file')
+      const message = formatErrorMessage(openPathError, 'Unable to open file')
       setOpenError(message)
       void host.debug.log(`[FilePreview] openPath failed: ${message}`)
+    }
+  }, [filePath])
+
+  // The user is looking at a file the agent produced; getting to it on disk is
+  // the other half of "open". This one selects it in the file manager, so they
+  // can copy it or hand it to a different program.
+  const handleRevealPath = useCallback(async () => {
+    setOpenError(null)
+    try {
+      await host.shell.revealPath(filePath)
+    } catch (revealError) {
+      const message = formatErrorMessage(revealError, 'Unable to open the containing folder')
+      setOpenError(message)
+      void host.debug.log(`[FilePreview] revealPath failed: ${message}`)
     }
   }, [filePath])
 
@@ -391,6 +385,15 @@ export function FilePreviewModal({ filePath: rawFilePath, onClose }: FilePreview
           </button>
           <button
             className="path-preview-btn"
+            onClick={() => { void handleRevealPath() }}
+            title={t('common.openContainingFolder')}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+            </svg>
+          </button>
+          <button
+            className="path-preview-btn"
             onClick={() => { setSearchOpen(o => !o); setTimeout(() => searchInputRef.current?.focus(), 50) }}
             title="Search (Ctrl+F)"
           >
@@ -440,22 +443,10 @@ interface LinkedTextProps {
 }
 
 export function LinkedText({ text }: LinkedTextProps) {
-  const { t } = useTranslation()
   const [previewPath, setPreviewPath] = useState<string | null>(null)
-  // Right-click target for "open containing folder". A single menu lives here
-  // rather than one per link: a long agent reply can cite hundreds of paths.
-  const [menu, setMenu] = useState<{ x: number; y: number; path: string } | null>(null)
-  const [menuError, setMenuError] = useState<string | null>(null)
-  const menuRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    if (!menu) return
-    const handleClickOutside = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenu(null)
-    }
-    document.addEventListener('mousedown', handleClickOutside)
-    return () => document.removeEventListener('mousedown', handleClickOutside)
-  }, [menu])
+  // One menu for the whole block rather than one per link: a long agent reply can
+  // cite hundreds of paths.
+  const [menu, setMenu] = useState<RevealPathTarget | null>(null)
 
   const handleClick = useCallback((path: string) => {
     if (path.endsWith('.md')) {
@@ -466,30 +457,12 @@ export function LinkedText({ text }: LinkedTextProps) {
   }, [])
 
   const handleContextMenu = useCallback((e: React.MouseEvent, path: string) => {
+    // The messages container has its own context menu; without this the wrong
+    // menu opens on a path link.
     e.preventDefault()
     e.stopPropagation()
-    setMenuError(null)
     setMenu({ x: e.clientX, y: e.clientY, path })
   }, [])
-
-  const handleReveal = useCallback(async () => {
-    if (!menu) return
-    // A cited path often carries "file.ts:42"; ':' is not legal in a Windows
-    // file name, so the host would reject it outright.
-    const { path } = stripLineSuffix(menu.path)
-    try {
-      await host.shell.revealPath(path)
-      setMenu(null)
-    } catch (revealError) {
-      // No app-wide toast exists, and inline chat text has nowhere to put one, so
-      // the menu stays open and reports the failure itself. The host already
-      // walks up to the nearest surviving folder, so getting here means nothing
-      // on the path exists — worth saying rather than silently doing nothing.
-      const message = errorMessage(revealError, 'Unable to open the containing folder')
-      setMenuError(message)
-      void host.debug.log(`[PathLinker] revealPath failed: ${message}`)
-    }
-  }, [menu])
 
   const handleUrl = useCallback((url: string, e: React.MouseEvent) => {
     e.preventDefault()
@@ -512,7 +485,7 @@ export function LinkedText({ text }: LinkedTextProps) {
               className="path-link"
               onClick={(e) => { e.stopPropagation(); handleClick(token.text) }}
               onContextMenu={(e) => handleContextMenu(e, token.text)}
-              title={`Click to preview: ${token.text}`}
+              title={`${token.text}\nClick to preview · Right-click to open its folder`}
             >
               {token.text}
             </span>
@@ -534,21 +507,7 @@ export function LinkedText({ text }: LinkedTextProps) {
         }
         return <Fragment key={i}>{token.text}</Fragment>
       })}
-      {menu && (
-        <div
-          ref={menuRef}
-          className="floating-context-menu"
-          style={{ left: menu.x, top: menu.y }}
-        >
-          <div className="context-menu-item" onClick={() => { void handleReveal() }}>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
-            </svg>
-            {t('common.openContainingFolder')}
-          </div>
-          {menuError && <div className="context-menu-error">{menuError}</div>}
-        </div>
-      )}
+      {menu && <RevealPathMenu target={menu} onClose={() => setMenu(null)} />}
       {previewPath && (
         <FilePreviewModal
           filePath={previewPath}

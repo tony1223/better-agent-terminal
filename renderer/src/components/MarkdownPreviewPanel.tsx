@@ -2,6 +2,7 @@ import { host } from '../host-api'
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { MarkdownPreview } from './MarkdownPreview'
+import { formatErrorMessage } from '../utils/error-message'
 
 interface MarkdownPreviewPanelProps {
   filePath: string
@@ -37,6 +38,16 @@ export function MarkdownPreviewPanel({ filePath, onClose }: MarkdownPreviewPanel
       setError(String(err))
       setContent(null)
     })
+  }, [filePath])
+
+  const revealFile = useCallback(async () => {
+    try {
+      await host.shell.revealPath(filePath)
+    } catch (revealError) {
+      // The panel already owns an error banner, and it is cleared by the next
+      // reload, so borrow it rather than failing silently.
+      setError(formatErrorMessage(revealError, 'Unable to open the containing folder'))
+    }
   }, [filePath])
 
   // Load content on mount and when filePath changes
@@ -210,9 +221,22 @@ export function MarkdownPreviewPanel({ filePath, onClose }: MarkdownPreviewPanel
           <button
             className="md-preview-action-btn"
             onClick={() => host.shell.openPath(filePath)}
-            title={t('sidebar.openInExplorer')}
+            title={t('common.openFile')}
           >
             &#x2197;
+          </button>
+          {/* Opening the file hands it to whatever app owns .md; this hands the
+              user the folder instead, which is what they want when the file is
+              something to copy elsewhere or open with a specific program. The
+              button used to claim "Open in Explorer" while doing neither. */}
+          <button
+            className="md-preview-action-btn"
+            onClick={() => { void revealFile() }}
+            title={t('common.openContainingFolder')}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+            </svg>
           </button>
           <button
             className="md-preview-action-btn"
@@ -266,6 +290,9 @@ export function MarkdownPreviewPanel({ filePath, onClose }: MarkdownPreviewPanel
       </div>
       {contextMenu && (
         <div ref={contextMenuRef} className="workspace-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }}>
+          <div className="context-menu-item" onClick={() => { setContextMenu(null); void revealFile() }}>
+            {t('common.openContainingFolder')}
+          </div>
           <div className="context-menu-item" onClick={() => { setContextMenu(null); onClose() }}>
             {t('common.close')}
           </div>

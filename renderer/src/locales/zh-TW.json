@@ -14,7 +14,8 @@
     "refresh": "重新整理",
     "loading": "載入中...",
     "preview": "預覽",
-    "openContainingFolder": "開啟檔案所在資料夾"
+    "openContainingFolder": "開啟檔案所在資料夾",
+    "openFile": "開啟檔案"
   },
 
   "app": {

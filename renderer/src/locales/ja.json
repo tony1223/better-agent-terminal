@@ -14,7 +14,8 @@
     "refresh": "更新",
     "loading": "読み込み中...",
     "preview": "プレビュー",
-    "openContainingFolder": "ファイルの場所を開く"
+    "openContainingFolder": "ファイルの場所を開く",
+    "openFile": "ファイルを開く"
   },
   "app": {
     "workspaceNotFound": "ワークスペースが見つかりません",

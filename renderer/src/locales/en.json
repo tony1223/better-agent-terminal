@@ -14,7 +14,8 @@
     "refresh": "Refresh",
     "loading": "Loading...",
     "preview": "Preview",
-    "openContainingFolder": "Open Containing Folder"
+    "openContainingFolder": "Open Containing Folder",
+    "openFile": "Open File"
   },
 
   "app": {

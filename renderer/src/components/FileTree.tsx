@@ -3,6 +3,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { HighlightedCode } from './PathLinker'
 import { MarkdownPreview } from './MarkdownPreview'
 import { isProcfileName } from '../utils/procfile-parser'
+import { formatErrorMessage } from '../utils/error-message'
 
 interface FileEntry {
   name: string
@@ -595,10 +596,21 @@ export function FileTree({ rootPath, remoteMode = false }: Readonly<FileTreeProp
 
   const handleOpenInExplorer = useCallback(() => {
     if (!contextMenu) return
-    const target = contextMenu.entry.isDirectory
-      ? contextMenu.entry.path
-      : contextMenu.entry.path.replace(/[\\/][^\\/]+$/, '') // parent dir
-    host.shell.openPath(target)
+    const { path, isDirectory } = contextMenu.entry
+    // A directory is opened; a file is revealed. Revealing a directory would
+    // select it inside its *parent* rather than opening it, and opening a file's
+    // parent (the old behaviour here) dumped the user in the folder without
+    // saying which file they came for — no use when the point is to grab one
+    // specific delivered file out of a crowded directory.
+    if (isDirectory) {
+      host.shell.openPath(path)
+    } else {
+      void host.shell.revealPath(path).catch(revealError => {
+        void host.debug.log(
+          `[FileTree] revealPath failed: ${formatErrorMessage(revealError, 'unknown error')}`,
+        )
+      })
+    }
     setContextMenu(null)
   }, [contextMenu])
 

@@ -8,6 +8,7 @@ import {
   pathToFileUrl,
   renderChatMarkdown,
 } from '../utils/chat-markdown'
+import { RevealPathMenu, type RevealPathTarget } from './RevealPathMenu'
 
 interface ResolvedPathLink {
   rawPath: string
@@ -70,6 +71,10 @@ function applyResolvedPathLinks(html: string, links: Map<string, ResolvedPathLin
       anchor.href = pathToFileUrl(resolved.path, resolved.line, resolved.column)
       anchor.title = resolved.path
       anchor.textContent = rawPath
+      // Marks this anchor as a real file on disk, so the right-click handler can
+      // tell it apart from an ordinary markdown/http link — and carries the
+      // resolved path, sparing that handler from parsing the file:// href back.
+      anchor.dataset.revealPath = resolved.path
       fragment.appendChild(anchor)
       lastIndex = match.index + match[0].length
     }
@@ -85,6 +90,7 @@ function applyResolvedPathLinks(html: string, links: Map<string, ResolvedPathLin
 
 function ChatMarkdownComponent({ text, cwd, className = 'claude-markdown', resolvePathLinks = true }: ChatMarkdownProps) {
   const [resolvedLinks, setResolvedLinks] = useState<Map<string, ResolvedPathLink>>(new Map())
+  const [menu, setMenu] = useState<RevealPathTarget | null>(null)
   const html = useMemo(() => renderChatMarkdown(text, cwd), [text, cwd])
 
   useEffect(() => {
@@ -141,18 +147,35 @@ function ChatMarkdownComponent({ text, cwd, className = 'claude-markdown', resol
   )
 
   return (
-    <div
-      className={className}
-      dangerouslySetInnerHTML={{ __html: linkedHtml }}
-      onClick={(e) => {
-        const target = e.target as HTMLElement
-        const link = target.closest('a') as HTMLAnchorElement | null
-        if (link?.href) {
+    <>
+      <div
+        className={className}
+        dangerouslySetInnerHTML={{ __html: linkedHtml }}
+        onClick={(e) => {
+          const target = e.target as HTMLElement
+          const link = target.closest('a') as HTMLAnchorElement | null
+          if (link?.href) {
+            e.preventDefault()
+            openChatMarkdownLink(link.href)
+          }
+        }}
+        // This is where the agent's own prose is rendered, so it is where a
+        // delivered file gets announced ("written to C:\...\report.xlsx"). The
+        // markup is injected as HTML, so the listener is delegated rather than
+        // attached per link. Only anchors carrying data-reveal-path qualify —
+        // an ordinary markdown link has no containing folder to open.
+        onContextMenu={(e) => {
+          const target = e.target as HTMLElement
+          const link = target.closest('a[data-reveal-path]') as HTMLAnchorElement | null
+          const path = link?.dataset.revealPath
+          if (!path) return
           e.preventDefault()
-          openChatMarkdownLink(link.href)
-        }
-      }}
-    />
+          e.stopPropagation()
+          setMenu({ x: e.clientX, y: e.clientY, path })
+        }}
+      />
+      {menu && <RevealPathMenu target={menu} onClose={() => setMenu(null)} />}
+    </>
   )
 }
 
