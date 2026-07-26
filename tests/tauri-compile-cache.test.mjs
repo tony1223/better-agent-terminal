@@ -68,6 +68,21 @@ assert.ok(
     < workflow.indexOf('name: Upload updater metadata'),
   'the installer must be published before the updater metadata is uploaded',
 )
+// macOS runners still ship bash 3.2, where `shopt -s globstar` is not merely
+// unsupported but fatal under `set -e` — "invalid shell option name", exit 1.
+// It killed both mac arm64 legs of v3.1.54-pre.2 *after* they had finished
+// building, and it is invisible on Linux and Windows (bash 4.4+), so the only
+// thing that catches it is a rule. Collect installers with `find` instead.
+// (The `**` patterns that remain are upload-artifact `path:` inputs, globbed by
+// @actions/glob rather than by a shell.)
+// Anchored to a line that STARTS with the command, for the same reason as the
+// sccache assertions above: release.yml carries a comment explaining why this is
+// banned, and that comment has to be allowed to name the thing it warns about.
+assert.doesNotMatch(workflow, /^\s*shopt\s+-s\b[^\n]*globstar/m)
+assert.match(workflow, /done < <\(find src-tauri\/target\/release\/bundle -type f/)
+// A pipeline would run the loop body in a subshell and `published` would come
+// back 0 on every leg, turning a successful upload into "no installer found".
+assert.doesNotMatch(workflow, /find src-tauri\/target\/release\/bundle[^\n]*\|\s*while/)
 // The whole point: manifests still get written when part of the matrix failed.
 assert.match(workflow, /release:\s*\n\s+needs:\s*\[create-release, build\]\s*\n\s+if:\s*\$\{\{ always\(\) && needs\.create-release\.result == 'success' \}\}/)
 assert.match(workflow, /bat-server-publish:\s*\n(?:\s*#[^\n]*\n)*\s+needs:\s*\[create-release, bat-server-build\]/)

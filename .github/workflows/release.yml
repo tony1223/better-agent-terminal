@@ -793,15 +793,25 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          shopt -s globstar nullglob
+          # `find`, not a `**` glob. macOS runners still ship bash 3.2, where
+          # `shopt -s globstar` is not merely unsupported but fatal under `set -e`:
+          # "shopt: globstar: invalid shell option name", exit 1. It killed both
+          # mac arm64 legs of v3.1.54-pre.2 after they had already built, and it is
+          # invisible on Linux and Windows whose bash is 4.4+. The other `**`
+          # patterns in this file are upload-artifact `path:` inputs, globbed by
+          # @actions/glob rather than by a shell, so they are unaffected.
+          #
+          # `< <(find ...)` rather than `find ... | while`: a pipeline would run the
+          # loop in a subshell and `published` would come back 0 every time.
+          # bundle_dmg.sh leaves an `rw.*.dmg` scratch image next to the real one.
           published=0
-          for asset in src-tauri/target/release/bundle/**/*.{dmg,exe,AppImage}; do
-            # bundle_dmg.sh leaves its scratch image behind next to the real one.
-            case "$(basename "$asset")" in rw.*.dmg) continue;; esac
+          while IFS= read -r asset; do
             echo "uploading $(basename "$asset")"
             gh release upload "$RELEASE_TAG" "$asset" --clobber
             published=$((published + 1))
-          done
+          done < <(find src-tauri/target/release/bundle -type f \
+                     \( -name '*.dmg' -o -name '*.exe' -o -name '*.AppImage' \) \
+                     ! -name 'rw.*.dmg' | sort)
           if [ "$published" -eq 0 ]; then
             echo "::error::no installer found to publish for ${{ matrix.artifact }}"
             exit 1

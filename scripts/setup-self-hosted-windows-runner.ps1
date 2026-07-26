@@ -97,6 +97,20 @@ if (-not $Token) {
 if ([Environment]::Is64BitOperatingSystem -eq $false) { throw 'x64 Windows required.' }
 Ok "$([Environment]::OSVersion.VersionString), x64"
 
+# Disk is the constraint that actually bites, and it bites late — halfway through
+# linking, as an io error that reads like something else. Rough budget for one
+# release build of this repo: ~4 GB Build Tools, ~0.2 GB runner, ~2 GB
+# node_modules, ~1 GB pnpm store, ~8-12 GB target/, ~1 GB bundled runtimes,
+# ~1 GB installer output, plus 0.8-1.6 GB of incremental state that grows over
+# the first few builds. Call it 25 GB to be comfortable.
+$freeGb = [math]::Round((Get-PSDrive ($RunnerDir[0])).Free / 1GB, 1)
+if ($freeGb -lt 25) {
+  Warn "only $freeGb GB free on $($RunnerDir[0]): — a release build of this repo wants ~20 GB and grows"
+  Warn 'the runner will still install, but expect the first full build to be the thing that runs out'
+} else {
+  Ok "$freeGb GB free on $($RunnerDir[0]):"
+}
+
 # --------------------------------------------------------------- long path支援
 # cargo nests target/<profile>/build/<pkg>-<hash>/out/... and this repo has 806
 # dependencies. Without both of these, builds fail with io errors that read like
@@ -162,11 +176,15 @@ if ($SkipBuildTools) {
     Info 'downloading the Build Tools bootstrapper (this installs several GB and takes a while)'
     $bootstrapper = Join-Path $env:TEMP 'vs_BuildTools.exe'
     Invoke-WebRequest -Uri 'https://aka.ms/vs/17/release/vs_BuildTools.exe' -OutFile $bootstrapper
+    # Exactly the two components the msvc Rust target needs — the MSVC v143
+    # compiler/linker and one Windows SDK — and nothing else. Deliberately NOT
+    # --includeRecommended, which drags in ATL/MFC, CMake, the sanitizers and a
+    # second MSVC version for several extra GB. A build VM is usually short on
+    # disk long before it is short on anything else.
     $vsArgs = @(
       '--quiet', '--wait', '--norestart', '--nocache',
-      '--add', 'Microsoft.VisualStudio.Workload.VCTools',
       '--add', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
-      '--includeRecommended'
+      '--add', 'Microsoft.VisualStudio.Component.Windows11SDK.22621'
     )
     $p = Start-Process -FilePath $bootstrapper -ArgumentList $vsArgs -Wait -PassThru
     # 3010 is "success, reboot required" — fine, the runner service starts after.
