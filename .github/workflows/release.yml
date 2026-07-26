@@ -183,11 +183,6 @@ jobs:
       # legs follow the usual rule: build on stable tags, or on -pre tags when the leg
       # opts in via prerelease: true.
       BUILD_MATRIX_ENTRY: ${{ (matrix.pre_only && contains(inputs.release_tag, '-pre')) || (!matrix.pre_only && (!contains(inputs.release_tag, '-pre') || matrix.prerelease)) }}
-      # Cache rustc outputs independently from Cargo's target-dir cache. The
-      # application library is an rlib with release metadata isolated in the
-      # thin binaries, so it can now be reused across tags and bundle modes.
-      SCCACHE_GHA_ENABLED: "true"
-      RUSTC_WRAPPER: "sccache"
 
     steps:
       - name: Skip non-prerelease target
@@ -220,10 +215,18 @@ jobs:
         if: env.BUILD_MATRIX_ENTRY == 'true'
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Setup shared Rust compiler cache
-        if: env.BUILD_MATRIX_ENTRY == 'true'
-        uses: mozilla-actions/sccache-action@v0.0.10
-
+      # NOTE: do not reintroduce sccache here. Measured on v3.1.53, all 11 build
+      # jobs reported "0% - 0 hits, 1 miss". It cannot hit by construction: the
+      # rust-cache step below restores every dependency (sccache saw only 8
+      # compile requests for the entire build), so the only thing left to compile
+      # is our own crate, whose source hash changes on every commit — and its bin
+      # and cdylib outputs are crate-type-uncacheable anyway. The cost was not
+      # zero: sccache wrote a GHA cache entry per compile, 823 of them totalling
+      # ~1 GB, against a repo cache quota of 10 GB that was already full. Being
+      # pinned at the cap makes GitHub evict least-recently-used entries, and the
+      # entries worth having are the 600-735 MB rust-cache target dirs below.
+      # Losing one costs a full dependency rebuild — which is why release runs
+      # have swung between 9 and 34 minutes for the same amount of work.
       - name: Ensure Rust shims are first on PATH
         if: env.BUILD_MATRIX_ENTRY == 'true'
         shell: bash
@@ -824,8 +827,6 @@ jobs:
     timeout-minutes: 60
     env:
       APPIMAGE_EXTRACT_AND_RUN: "1"
-      SCCACHE_GHA_ENABLED: "true"
-      RUSTC_WRAPPER: "sccache"
       CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS: ${{ matrix.aarch64_rustflags }}
     steps:
       - name: Checkout code
@@ -852,9 +853,7 @@ jobs:
         with:
           targets: ${{ matrix.rust_target }}
 
-      - name: Setup shared Rust compiler cache
-        uses: mozilla-actions/sccache-action@v0.0.10
-
+      # No sccache here either — see the note in the desktop build job above.
       - name: Compute Rust base cache key
         id: rust-base-cache-key
         run: node scripts/rust-base-cache-key.mjs

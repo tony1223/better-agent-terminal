@@ -108,11 +108,23 @@ desktop = [
 headless = []
 
 [profile.release]
-# Parallelise our crate's codegen across all runner cores. The default of
-# 16 leaves 32-core Windows / macOS runners underutilised during the final
-# crate compile (deps come from rust-cache, only our crate rebuilds). 256
-# is what `cargo build --timings` recommends for parallel-bound builds.
-# Trade-off: tiny loss of cross-unit optimisation; imperceptible at runtime.
+# This buys nothing, and the premise it was added on was wrong. The original
+# note here justified 256 by "32-core Windows / macOS runners"; this is a public
+# repo, so CI runs on GitHub's standard runners — 4 vCPU on windows-latest,
+# ubuntu and macos-*-intel, and 3 on macos-14. There is no 32-way parallelism to
+# spend the extra codegen units on.
+#
+# Measured, reproducing CI's conditions (deps pinned so only our crate rebuilds,
+# which is all CI ever compiles; -j 4 to match a standard runner), 3 runs each:
+#   codegen-units=16   avg 178.3s  (175.7, 181.6, 177.6)
+#   codegen-units=256  avg 182.1s  (181.4, 180.4, 184.4)
+# 256 came out 2.1% SLOWER — inside the run-to-run spread either way, so the
+# honest reading is "no difference", certainly not a win.
+#
+# It is left at 256 only because changing [profile.release] invalidates all
+# seven rust-cache target dirs (4.37 GB), costing one ~30-minute release to save
+# ~4 seconds thereafter. Drop the line and take the default the next time the
+# caches are being invalidated anyway — a Cargo.lock change or a toolchain bump.
 codegen-units = 256
 # Drop debug symbols from the shipped binary. Smaller .exe / .dmg, no
 # compile-time cost.
