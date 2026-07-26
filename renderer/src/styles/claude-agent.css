@@ -944,6 +944,31 @@
   font-weight: 400;
 }
 
+/* Right-hand group of the one-line tool row, so size · time · chevron stay
+   together against the right edge instead of each claiming its own auto margin.
+   .claude-tool-time sets margin-left:auto for the older headers that position it
+   directly, so the group neutralises it. */
+.claude-tool-meta {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+.claude-tool-meta .claude-tool-time {
+  margin-left: 0;
+}
+
+/* Output magnitude. Deliberately quieter than the timestamp: a glance-level "how
+   much came back", not something meant to be read. */
+.claude-tool-outsize {
+  font-size: calc(var(--claude-font-size) - 3px);
+  color: var(--text-secondary);
+  opacity: 0.55;
+  font-variant-numeric: tabular-nums;
+}
+
 .claude-tool-chevron {
   font-size: calc(var(--claude-font-size) - 4px);
   transition: transform 0.15s ease;

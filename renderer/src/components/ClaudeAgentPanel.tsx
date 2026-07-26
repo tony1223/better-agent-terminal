@@ -30,7 +30,8 @@ import { useRafBatchedString } from '../utils/use-raf-batched-string'
 import { translateRuntimeMessage } from '../utils/runtime-status-message'
 import { agentSendResultError, isMissingSessionCwdError } from '../utils/agent-send-recovery'
 import { dispatchWorkerCommand, parseWorkerSlashCommand } from '../utils/worker-command'
-import { buildCollapsedOutputPreview, formatContentSize, parseShellInvocation, stringifyToolResult, summarizeToolCommandInput, summarizeToolSearchResult, truncateMiddle } from './CodexAgentPanel.helpers'
+import { buildCollapsedOutputPreview, formatContentSize, parseShellInvocation, stringifyToolResult, summarizeToolCommandInput, summarizeToolSearchResult, toolRowLayout, truncateMiddle } from './CodexAgentPanel.helpers'
+import { AgentToolRow } from './AgentToolRow'
 import { formatAskUserPrompt, normalizePendingAskUser, summarizeAskUserInput, wrapPreviewHtml } from './AskUserQuestion.helpers'
 import { AgentActivityTree } from './AgentActivityTree'
 import { buildAgentTaskTree, findAgentNode, formatAgentNodeElapsed, summarizeAgentTree, terminateLifecycleEntries, type TaskLifecycle } from '../lib/agent-task-tree'
@@ -4321,25 +4322,63 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
       // that exact same string — an IN row there costs a line and says nothing.
       // The full input stays one click away via the header's expand toggle.
       const headerSummary = desc ? '' : toolInputSummary(item.toolName, item.input)
-      const showInRow = !!inContent.trim() && inContent !== headerSummary
+      const hasInContent = !!inContent.trim() && inContent !== headerSummary
+      const rowExpanded = expandedTools.has(item.id)
+      // Computed before the header so the row can print the output magnitude on
+      // its one line. The cache is keyed by (id, result), so the blocks below
+      // reuse this exact object rather than recomputing.
+      const toolRender = item.result
+        ? getOrComputeToolRender(
+            toolRenderCacheRef.current,
+            item.id,
+            item.result,
+            () => {
+              const raw = stringifyToolResult(item.result)
+              const normalizedRaw = parseContentBlocks(raw)
+              const split = splitSystemReminders(normalizedRaw)
+              return {
+                outText: split.content,
+                isLongOutput: split.content.split(/\r?\n/).length > 8 || split.content.length > 900,
+                outPreviewLines: buildCollapsedOutputPreview(split.content),
+                reminders: split.reminders,
+                errors: split.errors,
+              }
+            },
+          )
+        : null
+      const toolSearchSummary = item.toolName === 'ToolSearch' && toolRender
+        ? summarizeToolSearchResult(toolRender.outText, t)
+        : null
+      const displayOutText = toolSearchSummary ?? toolRender?.outText ?? ''
+      const layout = toolRowLayout({
+        expanded: rowExpanded,
+        hasInContent,
+        outText: displayOutText,
+        errorCount: toolRender?.errors.length ?? 0,
+      })
+      const reminders = toolRender?.reminders ?? []
       return (
         <div key={item.id || index} className="tl-item" data-tool-id={item.id}>
           <div className={`tl-dot ${dotClass}`} />
           <div className="tl-content">
-            <div className="claude-tool-header" onClick={() => toggleTool(item.id)}>
-              <span className="claude-tool-name">{item.toolName}</span>
-              {shellInvocation && <span className="claude-tool-shell">| {shellInvocation.shell} |</span>}
-              {item.isDeferred && <span className="claude-tool-badge claude-deferred-badge">deferred</span>}
-              {desc && <span className="claude-tool-desc">{desc}</span>}
-              {!desc && <span className="claude-tool-summary">{headerSummary}</span>}
-              {item.timestamp > 0 && <span className="claude-tool-time" title={formatFullTimestamp(item.timestamp)}>{formatTimestamp(item.timestamp)}</span>}
-            </div>
+            <AgentToolRow
+              toolName={item.toolName}
+              shell={shellInvocation?.shell}
+              isDeferred={item.isDeferred}
+              desc={desc}
+              summary={headerSummary}
+              timestamp={item.timestamp}
+              outSize={layout.outSize}
+              outSizeTitle={displayOutText ? formatContentSize(displayOutText) : null}
+              expanded={rowExpanded}
+              onToggle={() => toggleTool(item.id)}
+            />
             {item.denyReason && (
               <div className="claude-tool-reason">Reason: {item.denyReason}</div>
             )}
-            {(showInRow || !!item.result) && (
+            {(layout.showInRow || layout.showOutRow || layout.showErrorRows) && (
             <div className="claude-tool-blocks">
-              {showInRow && (
+              {layout.showInRow && (
               <div
                 className="claude-tool-row"
                 onClick={() => handleCopyBlock(inContent, inBlockId)}
@@ -4362,42 +4401,23 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
                 </span>
               </div>
               )}
-              {item.result && (() => {
-                const { outText, isLongOutput, outPreviewLines, reminders, errors } = getOrComputeToolRender(
-                  toolRenderCacheRef.current,
-                  item.id,
-                  item.result,
-                  () => {
-                    const raw = stringifyToolResult(item.result)
-                    const normalizedRaw = parseContentBlocks(raw)
-                    const split = splitSystemReminders(normalizedRaw)
-                    return {
-                      outText: split.content,
-                      isLongOutput: split.content.split(/\r?\n/).length > 8 || split.content.length > 900,
-                      outPreviewLines: buildCollapsedOutputPreview(split.content),
-                      reminders: split.reminders,
-                      errors: split.errors,
-                    }
-                  },
-                )
-                // Collapse by default for read-only tools, MCP tools, long outputs, or when setting enabled.
-                const isReadOnlyTool = ['Read', 'Glob', 'Grep', 'LS', 'NotebookRead'].includes(item.toolName)
-                const isMcpTool = item.toolName.toLowerCase().startsWith('mcp_')
-                const toolSearchSummary = item.toolName === 'ToolSearch' ? summarizeToolSearchResult(outText, t) : null
-                const displayOutText = toolSearchSummary ?? outText
-                const shouldCollapse = toolSearchSummary
-                  ? false
-                  : isReadOnlyTool || isMcpTool || isLongOutput || settingsStore.getSettings().collapseToolOutputs
+              {toolRender && (() => {
+                const { outText, isLongOutput, outPreviewLines, errors } = toolRender
+                // The timeline is tidy by construction now — a collapsed tool is
+                // one line — so inside an expanded row only length still argues
+                // for hiding the body. The old read-only/MCP/setting checks existed
+                // to keep the *timeline* short and are redundant here.
+                const shouldCollapse = !toolSearchSummary && isLongOutput
                 const isOutExpanded = expandedTools.has(outBlockId)
                 return (
                   <>
-                    {errors.length > 0 && errors.map((err, i) => (
+                    {layout.showErrorRows && errors.map((err, i) => (
                       <div key={`err${i}`} className="claude-tool-row claude-tool-error-row">
                         <span className="claude-tool-row-label claude-error-label">{t('claude.err')}</span>
                         <span className="claude-tool-row-content">{err}</span>
                       </div>
                     ))}
-                    {outText && shouldCollapse && (
+                    {layout.showOutRow && outText && shouldCollapse && (
                       <div
                         className="claude-tool-row"
                         onClick={() => toggleTool(outBlockId)}
@@ -4434,7 +4454,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
                         <span className={`claude-tool-chevron ${isOutExpanded ? 'expanded' : ''}`}>&#9654;</span>
                       </div>
                     )}
-                    {displayOutText && !shouldCollapse && (
+                    {layout.showOutRow && displayOutText && !shouldCollapse && (
                       <div
                         className="claude-tool-row"
                         onClick={() => handleCopyBlock(displayOutText, outBlockId)}
@@ -4447,7 +4467,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
                         </span>
                       </div>
                     )}
-                    {reminders.length > 0 && (
+                    {layout.showOutRow && reminders.length > 0 && (
                       <div
                         className="claude-tool-row claude-system-reminder-row"
                         onClick={() => toggleTool(`reminder-${item.id}`)}

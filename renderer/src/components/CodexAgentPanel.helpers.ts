@@ -173,6 +173,54 @@ export function formatContentSize(text: string): string {
   return `${lines.toLocaleString()} ${i18next.t('claude.lines')} · ${chars.toLocaleString()} ${i18next.t('claude.chars')}`
 }
 
+// Compact output magnitude for the one-line tool row: 312, 1.1K, 2.4M.
+// Counts characters like formatContentSize, but without its
+// "312 lines · 18,204 chars" width — the row still has to fit the tool name, its
+// argument and a timestamp. The full figure stays in the row's tooltip.
+export function formatCompactCount(count: number): string {
+  if (count < 1000) return String(count)
+  if (count < 1_000_000) {
+    const k = count / 1000
+    return `${k < 10 ? k.toFixed(1) : Math.round(k)}K`
+  }
+  const m = count / 1_000_000
+  return `${m < 10 ? m.toFixed(1) : Math.round(m)}M`
+}
+
+export interface ToolRowLayout {
+  /** Right-aligned magnitude chip, or null when there is no output yet. */
+  outSize: string | null
+  showInRow: boolean
+  showOutRow: boolean
+  showErrorRows: boolean
+}
+
+// What a generic tool row shows while collapsed.
+//
+// A long session is mostly tool calls, so each collapsed one gets exactly one
+// line: name, primary argument, output magnitude, timestamp. The IN row and the
+// output body appear only once the row is expanded. Previously a single collapsed
+// tool could spend up to nine lines — a 3-line IN row plus a 4-line output
+// preview — which pushed the assistant's actual replies off screen.
+//
+// Errors are the deliberate exception: they stay visible while collapsed. A
+// failed tool that reads identically to a successful one is the one thing worth
+// spending a line on, and errors are rare enough not to cost density in practice.
+export function toolRowLayout(opts: {
+  expanded: boolean
+  hasInContent: boolean
+  outText: string
+  errorCount: number
+}): ToolRowLayout {
+  const { expanded, hasInContent, outText, errorCount } = opts
+  return {
+    outSize: outText ? formatCompactCount(outText.length) : null,
+    showInRow: expanded && hasInContent,
+    showOutRow: expanded && !!outText,
+    showErrorRows: errorCount > 0,
+  }
+}
+
 export function buildCollapsedOutputPreview(text: string, maxLines = 4): string[] {
   return text
     .split(/\r?\n/)
