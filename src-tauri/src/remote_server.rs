@@ -249,6 +249,17 @@ pub struct RustRemoteServerState {
 }
 
 impl RustRemoteServerState {
+    /// This host's own identity — its running server's certificate fingerprint, or
+    /// None when no server is running. Lets the remote client refuse to dial this
+    /// very process; see the self-connection check in remote_client::connect.
+    pub fn own_host_identity(&self) -> Option<String> {
+        self.inner
+            .lock()
+            .ok()?
+            .as_ref()
+            .map(|running| running.fingerprint.clone())
+    }
+
     pub fn start(
         &self,
         ctx: HostContext,
@@ -3248,6 +3259,13 @@ mod tests {
         );
         assert_eq!(cert1.cert_der, cert2.cert_der);
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_host_with_no_server_running_claims_no_identity() {
+        // The self-connection check keys off this: sharing "no identity" must not
+        // read as "same host", or a client-only build could never connect anywhere.
+        assert_eq!(RustRemoteServerState::default().own_host_identity(), None);
     }
 
     fn temp_remote_dir(name: &str) -> std::path::PathBuf {

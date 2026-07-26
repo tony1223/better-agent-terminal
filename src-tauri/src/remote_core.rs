@@ -113,6 +113,139 @@ pub fn decode_remote_binary_frame(bytes: &[u8]) -> Result<Value, String> {
         .map_err(|err| format!("remote frame json parse failed: {err}"))
 }
 
+// ===================== relay loop prevention =====================
+//
+// Relaying (a client reaching an upstream host through the host it is paired with)
+// makes a host both a consumer and a producer of the same frame, which is exactly
+// the shape that closes a cycle. The cycle is not hypothetical here: one desktop
+// runs a remote server AND a remote client at the same time — lib.rs manages
+// RustRemoteServerState and RustRemoteClientState side by side — so two desktops
+// that each hold a remote profile pointing at the other form A -> B -> A, and
+// nothing stops a profile pointing back at its own host either (connect validation
+// checks only that host/port/token/fingerprint are non-empty). An event going round
+// such a ring is re-broadcast forever, amplifying at every hop.
+//
+// Today the only thing preventing that is the `origin != "rust-remote-client"` test
+// in event_hub, which suppresses re-broadcast of upstream events wholesale. Relay
+// has to lift that suppression, so the guard has to be replaced by something that
+// distinguishes "forwarding onward" from "forwarding back into a ring".
+//
+// A relayed frame therefore carries the path of hosts it has already traversed, and
+// a host refuses to forward a frame whose path already names it. Identity is the
+// server's TLS certificate fingerprint: persisted rather than regenerated
+// (ensure_remote_certificate writes it once; the stability is pinned by
+// ensure_certificate_reuses_node_compatible_plaintext_envelope) and already the
+// value every client pins, so it needs no new storage or handshake field.
+//
+// `path.len()` IS the hop count. There is deliberately no separate depth field,
+// because two fields can disagree and then the guard is only as strong as whichever
+// one a given caller happened to check.
+
+pub const REMOTE_RELAY_PATH_KEY: &str = "relayPath";
+
+/// How many times a frame may be relayed. 1 covers the intended topology — a
+/// client reaching one upstream host through the host it is paired with — and
+/// nothing beyond it.
+pub const MAX_RELAY_HOPS: usize = 1;
+
+/// A path longer than this is not a topology this supports, it is a peer sending
+/// nonsense. Refuse rather than allocate against it.
+const RELAY_PATH_SANITY_LIMIT: usize = 8;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelayRefusal {
+    /// This host already appears in the path: forwarding would close a cycle.
+    Cycle,
+    /// The hop budget is spent.
+    HopLimit,
+    /// The path field is present but is not a list of identities.
+    Malformed,
+}
+
+impl RelayRefusal {
+    /// Stable wording for the log line a refusal should leave behind — a silently
+    /// dropped frame is indistinguishable from a routing bug.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RelayRefusal::Cycle => "relay path already names this host",
+            RelayRefusal::HopLimit => "relay hop limit reached",
+            RelayRefusal::Malformed => "relay path is malformed",
+        }
+    }
+}
+
+/// The hosts a frame has already traversed. An absent field means "never relayed",
+/// which is every frame in the pre-relay protocol.
+pub fn remote_relay_path(frame: &Value) -> Result<Vec<String>, RelayRefusal> {
+    let Some(raw) = frame.get(REMOTE_RELAY_PATH_KEY) else {
+        return Ok(Vec::new());
+    };
+    let Some(entries) = raw.as_array() else {
+        return Err(RelayRefusal::Malformed);
+    };
+    if entries.len() > RELAY_PATH_SANITY_LIMIT {
+        return Err(RelayRefusal::Malformed);
+    }
+    let mut path = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let Some(hop) = entry.as_str().map(normalize_host_identity) else {
+            return Err(RelayRefusal::Malformed);
+        };
+        if hop.is_empty() {
+            return Err(RelayRefusal::Malformed);
+        }
+        path.push(hop);
+    }
+    Ok(path)
+}
+
+/// Decide whether `frame` may be relayed onward by the host identified by
+/// `own_identity`, returning the frame to actually send — stamped with this hop —
+/// or the reason it must be dropped.
+///
+/// Forwarding *without* stamping is precisely what would reintroduce the cycle, so
+/// stamping is not a separate step a caller can forget: the only way to obtain a
+/// forwardable frame is through this function.
+pub fn relay_frame(frame: &Value, own_identity: &str) -> Result<Value, RelayRefusal> {
+    let identity = normalize_host_identity(own_identity);
+    if identity.is_empty() {
+        return Err(RelayRefusal::Malformed);
+    }
+    let mut path = remote_relay_path(frame)?;
+    // Cycle before hop limit: when both apply, "this would loop" is the more
+    // useful thing to see in a log than "budget spent".
+    if path.iter().any(|hop| hop == &identity) {
+        return Err(RelayRefusal::Cycle);
+    }
+    if path.len() >= MAX_RELAY_HOPS {
+        return Err(RelayRefusal::HopLimit);
+    }
+    let Some(map) = frame.as_object() else {
+        return Err(RelayRefusal::Malformed);
+    };
+    path.push(identity);
+    let mut relayed = map.clone();
+    relayed.insert(REMOTE_RELAY_PATH_KEY.to_string(), json!(path));
+    Ok(Value::Object(relayed))
+}
+
+/// Normalised form of a host identity (its TLS certificate fingerprint), so that
+/// the relay path check and the self-connection check agree on what "the same host"
+/// means rather than each rolling its own comparison.
+///
+/// Fingerprints are produced as uppercase hex with colons, so casing should already
+/// agree. Normalising anyway costs nothing and stops a peer from walking past the
+/// cycle check by echoing a hop back in a different case.
+pub fn normalize_host_identity(identity: &str) -> String {
+    identity.trim().to_ascii_uppercase()
+}
+
+/// Whether two host identities name the same host.
+pub fn same_host_identity(left: &str, right: &str) -> bool {
+    let left = normalize_host_identity(left);
+    !left.is_empty() && left == normalize_host_identity(right)
+}
+
 // `agent:` is the target naming and the `claude:` spellings are the legacy
 // surface being phased out; this rewrite is stage compatibility, not the end
 // state. So the list below is not an exception list — it is the set of channels
@@ -623,6 +756,112 @@ mod tests {
             "claude:account-changed"
         );
         assert!(is_proxied_remote_event("agent:account-changed"));
+    }
+
+    // Stand-ins for certificate fingerprints. The real ones are 95 chars of
+    // colon-separated uppercase hex (see remote_server's
+    // token_and_fingerprint_shapes_match_remote_contract); nothing here depends on
+    // the length, only on them being distinct strings.
+    const HOST_A: &str = "AA:01";
+    const HOST_B: &str = "BB:02";
+    const HOST_C: &str = "CC:03";
+
+    fn event_frame() -> Value {
+        json!({ "type": "event", "channel": "agent:usage", "params": { "payload": {} } })
+    }
+
+    #[test]
+    fn pre_relay_frames_read_as_never_relayed() {
+        // Every frame in the existing protocol lacks the field, and must not be
+        // mistaken for a malformed one.
+        assert_eq!(remote_relay_path(&event_frame()), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn relay_stamps_the_first_hop_and_preserves_the_frame() {
+        let relayed = relay_frame(&event_frame(), HOST_A).expect("first hop forwards");
+        assert_eq!(relayed[REMOTE_RELAY_PATH_KEY], json!([HOST_A]));
+        // The payload has to survive untouched; relaying adds provenance, it does
+        // not reshape the frame.
+        assert_eq!(relayed["type"], json!("event"));
+        assert_eq!(relayed["channel"], json!("agent:usage"));
+        assert_eq!(relayed["params"], json!({ "payload": {} }));
+    }
+
+    #[test]
+    fn relay_breaks_the_two_desktop_ring() {
+        // A and B each hold a remote profile pointing at the other, which is what
+        // makes them a ring: A broadcasts, B's remote client receives it and
+        // re-broadcasts, A's remote client receives it and would re-broadcast
+        // again, forever. B's hop is legitimate; A's would close the ring.
+        let from_a = event_frame();
+        let at_b = relay_frame(&from_a, HOST_B).expect("B forwards A's event once");
+        assert_eq!(at_b[REMOTE_RELAY_PATH_KEY], json!([HOST_B]));
+        assert_eq!(relay_frame(&at_b, HOST_A), Err(RelayRefusal::HopLimit));
+    }
+
+    #[test]
+    fn relay_refuses_to_revisit_a_host_already_in_the_path() {
+        let seen_b = json!({ "type": "event", REMOTE_RELAY_PATH_KEY: [HOST_B] });
+        assert_eq!(relay_frame(&seen_b, HOST_B), Err(RelayRefusal::Cycle));
+        // Cycle is reported ahead of HopLimit when both apply: "this would loop" is
+        // the more useful log line than "budget spent".
+        let seen_b_and_c = json!({ "type": "event", REMOTE_RELAY_PATH_KEY: [HOST_B, HOST_C] });
+        assert_eq!(relay_frame(&seen_b_and_c, HOST_B), Err(RelayRefusal::Cycle));
+        assert_eq!(relay_frame(&seen_b_and_c, HOST_A), Err(RelayRefusal::HopLimit));
+    }
+
+    #[test]
+    fn relay_bounds_a_self_connected_host_to_one_extra_pass() {
+        // A host connected to itself is reachable — connect validation has no
+        // self-check — so pin what actually happens rather than assume it cannot.
+        // A originates the frame unstamped, so A's own client sees it once and the
+        // re-broadcast is allowed; the pass after that is refused. Bounded, not
+        // free: a connect-time self-check is what would make it zero.
+        let originated = event_frame();
+        let once = relay_frame(&originated, HOST_A).expect("first pass forwards");
+        assert_eq!(relay_frame(&once, HOST_A), Err(RelayRefusal::Cycle));
+    }
+
+    #[test]
+    fn relay_cycle_check_survives_a_recased_identity() {
+        // A peer must not be able to walk past the cycle check by echoing a hop
+        // back in different casing.
+        let lowercased = json!({ "type": "event", REMOTE_RELAY_PATH_KEY: ["aa:01"] });
+        assert_eq!(relay_frame(&lowercased, HOST_A), Err(RelayRefusal::Cycle));
+        // ...and a lowercase identity is stamped in the normalised form, so the
+        // next host compares against a consistent spelling.
+        let stamped = relay_frame(&event_frame(), "aa:01").expect("forwards");
+        assert_eq!(stamped[REMOTE_RELAY_PATH_KEY], json!([HOST_A]));
+    }
+
+    #[test]
+    fn relay_fails_closed_on_anything_it_cannot_trust() {
+        let cases = [
+            json!({ "type": "event", REMOTE_RELAY_PATH_KEY: "not-an-array" }),
+            json!({ "type": "event", REMOTE_RELAY_PATH_KEY: [42] }),
+            json!({ "type": "event", REMOTE_RELAY_PATH_KEY: [""] }),
+            json!({ "type": "event", REMOTE_RELAY_PATH_KEY: ["  "] }),
+        ];
+        for frame in cases {
+            assert_eq!(
+                relay_frame(&frame, HOST_A),
+                Err(RelayRefusal::Malformed),
+                "must refuse: {frame}"
+            );
+        }
+        // An absurdly long path is a peer sending nonsense, not a topology.
+        let long = json!({
+            "type": "event",
+            REMOTE_RELAY_PATH_KEY: (0..RELAY_PATH_SANITY_LIMIT + 1)
+                .map(|i| json!(format!("FP:{i}")))
+                .collect::<Vec<_>>(),
+        });
+        assert_eq!(relay_frame(&long, HOST_A), Err(RelayRefusal::Malformed));
+        // A host with no identity cannot prove it is not already in the path.
+        assert_eq!(relay_frame(&event_frame(), "   "), Err(RelayRefusal::Malformed));
+        // A frame that is not an object has nowhere to carry provenance.
+        assert_eq!(relay_frame(&json!("bare"), HOST_A), Err(RelayRefusal::Malformed));
     }
 
     #[test]

@@ -4,8 +4,8 @@ use crate::host_context::HostContext;
 use crate::remote_core::{
     canonical_remote_channel, decode_remote_binary_frame, decode_remote_text_frame,
     encode_remote_frame, is_proxied_remote_event, legacy_v1_event_args_to_params,
-    RemoteCompression, RemoteFramePayload, REMOTE_COMPRESSION_GZIP, REMOTE_PROTOCOL_LEGACY_V1,
-    REMOTE_PROTOCOL_V2,
+    same_host_identity, RemoteCompression, RemoteFramePayload, REMOTE_COMPRESSION_GZIP,
+    REMOTE_PROTOCOL_LEGACY_V1, REMOTE_PROTOCOL_V2,
 };
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
@@ -198,6 +198,7 @@ impl RustRemoteClientState {
         window_id: Option<String>,
     ) -> Result<Value, String> {
         validate_connection_fields(&host, port, &token, &fingerprint)?;
+        reject_self_connection(&app, &fingerprint)?;
         // Capture before `app` may be moved into the client_loop thread below;
         // surfaced in the connect return so the renderer can compare against
         // `serverVersion` and flag client/server skew (issue #115).
@@ -1205,6 +1206,43 @@ fn validate_connection_fields(
     Ok(())
 }
 
+/// Refuse to dial the server running in this very process.
+///
+/// A desktop is host *and* client at once (both states are managed in `lib.rs`), so
+/// "connect to a host" can be pointed back here. Left alone it is the shortest
+/// possible cycle: this process's events would be forwarded to a client that is
+/// itself, and the relay hop budget would be spent on a ring of length one.
+///
+/// Compared by certificate fingerprint rather than host/port, because the same
+/// server answers on localhost, on the LAN address and over Tailscale — only the
+/// fingerprint is invariant across all three, and it is persisted, so it is a
+/// stable identity rather than a per-boot value.
+///
+/// Only `connect` carries this guard. `test_connection` and `list_profiles` open a
+/// socket, do one thing and close it; they establish no event flow, so they cannot
+/// form a ring. Dialling yourself there is pointless but harmless.
+fn reject_self_connection(app: &HostContext, fingerprint: &str) -> Result<(), String> {
+    // try_state, not state: on a headless host no server state may be registered,
+    // and state() panics on an unregistered type.
+    let own = app
+        .try_state::<crate::remote_server::RustRemoteServerState>()
+        .and_then(|state| state.own_host_identity());
+    if is_dialling_self(own.as_deref(), fingerprint) {
+        return Err(
+            "that is this app's own remote server — connecting to it would loop".to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// The decision behind `reject_self_connection`, split out so it is testable without
+/// a live host: `HostContext` cannot be constructed in a unit test on the desktop
+/// build, and standing up a real TLS server just to compare two strings would be
+/// testing the wrong thing.
+fn is_dialling_self(own_identity: Option<&str>, fingerprint: &str) -> bool {
+    own_identity.is_some_and(|own| same_host_identity(own, fingerprint))
+}
+
 fn default_client_label() -> String {
     let suffix = unix_ms() % 1_000_000;
     format!("Client-{suffix:06}")
@@ -1251,6 +1289,25 @@ fn summarize_fingerprint(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dialling_this_hosts_own_server_is_refused() {
+        let own = "AA:BB:CC";
+        assert!(is_dialling_self(Some(own), own));
+        // Fingerprints arrive from a pasted pairing string, so casing and stray
+        // whitespace must not be a way past the check.
+        assert!(is_dialling_self(Some(own), " aa:bb:cc "));
+    }
+
+    #[test]
+    fn dialling_a_different_host_is_allowed() {
+        assert!(!is_dialling_self(Some("AA:BB:CC"), "DD:EE:FF"));
+        // No server running on this side: nothing to loop back into. A client-only
+        // build (BAT Mobile) is always in this state.
+        assert!(!is_dialling_self(None, "AA:BB:CC"));
+        // Neither side may treat "no identity" as matching anything.
+        assert!(!is_dialling_self(Some(""), ""));
+    }
 
     #[test]
     fn normalizes_fingerprint_like_node_client() {
