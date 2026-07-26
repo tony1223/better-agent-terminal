@@ -19,8 +19,8 @@ use crate::remote_core::{
     canonical_remote_channel, decode_remote_binary_frame, decode_remote_text_frame,
     encode_remote_frame, event_params_to_legacy_v1_args, legacy_v1_args_to_params,
     negotiate_remote_compression, negotiate_remote_protocol, remote_agent_channel,
-    RemoteCompression, RemoteFramePayload, RemoteProtocol, REMOTE_PROTOCOL_LEGACY_V1,
-    REMOTE_PROTOCOL_V2,
+    remote_event_params_for_clients, strip_profile_secrets, RemoteCompression, RemoteFramePayload,
+    RemoteProtocol, REMOTE_PROTOCOL_LEGACY_V1, REMOTE_PROTOCOL_V2,
 };
 use crate::sidecar::SidecarState;
 #[cfg(feature = "desktop")]
@@ -698,6 +698,13 @@ fn send_remote_event_to_clients(
     channel: &str,
     params: &Value,
 ) {
+    // The single choke point where events become client frames — buffered ones flush
+    // through here too — so this is where a payload gets stripped of anything a
+    // remote client must not see. Ahead of the legacy v1 conversion on purpose: that
+    // copies the whole payload into `args`, so sanitizing afterwards would sanitize
+    // one copy and ship the other.
+    let sanitized = remote_event_params_for_clients(channel, params);
+    let params = sanitized.as_ref();
     let args = event_params_to_legacy_v1_args(channel, params);
     let agent_channel = remote_agent_channel(channel);
     if let Ok(mut clients) = clients.lock() {
@@ -2938,7 +2945,12 @@ fn invoke_rust_for_remote(
                 })
             })
         }),
+        // Entries reach the client stripped of credentials. `profile_list_core` is
+        // shared with the local Tauri command, whose renderer genuinely needs the
+        // token to dial a remote profile, so the stripping belongs here at the
+        // boundary rather than at the source.
         "profile:list" => serde_json::to_value(profile_cmd::profile_list_core(&ctx))
+            .map(|value| strip_profile_secrets(&value))
             .map_err(|err| format!("remote profile:list serialization failed: {err}")),
         "profile:get-active-ids" => {
             serde_json::to_value(profile_cmd::profile_get_active_ids_core(&ctx))
@@ -3259,6 +3271,58 @@ mod tests {
         );
         assert_eq!(cert1.cert_der, cert2.cert_der);
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_profile_changed_frame_leaves_the_host_without_credentials() {
+        // Drives the real choke point rather than the sanitizer in isolation, so
+        // deleting the sanitize call — or moving it after the legacy v1 conversion —
+        // fails here instead of passing quietly.
+        let (tx, rx) = mpsc::channel();
+        let clients = Arc::new(Mutex::new(vec![RemoteClientRecord {
+            id: "client-1".to_string(),
+            info: RemoteClientInfo {
+                label: "phone".to_string(),
+                window_id: None,
+                client_info: None,
+                connected_at: 0,
+                protocol: REMOTE_PROTOCOL_LEGACY_V1.to_string(),
+                compression: "none".to_string(),
+            },
+            tx,
+            close: Arc::new(AtomicBool::new(false)),
+        }]));
+        let payload = json!({
+            "profiles": [{
+                "id": "hyper",
+                "name": "Tail Hyper",
+                "type": "remote",
+                "remoteHost": "hyper.tail.ts.net",
+                "remotePort": 9876,
+                "remoteToken": "s3cr3t-host-token",
+                "remoteFingerprint": "AA:BB:CC",
+                "createdAt": 1,
+                "updatedAt": 2,
+            }],
+            "activeProfileIds": ["hyper"],
+        });
+
+        send_remote_event_to_clients(&clients, "profile:changed", &payload);
+
+        let frame = rx.try_recv().expect("the client received a frame");
+        let raw = serde_json::to_string(&frame).expect("serializes");
+        assert!(
+            !raw.contains("s3cr3t-host-token"),
+            "token left the host: {raw}"
+        );
+        assert!(
+            !raw.contains("hyper.tail.ts.net"),
+            "address left the host: {raw}"
+        );
+        // A v1 client reads args[0], a v2 client reads params. Both must be sanitized
+        // AND both must still name the profile.
+        assert_eq!(frame["params"]["profiles"][0]["id"], json!("hyper"));
+        assert_eq!(frame["args"][0]["profiles"][0]["id"], json!("hyper"));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use std::borrow::Cow;
 use std::io::{Read, Write};
 
 pub const REMOTE_PROTOCOL_LEGACY_V1: &str = "bat-remote/legacy-v1";
@@ -539,6 +540,78 @@ pub fn normalize_remote_invoke(request: RemoteInvokeRequest) -> HostDispatchRequ
     }
 }
 
+/// What a remote client is allowed to know about a profile.
+///
+/// A distinct type rather than a "clear the sensitive fields before sending" pass,
+/// because a denylist leaks whatever sensitive field is added to `ProfileEntry`
+/// next. Here the struct IS the allowlist and serde drops everything else, so a
+/// new field has to be added deliberately to reach a client.
+///
+/// Nothing here is a credential, by design. A remote client never dials anything
+/// itself — it asks this host to operate a profile and the host does the dialling —
+/// so it needs neither the token nor the address of the target. Handing those down
+/// so a client could dial directly would be handing out another machine's
+/// credentials to something that was never authorised to reach it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteProfileEntry {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(rename = "type", default)]
+    pub kind: String,
+    /// Display only: the cached name of the host-side profile a remote alias points
+    /// at, so a client can label the row without dialling anywhere to look it up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_profile_name: Option<String>,
+    #[serde(default)]
+    pub created_at: i64,
+    #[serde(default)]
+    pub updated_at: i64,
+}
+
+/// Rewrite a profile payload's `profiles` array through `RemoteProfileEntry`. Any
+/// other key is passed through untouched, and a payload without a `profiles` array
+/// comes back unchanged.
+///
+/// Every field defaults, so any object entry survives with blanks for whatever it
+/// lacked; an entry that is not an object is not a profile and is dropped rather
+/// than forwarded as-is.
+pub fn strip_profile_secrets(payload: &Value) -> Value {
+    let Some(map) = payload.as_object() else {
+        return payload.clone();
+    };
+    let Some(Value::Array(profiles)) = map.get("profiles") else {
+        return payload.clone();
+    };
+    let sanitized = profiles
+        .iter()
+        .filter_map(|entry| serde_json::from_value::<RemoteProfileEntry>(entry.clone()).ok())
+        .filter_map(|entry| serde_json::to_value(entry).ok())
+        .collect::<Vec<_>>();
+    let mut out = map.clone();
+    out.insert("profiles".to_string(), Value::Array(sanitized));
+    Value::Object(out)
+}
+
+/// Event params as a remote client should see them.
+///
+/// Gated on the channel rather than "strip any `profiles` key you find": workspace
+/// state has a `profiles` key too, and rewriting that would corrupt an unrelated
+/// payload. Canonicalises first, like every other channel match in this module.
+///
+/// MUST run before `event_params_to_legacy_v1_args`: that folds `profile:changed`
+/// params into `vec![params.clone()]`, so a sanitize placed after it would leave
+/// the untouched original sitting in the legacy v1 args.
+pub fn remote_event_params_for_clients<'a>(channel: &str, params: &'a Value) -> Cow<'a, Value> {
+    if canonical_remote_channel(channel) == "profile:changed" {
+        Cow::Owned(strip_profile_secrets(params))
+    } else {
+        Cow::Borrowed(params)
+    }
+}
+
 pub fn event_params_to_legacy_v1_args(channel: &str, params: &Value) -> Vec<Value> {
     let canonical = canonical_remote_channel(channel);
     let channel = canonical.as_str();
@@ -756,6 +829,109 @@ mod tests {
             "claude:account-changed"
         );
         assert!(is_proxied_remote_event("agent:account-changed"));
+    }
+
+    // A hydrated profile index as the host holds it: `remoteToken` is the live
+    // credential for ANOTHER machine, read back out of the keyring on every index
+    // read, and it must not leave this host.
+    fn profile_payload() -> Value {
+        json!({
+            "profiles": [
+                {
+                    "id": "default",
+                    "name": "Default",
+                    "type": "local",
+                    "createdAt": 1,
+                    "updatedAt": 2,
+                },
+                {
+                    "id": "hyper",
+                    "name": "Tail Hyper",
+                    "type": "remote",
+                    "remoteHost": "hyper.tail.ts.net",
+                    "remotePort": 9876,
+                    "remoteToken": "s3cr3t-host-token",
+                    "remoteFingerprint": "AA:BB:CC",
+                    "remoteProfileId": "default",
+                    "remoteProfileName": "Hyper Default",
+                    "createdAt": 3,
+                    "updatedAt": 4,
+                },
+            ],
+            "activeProfileIds": ["default"],
+        })
+    }
+
+    #[test]
+    fn profile_credentials_do_not_reach_a_remote_client() {
+        let sanitized = strip_profile_secrets(&profile_payload());
+        let raw = serde_json::to_string(&sanitized).expect("serializes");
+        // Asserted against the whole serialized frame, not field by field: a field
+        // check only covers the fields somebody remembered to name.
+        assert!(!raw.contains("s3cr3t-host-token"), "token leaked: {raw}");
+        assert!(!raw.contains("remoteToken"), "token key leaked: {raw}");
+        assert!(!raw.contains("hyper.tail.ts.net"), "address leaked: {raw}");
+        assert!(!raw.contains("AA:BB:CC"), "fingerprint leaked: {raw}");
+    }
+
+    #[test]
+    fn sanitized_profiles_still_carry_what_a_client_renders() {
+        let sanitized = strip_profile_secrets(&profile_payload());
+        // activeProfileIds is not a profile field and must survive untouched, or the
+        // client cannot tell which profile is live.
+        assert_eq!(sanitized["activeProfileIds"], json!(["default"]));
+        let remote = &sanitized["profiles"][1];
+        assert_eq!(remote["id"], json!("hyper"));
+        assert_eq!(remote["name"], json!("Tail Hyper"));
+        assert_eq!(remote["type"], json!("remote"));
+        assert_eq!(remote["remoteProfileName"], json!("Hyper Default"));
+        assert_eq!(remote["createdAt"], json!(3));
+        assert_eq!(remote["updatedAt"], json!(4));
+        // Same field set the desktop's own remote list_profiles reader keeps, and a
+        // superset of what BAT Mobile's normalizeProfiles whitelists, so stripping
+        // costs no client-visible information.
+        assert_eq!(sanitized["profiles"][0]["type"], json!("local"));
+    }
+
+    #[test]
+    fn a_new_profile_field_is_absent_until_it_is_added_deliberately() {
+        // The point of routing through RemoteProfileEntry rather than clearing known
+        // fields: whatever gets added to ProfileEntry next does not reach a client
+        // just because nobody remembered to clear it.
+        let payload = json!({
+            "profiles": [{ "id": "x", "name": "X", "type": "local", "someFutureSecret": "nope" }],
+        });
+        let raw = serde_json::to_string(&strip_profile_secrets(&payload)).expect("serializes");
+        assert!(!raw.contains("someFutureSecret"), "unknown field kept: {raw}");
+    }
+
+    #[test]
+    fn only_profile_events_are_rewritten() {
+        // Channel-gated: workspace payloads have a `profiles` key of their own shape
+        // and must pass through byte-identical.
+        let workspace = json!({ "profiles": [{ "unrelated": "shape" }] });
+        assert_eq!(
+            remote_event_params_for_clients("workspace:reload", &workspace).as_ref(),
+            &workspace
+        );
+        let payload = profile_payload();
+        let sanitized = remote_event_params_for_clients("profile:changed", &payload);
+        assert!(!serde_json::to_string(sanitized.as_ref())
+            .expect("serializes")
+            .contains("remoteToken"));
+    }
+
+    #[test]
+    fn the_legacy_v1_args_carry_the_sanitized_payload_too() {
+        // profile:changed folds the whole payload into args, so a v1 client reads
+        // `args[0]`, not `params`. Sanitizing after the fold would clean the copy
+        // nobody reads. This asserts the order the server actually uses.
+        let payload = profile_payload();
+        let sanitized = remote_event_params_for_clients("profile:changed", &payload);
+        let args = event_params_to_legacy_v1_args("profile:changed", sanitized.as_ref());
+        let raw = serde_json::to_string(&args).expect("serializes");
+        assert!(!raw.contains("remoteToken"), "token leaked via v1 args: {raw}");
+        assert_eq!(args[0]["profiles"][1]["id"], json!("hyper"));
     }
 
     // Stand-ins for certificate fingerprints. The real ones are 95 chars of
