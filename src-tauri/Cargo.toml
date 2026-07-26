@@ -130,51 +130,57 @@ codegen-units = 256
 # compile-time cost.
 strip = "symbols"
 
-# 97% of a release build is LLVM optimising this one crate. Measured on a 16-core
-# box, -j 4, dependencies warm so only our crate rebuilds — which is all CI ever
-# compiles:
-#   front-end (cargo check)              4.5s    3%
-#   LLVM optimising our code           120.8s   77%
-#   bin monomorphisation + link         33.8s   22%
-# So neither line count nor core count is the lever. The whole 34k-line crate
-# front-ends in 4.5s, and -j 1/2/4/8/16 measured 184/170/153/163/170s — 4 is the
-# peak and 16 is *slower*. opt-level is the lever. Interleaved, 3 reps each,
-# ranges not overlapping:
-#   opt-level 3    avg 196.9s (189.9-208.1)   49.9 MB exe
-#   opt-level "z"  avg 131.9s (129.4-135.4)   42.9 MB exe
+# DO NOT re-add `[profile.release.package.better-agent-terminal] opt-level = "z"`
+# without measuring on CI first. It was added on v3.1.54-pre.2 and reverted the
+# same day, because it made CI builds roughly 2.2x SLOWER, not 33% faster.
 #
-# Scoped to this package deliberately: all 806 dependencies keep opt-level 3, so
-# every CPU-bound library still gets full optimisation — aes-gcm/aes/cbc/pbkdf2/
-# sha2, flate2, image's PNG decode, rustls, tungstenite framing, and serde_json's
-# parser (this crate deserialises into serde_json::Value rather than derived
-# structs nearly everywhere, so parsing stays inside serde_json instead of being
-# monomorphised in here). What remains in this crate is command dispatch, json!
-# assembly, process spawning and syscall-bound IO — the PTY reader is a blocking
-# 4 KB read() whose cost is the syscall, not the codegen.
+# The local benchmark that justified it (3 interleaved reps, non-overlapping
+# ranges: opt-level 3 = 196.9s, "z" = 131.9s, on a 16-core Windows box at -j 4)
+# was simply not measuring what CI does. CI does the same nominal work — every
+# dependency restored from cache, only this crate rebuilt — in 94s on a 4-vCPU
+# runner. A 16-core box cannot be 2x slower at identical work, so the benchmark
+# was compiling more than CI compiles, and its ranking cannot be trusted either.
 #
-# Adopting this cost exactly one release, and the note that used to sit here got
-# the reason wrong, so to be precise: scoping the override to this package does
-# keep CARGO's fingerprint local — the dependencies' artifacts stay valid and
-# cargo rebuilds only this crate. But that is not what decides whether CI has a
-# target dir to rebuild *into*. Swatinem/rust-cache derives its GHA cache key
-# from `JSON.stringify(toml.parse(Cargo.toml))` (config.ts), i.e. the whole
-# parsed manifest — so a new [profile.*] table is a new key, a new key restores
-# nothing, and all 806 dependencies compile from scratch.
+# What CI actually measured, with the Rust source BYTE-IDENTICAL between the two
+# tags (the only other commit in between, 2b1fbf9, touches renderer TSX/CSS/JSON
+# and not one .rs file) and a full cache hit on both sides:
+#                          opt-level 3      opt-level "z"
+#   windows-latest            94s              206s
+#   macos-14 (cargo phase)    35s               89s
+# Two platforms, same direction, same factor. Not runner noise — for scale, the
+# mac dmg bundling step varied 41s -> 61s in the same pair, and opt-level cannot
+# touch hdiutil.
 #
-# Measured on the same windows-latest leg, same rustc 1.97.1, Cargo.lock
-# untouched:
+# The mechanism is unsurprising in hindsight: "z" optimises for SIZE, which drops
+# the inline threshold to near zero. Less inlining means more functions survive as
+# distinct entities through the whole LLVM pipeline, so there is *more* to codegen,
+# not less — and with codegen-units = 256 that work is spread over more units.
+# Optimising for size is not optimising for compile time.
+#
+# It did shrink the Windows lightweight installer 34.1 -> 31.3 MB. That is not
+# worth doubling every release's critical path.
+#
+# The second thing that release taught, worth keeping because it constrains every
+# future attempt: ANY new or removed table in this file is a cache miss. Swatinem/
+# rust-cache derives its GHA key from `JSON.stringify(toml.parse(Cargo.toml))`
+# (config.ts) — the whole parsed manifest, not just the dependency sections. So
+# adding the profile table cost one release a full 806-dependency rebuild:
 #   v3.1.54-pre.1   cache hit     94s
-#   v3.1.54-pre.2   cache miss   908s   <- the cost of adopting this
-# One-time: pre.2 saved the cache under the new key and its retry hit it again.
+#   v3.1.54-pre.2   cache miss   908s
+# Verified by reproducing that hashing against this exact manifest. What it does
+# NOT include: comments (TOML parsing drops them) and package.version (normalised
+# to "0.0.0"). So editing this comment block, or bumping the version, is free —
+# which is why the revert above restores the pre-change key exactly and rehits the
+# still-live -8d9ddd59 cache entries instead of paying the rebuild twice.
 #
-# What that hashing does NOT include, from the same source: comments (TOML
-# parsing drops them) and package.version (normalised to "0.0.0"). Editing this
-# comment block, or bumping the version, is therefore free.
+# That is also the standing reason codegen-units stays at 256: dropping it is
+# another full-rebuild release to save ~4 seconds. Bundle it with whatever
+# invalidates the caches next — a Cargo.lock change or a toolchain bump.
 #
-# The corollary is a window that was missed here. pre.2 invalidated all seven
-# target dirs anyway, which was exactly the moment codegen-units above should
-# have been dropped in the same commit, for nothing. It wasn't. Bundle it with
-# whatever invalidates the caches next — a Cargo.lock change or a toolchain bump
-# — rather than spending another full-rebuild release on ~4 seconds.
-[profile.release.package.better-agent-terminal]
-opt-level = "z"
+# Structural facts about this build that survive the retraction, since they came
+# from separate measurements and none of them point at opt-level: the front end is
+# a rounding error (the whole 34k-line crate `cargo check`s in 4.5s, so line count
+# is not a lever), and more cores do not help (-j 1/2/4/8/16 spanned only
+# 184/170/153/163/170s, peaking at 4 — the standard runner's width already). Both
+# came off the same local harness whose absolute numbers CI contradicts, so treat
+# them as directions, not values.
