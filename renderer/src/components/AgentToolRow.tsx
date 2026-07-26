@@ -10,6 +10,12 @@
 // the pieces stay together against the right edge. `.claude-tool-time` carries
 // `margin-left: auto` for the older headers that still position it themselves, so
 // the group's CSS neutralises it.
+//
+// This is the only `.claude-tool-header` that renders a chevron. The specialised
+// headers in both panels show a timestamp and nothing else, so the timestamp
+// column is kept straight in CSS — see `--claude-chevron-slot` in
+// claude-agent.css, which reserves the chevron's width on every header whether or
+// not it has one. Adding a trailing element here means widening that slot too.
 
 import { formatFullTimestamp, formatTimestamp } from './CodexAgentPanel.helpers'
 

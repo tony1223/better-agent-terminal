@@ -931,6 +931,32 @@
   cursor: pointer;
   user-select: none;
   font-size: calc(var(--claude-font-size) - 1px);
+
+  /* Width reserved at the right edge for the expand chevron, so the timestamp
+     lands in the same column on every tool row. Only AgentToolRow puts a chevron
+     in this header; the specialised headers (plan, task, notice…) carry a
+     timestamp and nothing else, so without a reserved slot their time sits flush
+     right while every expandable row's time is pushed left by the chevron — the
+     column zig-zags all the way down the timeline.
+
+     Sized a shade wider than the glyph on purpose: the chevron is right-aligned
+     inside the slot so it does not move, and CSS cannot measure a glyph's advance
+     to match the spacer against it. Guessing short would let the chevron overflow
+     back over the timestamp, so the slack goes the harmless way. */
+  --claude-chevron-slot: calc(var(--claude-font-size) - 1px);
+}
+
+.claude-tool-header .claude-tool-chevron {
+  width: var(--claude-chevron-slot);
+  flex: none;
+  text-align: right;
+}
+
+/* Headers with nothing to expand still owe the column its slot. */
+.claude-tool-header:not(:has(.claude-tool-chevron))::after {
+  content: '';
+  flex: none;
+  width: var(--claude-chevron-slot);
 }
 
 .claude-tool-header:hover .claude-tool-name {
