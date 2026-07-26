@@ -72,8 +72,13 @@
 
 - `package.json` 與 `src-tauri/tauri.conf.json` 的 committed version 固定維持 `0.0.1-dev`。
 - 發版時只建立 / push tag；不要 commit release version bump。GitHub Actions 會從 tag 注入實際 build 版本。
-- **正式版**: `release new tag version` → 基於最新 tag 遞增 patch 版號，建立 tag 並 push
-  - 例：目前 `v2.2.27` → 建立 `v2.2.28` tag
+- **說法對應**：下面每一組都是指同一個動作，直接執行，不要反問要哪一種。
+  - 「發布測試版」/「測試版」/「預覽版」/「發 pre」/ `release a pre tag version` / `release new pre tag version` → **預覽版**流程
+  - 「發布正式版」/「正式版」/「發正式」/ `release a tag version` / `release new tag version` → **正式版**流程
+- **正式版**: 建立 tag 並 push
+  - 最新 tag 是正式版時：遞增 patch 版號。例：`v2.2.27` → `v2.2.28`
+  - 最新 tag 是 `-pre` 時：**直接用它的版號，不要再遞增**。例：`v2.2.28-pre.3` → `v2.2.28`
+    - `-pre.N` 是「X 的預覽」，所以轉正式就是 X 本身。遞增會跳號並讓那些預覽變成從未發布過的版本。
 - **預覽版**: `release new pre tag version` → 基於最新 tag 遞增 patch 版號，加 `-pre.1` 後綴
   - 例：目前 `v2.2.27` → 建立 `v2.2.28-pre.1`
   - 若已有 `v2.2.28-pre.1` → 建立 `v2.2.28-pre.2`
