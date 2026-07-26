@@ -236,6 +236,7 @@ fn app_builder(headless: bool) -> tauri::Builder<tauri::Wry> {
             runtime_cmd::runtime_clear_managed,
             shell_cmd::shell_open_external,
             shell_cmd::shell_open_path,
+            shell_cmd::shell_reveal_path,
             dialog_cmd::dialog_confirm,
             dialog_cmd::dialog_select_folder,
             dialog_cmd::dialog_select_files,

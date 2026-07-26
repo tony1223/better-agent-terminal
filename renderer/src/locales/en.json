@@ -13,7 +13,8 @@
     "retry": "Retry",
     "refresh": "Refresh",
     "loading": "Loading...",
-    "preview": "Preview"
+    "preview": "Preview",
+    "openContainingFolder": "Open Containing Folder"
   },
 
   "app": {

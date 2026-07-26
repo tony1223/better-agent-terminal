@@ -500,6 +500,10 @@ function createTauriHost(): BatAppAPI {
     shell: {
       openExternal: (url: string) => getInvoke()<void>('shell_open_external', { url }),
       openPath: (path: string) => getInvoke()<void>('shell_open_path', { path }),
+      // Opens the containing folder with the item selected, like a native
+      // right-click "Show in Folder". Distinct from openPath, which hands the
+      // file to its default app.
+      revealPath: (path: string) => getInvoke()<void>('shell_reveal_path', { path }),
       // Tauri native drag/drop routes absolute paths through webview events.
       // Browser File drops can still reach this fallback in non-native builds;
       // use a cached/native or non-standard path when present, otherwise return

@@ -24,8 +24,12 @@
   background: var(--bg-hover);
 }
 
-/* Workspace Context Menu */
-.workspace-context-menu {
+/* Floating context menu (viewport-positioned, icon + label rows).
+   `.workspace-context-menu` is the original name; `.floating-context-menu` is the
+   same look for callers that are not the workspace tree, so the two stay visually
+   identical instead of drifting apart as copies. */
+.workspace-context-menu,
+.floating-context-menu {
   position: fixed;
   background: var(--bg-secondary);
   border: 1px solid var(--border-color);
@@ -36,7 +40,8 @@
   z-index: 1000;
 }
 
-.workspace-context-menu .context-menu-item {
+.workspace-context-menu .context-menu-item,
+.floating-context-menu .context-menu-item {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -47,16 +52,31 @@
   transition: background 0.15s;
 }
 
-.workspace-context-menu .context-menu-item:hover {
+.workspace-context-menu .context-menu-item:hover,
+.floating-context-menu .context-menu-item:hover {
   background: var(--bg-hover);
 }
 
-.workspace-context-menu .context-menu-item.danger {
+.workspace-context-menu .context-menu-item.danger,
+.floating-context-menu .context-menu-item.danger {
   color: var(--danger-color);
 }
 
-.workspace-context-menu .context-menu-item.danger:hover {
+.workspace-context-menu .context-menu-item.danger:hover,
+.floating-context-menu .context-menu-item.danger:hover {
   background: rgba(239, 68, 68, 0.1);
+}
+
+/* A failed menu action reports itself in place. Inline chat text has nowhere to
+   host a toast, and the app has no global one, so the menu stays open and says
+   what went wrong instead of appearing to do nothing. */
+.floating-context-menu .context-menu-error {
+  max-width: 320px;
+  padding: 6px 14px 8px;
+  color: var(--danger-color);
+  font-size: 12px;
+  line-height: 1.4;
+  word-break: break-all;
 }
 
 .context-menu-divider {

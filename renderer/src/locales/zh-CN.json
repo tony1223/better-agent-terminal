@@ -13,7 +13,8 @@
     "retry": "重试",
     "refresh": "刷新",
     "loading": "加载中...",
-    "preview": "预览"
+    "preview": "预览",
+    "openContainingFolder": "打开文件所在文件夹"
   },
   "app": {
     "workspaceNotFound": "找不到工作区",

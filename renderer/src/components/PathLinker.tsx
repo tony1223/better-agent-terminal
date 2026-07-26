@@ -1,5 +1,6 @@
 import { host } from '../host-api'
 import { useState, useEffect, useCallback, useRef, Fragment } from 'react'
+import { useTranslation } from 'react-i18next'
 import hljs from 'highlight.js/lib/core'
 import 'highlight.js/styles/vs2015.css'
 // Register only the languages we actually use (saves ~800KB vs full highlight.js)
@@ -200,6 +201,18 @@ interface FilePreviewModalProps {
 // colon. Some callers (chat citations, stdout pastes) include the line suffix;
 // fs.stat / fs.readFile would reject it on Windows because ':' is invalid in
 // file names.
+// Tauri rejects commands with a plain object, a bare string, or an Error
+// depending on where the failure happened, so every call site needs the same
+// unwrapping before it can show the user anything useful.
+function errorMessage(err: unknown, fallback: string): string {
+  if (err instanceof Error) return err.message
+  if (typeof err === 'string') return err
+  if (err && typeof err === 'object' && 'message' in err) {
+    return String((err as { message: unknown }).message)
+  }
+  return fallback
+}
+
 function stripLineSuffix(p: string): { path: string; line?: number; column?: number } {
   if (!p) return { path: p }
   const m = p.match(/^(.+?\.[A-Za-z0-9]{1,10}):(\d+)(?::(\d+))?$/)
@@ -263,13 +276,7 @@ export function FilePreviewModal({ filePath: rawFilePath, onClose }: FilePreview
     try {
       await host.shell.openPath(filePath)
     } catch (openPathError) {
-      const message = openPathError instanceof Error
-        ? openPathError.message
-        : typeof openPathError === 'string'
-          ? openPathError
-          : openPathError && typeof openPathError === 'object' && 'message' in openPathError
-            ? String((openPathError as { message: unknown }).message)
-            : 'Unable to open file'
+      const message = errorMessage(openPathError, 'Unable to open file')
       setOpenError(message)
       void host.debug.log(`[FilePreview] openPath failed: ${message}`)
     }
@@ -433,7 +440,22 @@ interface LinkedTextProps {
 }
 
 export function LinkedText({ text }: LinkedTextProps) {
+  const { t } = useTranslation()
   const [previewPath, setPreviewPath] = useState<string | null>(null)
+  // Right-click target for "open containing folder". A single menu lives here
+  // rather than one per link: a long agent reply can cite hundreds of paths.
+  const [menu, setMenu] = useState<{ x: number; y: number; path: string } | null>(null)
+  const [menuError, setMenuError] = useState<string | null>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!menu) return
+    const handleClickOutside = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenu(null)
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [menu])
 
   const handleClick = useCallback((path: string) => {
     if (path.endsWith('.md')) {
@@ -442,6 +464,32 @@ export function LinkedText({ text }: LinkedTextProps) {
       setPreviewPath(path)
     }
   }, [])
+
+  const handleContextMenu = useCallback((e: React.MouseEvent, path: string) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setMenuError(null)
+    setMenu({ x: e.clientX, y: e.clientY, path })
+  }, [])
+
+  const handleReveal = useCallback(async () => {
+    if (!menu) return
+    // A cited path often carries "file.ts:42"; ':' is not legal in a Windows
+    // file name, so the host would reject it outright.
+    const { path } = stripLineSuffix(menu.path)
+    try {
+      await host.shell.revealPath(path)
+      setMenu(null)
+    } catch (revealError) {
+      // No app-wide toast exists, and inline chat text has nowhere to put one, so
+      // the menu stays open and reports the failure itself. The host already
+      // walks up to the nearest surviving folder, so getting here means nothing
+      // on the path exists — worth saying rather than silently doing nothing.
+      const message = errorMessage(revealError, 'Unable to open the containing folder')
+      setMenuError(message)
+      void host.debug.log(`[PathLinker] revealPath failed: ${message}`)
+    }
+  }, [menu])
 
   const handleUrl = useCallback((url: string, e: React.MouseEvent) => {
     e.preventDefault()
@@ -463,6 +511,7 @@ export function LinkedText({ text }: LinkedTextProps) {
               key={i}
               className="path-link"
               onClick={(e) => { e.stopPropagation(); handleClick(token.text) }}
+              onContextMenu={(e) => handleContextMenu(e, token.text)}
               title={`Click to preview: ${token.text}`}
             >
               {token.text}
@@ -485,6 +534,21 @@ export function LinkedText({ text }: LinkedTextProps) {
         }
         return <Fragment key={i}>{token.text}</Fragment>
       })}
+      {menu && (
+        <div
+          ref={menuRef}
+          className="floating-context-menu"
+          style={{ left: menu.x, top: menu.y }}
+        >
+          <div className="context-menu-item" onClick={() => { void handleReveal() }}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+            </svg>
+            {t('common.openContainingFolder')}
+          </div>
+          {menuError && <div className="context-menu-error">{menuError}</div>}
+        </div>
+      )}
       {previewPath && (
         <FilePreviewModal
           filePath={previewPath}
