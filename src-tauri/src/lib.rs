@@ -10,7 +10,8 @@ mod app_data;
 #[cfg(feature = "desktop")]
 mod app_menu;
 mod async_rt;
-#[cfg(feature = "desktop")]
+// Not desktop-gated: the usage poller runs on the headless bat-server too, so a
+// remote client paired with a headless host still gets 5h/7d numbers.
 mod claude_usage;
 mod codex_account_store;
 mod codex_app_server;
@@ -208,7 +209,9 @@ fn app_builder(headless: bool) -> tauri::Builder<tauri::Wry> {
                 // Host-wide 5h/7d subscription usage poller (one thread per
                 // host, active account per tick). Rust-side so it survives
                 // sidecar restarts and works before the node runtime exists.
-                claude_usage::start(app.handle().clone());
+                claude_usage::start(host_context::HostContext::from_app(
+                    app.handle().clone(),
+                ));
                 if let Ok(token) = std::env::var("BAT_TAURI_DYNAMIC_WINDOW_SMOKE_TOKEN") {
                     let handle = app.handle().clone();
                     std::thread::spawn(move || {
@@ -491,6 +494,12 @@ fn run_headless_server(args: HeadlessServerArgs) -> Result<(), String> {
     host.manage(codex_app_server::CodexAppServerState::default());
 
     let ctx = HostContext::from_headless(std::sync::Arc::new(host));
+
+    // Usage is host-owned state, and a remote client paired with a headless host
+    // expects 5h/7d numbers here exactly as it would from a desktop host. Started
+    // before `ctx` is moved into the server; its broadcasts reach clients through
+    // the emit sink, and its snapshot map answers the pull channel.
+    claude_usage::start(ctx.clone());
 
     let mut options = json!({
         "port": args.port,

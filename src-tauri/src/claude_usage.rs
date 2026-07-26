@@ -9,8 +9,14 @@
 // ONE thread per host, keyed to the ACTIVE account: every cycle re-reads
 // <CLAUDE_CONFIG_DIR|~/.claude>/.credentials.json, so an account switch is
 // picked up on the next tick. Renderer windows never poll — they consume the
-// `claude:usage` runtime event, which the event hub also relays to remote
+// `agent:usage` runtime event, which the event hub also relays to remote
 // clients (host-owned data per the remote state ownership policy).
+//
+// Runs on the headless bat-server too, not just the desktop shell: a remote
+// client (BAT Mobile) may well be paired with a headless host, and usage is
+// host-owned state it expects to receive there like anywhere else. Everything
+// here goes through HostContext for that reason — there is no AppHandle on a
+// headless host. `BAT_DISABLE_USAGE_POLL=1` opts a host out entirely.
 //
 // Data source is the same endpoint the CLI's /usage command uses
 // (api.anthropic.com/api/oauth/usage). It is UNDOCUMENTED: parsing is
@@ -23,17 +29,15 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
-use tauri::{AppHandle, Manager};
-
-use crate::app_data;
 use crate::event_hub::publish_runtime_event;
+use crate::host_context::HostContext;
 use crate::log_file::append_line;
 
 // Persisted diagnostics follow the project convention: append to
 // <app-data>/logs/debug.log (same file the renderer logger uses).
-fn warn(app: &AppHandle, message: &str) {
+fn warn(ctx: &HostContext, message: &str) {
     eprintln!("[claude-usage] {message}");
-    if let Some(dir) = app_data::app_data_dir_opt(app) {
+    if let Some(dir) = ctx.data_dir_opt() {
         let millis = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
@@ -52,13 +56,13 @@ const BACKOFF_MAX: Duration = Duration::from_secs(900);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(15);
 const FIRST_POLL_DELAY: Duration = Duration::from_secs(3);
 
-fn claude_config_dir(app: &AppHandle) -> Option<PathBuf> {
+fn claude_config_dir(ctx: &HostContext) -> Option<PathBuf> {
     if let Ok(dir) = std::env::var("CLAUDE_CONFIG_DIR") {
         if !dir.trim().is_empty() {
             return Some(PathBuf::from(dir));
         }
     }
-    app.path().home_dir().ok().map(|home| home.join(".claude"))
+    ctx.home_dir().map(|home| home.join(".claude"))
 }
 
 enum TokenError {
@@ -78,7 +82,7 @@ fn token_from_credentials_json(raw: &str) -> Result<String, TokenError> {
     }
 }
 
-fn read_access_token(app: &AppHandle) -> Result<String, TokenError> {
+fn read_access_token(ctx: &HostContext) -> Result<String, TokenError> {
     // account_store::read_cli_credentials handles the platform differences
     // (file on Windows/Linux, Keychain on macOS). Fall back to the config-dir
     // file for CLAUDE_CONFIG_DIR overrides in dev/tests.
@@ -87,7 +91,7 @@ fn read_access_token(app: &AppHandle) -> Result<String, TokenError> {
             return Ok(token);
         }
     }
-    let path = claude_config_dir(app)
+    let path = claude_config_dir(ctx)
         .ok_or(TokenError::Missing)?
         .join(".credentials.json");
     let raw = std::fs::read_to_string(path).map_err(|_| TokenError::Missing)?;
@@ -143,8 +147,8 @@ pub fn normalize_usage_response(data: &Value) -> Option<Value> {
 // Best-effort label: which account do these percentages belong to. Reads the
 // sidecar-maintained account index from the app data dir; any failure simply
 // drops the label.
-fn active_account_email(app: &AppHandle) -> Option<String> {
-    let data_dir = crate::sidecar::resolve_spawn_config(app).ok()?.data_dir?;
+fn active_account_email(ctx: &HostContext) -> Option<String> {
+    let data_dir = ctx.sidecar_spawn_config().ok()?.data_dir?;
     let raw = std::fs::read_to_string(data_dir.join("claude-accounts.json")).ok()?;
     let parsed: Value = serde_json::from_str(&raw).ok()?;
     let active_id = parsed.get("activeAccountId")?.as_str()?;
@@ -158,8 +162,8 @@ fn active_account_email(app: &AppHandle) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-fn poll_once(app: &AppHandle, client: &reqwest::blocking::Client) -> Duration {
-    let token = match read_access_token(app) {
+fn poll_once(ctx: &HostContext, client: &reqwest::blocking::Client) -> Duration {
+    let token = match read_access_token(ctx) {
         Ok(token) => token,
         Err(_) => return CREDS_MISSING_RETRY, // not logged in here: stay quiet
     };
@@ -179,13 +183,13 @@ fn poll_once(app: &AppHandle, client: &reqwest::blocking::Client) -> Duration {
         Err(err) => {
             // 401 self-heals: the CLI refreshes credentials and the next tick
             // re-reads the file. 429/5xx/network: back off.
-            warn(app, &format!("poll failed: {err}"));
+            warn(ctx, &format!("poll failed: {err}"));
             return BACKOFF_MAX.min(POLL_INTERVAL * 4);
         }
     };
 
     let Some(mut snapshot) = normalize_usage_response(&data) else {
-        warn(app, "response had no usable windows (schema drift?)");
+        warn(ctx, "response had no usable windows (schema drift?)");
         return BACKOFF_MAX.min(POLL_INTERVAL * 4);
     };
 
@@ -193,14 +197,14 @@ fn poll_once(app: &AppHandle, client: &reqwest::blocking::Client) -> Duration {
         obj.insert("provider".into(), json!("claude"));
         obj.insert(
             "accountEmail".into(),
-            active_account_email(app)
+            active_account_email(ctx)
                 .map(Value::String)
                 .unwrap_or(Value::Null),
         );
         obj.insert("fetchedAt".into(), json!(now_ms()));
     }
 
-    store_and_publish(app, "claude", snapshot);
+    store_and_publish(ctx, "claude", snapshot);
     POLL_INTERVAL
 }
 
@@ -220,7 +224,7 @@ fn snapshot_store() -> &'static Mutex<HashMap<String, Value>> {
     STORE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn store_and_publish(app: &AppHandle, provider: &str, snapshot: Value) {
+fn store_and_publish(ctx: &HostContext, provider: &str, snapshot: Value) {
     let first = {
         let Ok(mut store) = snapshot_store().lock() else {
             return;
@@ -229,24 +233,24 @@ fn store_and_publish(app: &AppHandle, provider: &str, snapshot: Value) {
             .insert(provider.to_string(), snapshot.clone())
             .is_none()
     };
-    publish_stored_snapshot(app, provider, snapshot, first);
+    publish_stored_snapshot(ctx, provider, snapshot, first);
 }
 
-fn publish_stored_snapshot(app: &AppHandle, provider: &str, snapshot: Value, first: bool) {
+fn publish_stored_snapshot(ctx: &HostContext, provider: &str, snapshot: Value, first: bool) {
     if first {
         // One success line per provider per app run, so logs can distinguish
         // "polled fine but nobody was listening" from "never ran".
-        warn(app, &format!("first {provider} usage snapshot published"));
+        warn(ctx, &format!("first {provider} usage snapshot published"));
     }
     publish_runtime_event(
-        &crate::host_context::HostContext::from_app(app.clone()),
+        ctx,
         "agent:usage",
         json!({ "payload": snapshot }),
         "rust-usage-poller",
     );
 }
 
-fn merge_and_publish_codex_update(app: &AppHandle, update: Value) {
+fn merge_and_publish_codex_update(ctx: &HostContext, update: Value) {
     let (snapshot, first) = {
         let Ok(mut store) = snapshot_store().lock() else {
             return;
@@ -257,11 +261,13 @@ fn merge_and_publish_codex_update(app: &AppHandle, update: Value) {
             .is_none();
         (snapshot, first)
     };
-    publish_stored_snapshot(app, "codex", snapshot, first);
+    publish_stored_snapshot(ctx, "codex", snapshot, first);
 }
 
-/// Pull path for the renderer cache: last snapshot per provider, or empty.
-#[tauri::command]
+/// Pull path for the renderer cache and for remote clients: last snapshot per
+/// provider, or empty. `tauri::command` only exists in the desktop build; the
+/// headless server reaches this through the remote invoke dispatch instead.
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn agent_usage_snapshot() -> Value {
     match snapshot_store().lock() {
         Ok(store) => json!(store.clone()),
@@ -274,13 +280,20 @@ pub fn agent_usage_snapshot() -> Value {
 // with a short cache so rapid menu reopens don't hammer the endpoint. Tokens
 // for inactive accounts are NEVER refreshed — if one has expired we simply
 // return null and the row shows no usage.
+//
+// Desktop-only, unlike the poller above: this backs a local menu affordance and
+// is reached solely as a Tauri command, with no remote channel. Ungated it would
+// be dead code on the headless server.
+#[cfg(feature = "desktop")]
 const PEEK_CACHE_TTL: Duration = Duration::from_secs(60);
 
+#[cfg(feature = "desktop")]
 fn peek_cache() -> &'static Mutex<HashMap<String, (std::time::Instant, Value)>> {
     static CACHE: OnceLock<Mutex<HashMap<String, (std::time::Instant, Value)>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn agent_usage_peek(account_id: String) -> Value {
     if let Ok(cache) = peek_cache().lock() {
@@ -485,37 +498,40 @@ fn timestamped_codex_snapshot(raw: &Value) -> Option<Value> {
 
 /// Publish a codex rate-limit snapshot (from poll or push notification) as an
 /// agent:usage event. Quietly drops unusable payloads.
-pub fn publish_codex_usage(app: &AppHandle, raw: &Value) {
+pub fn publish_codex_usage(ctx: &HostContext, raw: &Value) {
     let Some(snapshot) = timestamped_codex_snapshot(raw) else {
         return;
     };
-    store_and_publish(app, "codex", snapshot);
+    store_and_publish(ctx, "codex", snapshot);
 }
 
 /// Merge a sparse `account/rateLimits/updated` notification without reviving
 /// positional assumptions or clearing windows omitted by the notification.
-pub fn publish_codex_usage_update(app: &AppHandle, raw: &Value) {
+pub fn publish_codex_usage_update(ctx: &HostContext, raw: &Value) {
     let Some(update) = timestamped_codex_snapshot(raw) else {
         return;
     };
-    merge_and_publish_codex_update(app, update);
+    merge_and_publish_codex_update(ctx, update);
 }
 
 // Poll codex through the EXISTING shared app-server connection (one process,
 // one account). No connection (codex not in use) → cheap no-op; we never spawn
 // an app-server just to read usage.
-fn poll_codex_once(app: &AppHandle) -> Duration {
-    let state = app.state::<crate::codex_app_server::CodexAppServerState>();
-    match state.fetch_account_rate_limits(&crate::host_context::HostContext::from_app(app.clone()))
-    {
-        Some(raw) => publish_codex_usage(app, &raw),
-        None => {}
+fn poll_codex_once(ctx: &HostContext) -> Duration {
+    // try_state, not state: state() panics on an unregistered type, and this runs
+    // on the thread shared with the Claude poll — a panic here would take that
+    // down with it. A host with no codex app-server just has nothing to read.
+    if let Some(state) = ctx.try_state::<crate::codex_app_server::CodexAppServerState>() {
+        if let Some(raw) = state.fetch_account_rate_limits(ctx) {
+            publish_codex_usage(ctx, &raw);
+        }
     }
     POLL_INTERVAL
 }
 
-/// Spawn the host-wide poll thread. Call once from app setup.
-pub fn start(app: AppHandle) {
+/// Spawn the host-wide poll thread. Call once from host setup — desktop `setup`
+/// or the headless server's startup, both of which have a HostContext by then.
+pub fn start(ctx: HostContext) {
     if std::env::var("BAT_DISABLE_USAGE_POLL").as_deref() == Ok("1") {
         return;
     }
@@ -525,7 +541,7 @@ pub fn start(app: AppHandle) {
             let client = match reqwest::blocking::Client::builder().build() {
                 Ok(client) => client,
                 Err(err) => {
-                    warn(&app, &format!("http client init failed: {err}"));
+                    warn(&ctx, &format!("http client init failed: {err}"));
                     return;
                 }
             };
@@ -539,10 +555,10 @@ pub fn start(app: AppHandle) {
             loop {
                 let now = std::time::Instant::now();
                 if now >= claude_due {
-                    claude_due = now + poll_once(&app, &client);
+                    claude_due = now + poll_once(&ctx, &client);
                 }
                 if now >= codex_due {
-                    codex_due = now + poll_codex_once(&app);
+                    codex_due = now + poll_codex_once(&ctx);
                 }
                 std::thread::sleep(tick);
             }

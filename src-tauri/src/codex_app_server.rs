@@ -5979,11 +5979,10 @@ fn handle_notification(
         return;
     }
     if method == "account/rateLimits/updated" {
-        // Usage telemetry surfaces in the desktop status line only.
-        #[cfg(feature = "desktop")]
-        crate::claude_usage::publish_codex_usage_update(app.app(), &params);
-        #[cfg(not(feature = "desktop"))]
-        let _ = &params;
+        // Not desktop-only: this feeds the desktop status line AND the usage
+        // broadcast/pull that remote clients consume, including clients paired
+        // with a headless host.
+        crate::claude_usage::publish_codex_usage_update(app, &params);
         return;
     }
     let Some(session_id) = state.session_id_for_notification(&params) else {

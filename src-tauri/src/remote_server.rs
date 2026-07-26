@@ -1,5 +1,6 @@
 use crate::account_store;
 use crate::app_data;
+use crate::claude_usage;
 use crate::codex_app_server::{should_handle_codex, CodexAppServerState};
 #[cfg(feature = "desktop")]
 use crate::commands::update as update_cmd;
@@ -2127,6 +2128,22 @@ fn invoke_rust_for_remote(
                 return None;
             };
             route.map(|_| json!(false))
+        }
+        // Pull path for host-owned usage data, mirroring the renderer cache's
+        // startup pull. The broadcast alone is lossy for a remote client in a way
+        // it is not for the local webview: a phone connects at an arbitrary moment
+        // rather than alongside host startup, so landing between two 150s poller
+        // ticks is the norm, not the exception. Read-only, no sessionId, no side
+        // effects — hand back the stored map untouched, since the client parses it
+        // through the same code path as the broadcast. `{}` is a valid answer
+        // meaning "the poller has not landed a snapshot yet".
+        //
+        // Not desktop-gated: the poller runs on the headless bat-server too, so a
+        // client paired with a headless host gets real numbers here. `agent:` is
+        // the name to keep; the `claude:` spelling is accepted only for a client
+        // that tries the legacy name first.
+        "agent:usage-snapshot" | "claude:usage-snapshot" => {
+            Ok(claude_usage::agent_usage_snapshot())
         }
         "claude:auth-status" => Ok(claude_cmd::fetch_auth_status_native(&ctx)),
         "claude:account-list" => remote_app_data_dir(ctx, channel).and_then(|data_dir| {

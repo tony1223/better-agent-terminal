@@ -1,6 +1,6 @@
 import { host } from '../host-api'
 
-// Renderer-side cache for the host-wide `claude:usage` broadcast (the Rust
+// Renderer-side cache for the host-wide `agent:usage` broadcast (the Rust
 // host runs ONE poller per host, keyed to the active account). Panels read
 // the cached snapshot on mount and subscribe for refreshes — they never poll
 // themselves, and a panel opened between poll ticks still paints immediately.

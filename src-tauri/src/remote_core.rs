@@ -113,11 +113,30 @@ pub fn decode_remote_binary_frame(bytes: &[u8]) -> Result<Value, String> {
         .map_err(|err| format!("remote frame json parse failed: {err}"))
 }
 
+// `agent:` is the target naming and the `claude:` spellings are the legacy
+// surface being phased out; this rewrite is stage compatibility, not the end
+// state. So the list below is not an exception list — it is the set of channels
+// that ALREADY live under their final `agent:` name. Anything absent is still
+// folded onto its old `claude:` spelling so existing clients keep working.
+//
+// Adding a channel here is what "migrated" means, and it has to be done in step
+// with everything that matches on the canonical result: legacy_v1_param_keys,
+// is_proxied_remote_event, and invoke_rust_for_remote's arms.
 pub fn canonical_remote_channel(channel: &str) -> String {
     let Some(rest) = channel.strip_prefix("agent:") else {
         return channel.to_string();
     };
-    if rest == "list-presets" || rest == "get-supported-session-types" {
+    if matches!(
+        rest,
+        "list-presets"
+            | "get-supported-session-types"
+            // Usage was born agent:-native — the poller publishes `agent:usage`
+            // and the renderer listens on `agent:usage`. Folding it to
+            // `claude:usage` invented a name nothing publishes or listens to,
+            // which silently dropped the broadcast for every remote client.
+            | "usage"
+            | "usage-snapshot"
+    ) {
         channel.to_string()
     } else {
         format!("claude:{rest}")
@@ -179,6 +198,15 @@ fn legacy_v1_param_keys(channel: &str) -> Option<&'static [&'static str]> {
         | "claude:account-mark-warning-shown"
         | "claude:auth-login-start"
         | "claude:get-cli-path" => Some(&[]),
+        // Read-only pull of the host's last usage snapshot per provider. No params
+        // at all: host-wide, not scoped to a session. Declaring the empty key list
+        // also stops a stray positional arg from being reinterpreted as a param by
+        // the `_` fallback below.
+        //
+        // agent:-native, so the two spellings no longer collapse into one and both
+        // are listed: `agent:` is the name to keep, `claude:` is accepted only so a
+        // client that tries the legacy name first still gets an answer.
+        "agent:usage-snapshot" | "claude:usage-snapshot" => Some(&[]),
         "claude:auth-login-submit-code" => Some(&["code", "loginId"]),
         "claude:auth-login-cancel" => Some(&["loginId"]),
         "claude:prepare-cli-session" => Some(&[
@@ -526,6 +554,10 @@ pub fn is_proxied_remote_event(channel: &str) -> bool {
             // event_owner_key_for_event yields None and it fans out to every
             // window on the client rather than one session's owner.
             | "claude:account-changed"
+            // agent:-native, so it stays spelled that way here — see the
+            // migrated-channel list in canonical_remote_channel. This entry was
+            // correct all along; what broke it was canonicalization rewriting
+            // agent:usage into a claude:usage that nothing publishes.
             | "agent:usage"
             | "fs:changed"
             | "profile:changed"
@@ -591,6 +623,54 @@ mod tests {
             "claude:account-changed"
         );
         assert!(is_proxied_remote_event("agent:account-changed"));
+    }
+
+    #[test]
+    fn usage_broadcast_reaches_remote_clients() {
+        // Regression. `agent:usage` is the published topic AND the name the
+        // renderer listens on, so it is agent:-native and must survive
+        // canonicalization intact. It did not: the rewrite folded it to
+        // `claude:usage`, a name nothing publishes or listens to, so the allowlist
+        // entry could never match and every remote client silently missed the 150s
+        // broadcast. The local webview was unaffected, which is why it went unseen.
+        assert_eq!(canonical_remote_channel("agent:usage"), "agent:usage");
+        assert!(is_proxied_remote_event("agent:usage"));
+    }
+
+    #[test]
+    fn usage_snapshot_pull_is_reachable_under_both_channel_names() {
+        // agent: is the target naming, so the new pull channel is agent:-native and
+        // keeps its name through canonicalization.
+        assert_eq!(
+            canonical_remote_channel("agent:usage-snapshot"),
+            "agent:usage-snapshot"
+        );
+        // BAT Mobile tries agent:usage-snapshot first and falls back to the legacy
+        // claude: spelling, so that one has to reach the same host arm. Being
+        // agent:-native the two no longer collapse, hence both are registered.
+        assert_eq!(
+            canonical_remote_channel("claude:usage-snapshot"),
+            "claude:usage-snapshot"
+        );
+        assert_eq!(
+            remote_agent_channel("claude:usage-snapshot"),
+            "agent:usage-snapshot"
+        );
+        // A no-arg read, under either protocol and either spelling.
+        for channel in ["agent:usage-snapshot", "claude:usage-snapshot"] {
+            assert_eq!(legacy_v1_args_to_params(channel, &[]), Value::Null);
+            // Registered with an empty key list, so a stray positional arg is
+            // dropped instead of falling through to the `_` arm and becoming the
+            // params.
+            assert_eq!(
+                legacy_v1_args_to_params(channel, &[json!("stray")]),
+                json!({}),
+                "{channel} must ignore positional args"
+            );
+            // The pull is an invoke, not an event: it must not be confused with the
+            // broadcast, which keeps its own single-provider shape.
+            assert!(!is_proxied_remote_event(channel));
+        }
     }
 
     #[test]
