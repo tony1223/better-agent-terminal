@@ -49,10 +49,67 @@ assert.match(workflow, /CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS:\s*\$\
 assert.match(workflow, /aarch64_rustflags:\s*'-C link-arg=-lgcc'/)
 assert.doesNotMatch(workflow, /name:\s*Cache (?:root|sidecar) node_modules/)
 assert.match(workflow, /bat-server-build:\s*\n\s+needs:\s*verify/)
-assert.match(workflow, /bat-server-publish:\s*\n\s+needs:\s*\[release, bat-server-build\]/)
 assert.match(workflow, /GH_REPO:\s*\$\{\{ github\.repository \}\}/)
-assert.match(workflow, /pattern:\s*release-\*/)
 assert.match(workflow, /pattern:\s*updater-meta-\*/)
+
+// Incremental publishing. The release page is opened before the matrix runs and
+// each leg uploads its own installer, so a download appears as soon as ITS
+// platform is done rather than when the slowest one is, and a leg that fails
+// costs only its own asset instead of withholding the entire release.
+assert.match(workflow, /^\s{2}create-release:\s*\n\s+needs:\s*verify/m)
+assert.match(workflow, /build:\s*\n\s+needs:\s*\[verify, create-release\]/)
+// The matrix legs write to the release, so they need more than the read-only default.
+assert.match(workflow, /timeout-minutes:\s*90\n\s*#[^\n]*\n\s*permissions:\s*\n\s+contents:\s*write/)
+assert.match(workflow, /name:\s*Publish this platform's installer to the release/)
+// Ordered before the updater metadata upload: a manifest entry must never point
+// at an installer that failed to reach the page.
+assert.ok(
+  workflow.indexOf("name: Publish this platform's installer to the release")
+    < workflow.indexOf('name: Upload updater metadata'),
+  'the installer must be published before the updater metadata is uploaded',
+)
+// The whole point: manifests still get written when part of the matrix failed.
+assert.match(workflow, /release:\s*\n\s+needs:\s*\[create-release, build\]\s*\n\s+if:\s*\$\{\{ always\(\) && needs\.create-release\.result == 'success' \}\}/)
+assert.match(workflow, /bat-server-publish:\s*\n(?:\s*#[^\n]*\n)*\s+needs:\s*\[create-release, bat-server-build\]/)
+// A .dmg-less release must not bump the Homebrew cask to a download that 404s.
+assert.match(workflow, /steps\.legs\.outputs\.has_mac == 'true'/)
+// Nor should a failed Linux leg stop the Windows installer reaching Chocolatey.
+assert.match(workflow, /choco:\s*\n(?:\s*#[^\n]*\n)*\s+needs:\s*\[build, release\]\s*\n(?:\s*#[^\n]*\n)*\s+if:\s*\$\{\{ always\(\)/)
+assert.match(workflow, /steps\.winartifact\.outcome == 'success'/)
+
+// The optional self-hosted Windows leg. Windows is the release's critical path
+// (7.1 min on v3.1.53 vs macOS's 4.6) and most of the gap is work a reused
+// machine would not repeat, so the leg can be pointed at a self-hosted runner.
+// Every assertion here is about that switch staying SAFE, because the runner is
+// a machine CI cannot verify the state of.
+//
+// 1. Default is hosted. `runs-on` reads verify's decision, which falls back to
+//    ["windows-latest"] whenever WIN_RUNNER_LABELS is unset — so all of this is
+//    inert until someone opts in, and non-Windows legs keep using matrix.os.
+assert.match(workflow, /runs-on:\s*\$\{\{ matrix\.platform == 'win' && fromJSON\(needs\.verify\.outputs\.win_labels\) \|\| matrix\.os \}\}/)
+assert.match(workflow, /win_labels:\s*\$\{\{ steps\.win-runner\.outputs\.labels \}\}/)
+assert.match(workflow, /hosted='\["windows-latest"\]'/)
+// 2. Keeping the target dir is the entire point, so checkout must not be allowed
+//    to `git clean -x` it away — and the replacement clean must exclude exactly
+//    that one path and nothing else.
+assert.match(workflow, /clean:\s*\$\{\{ runner\.environment == 'github-hosted' \}\}/)
+assert.match(workflow, /git clean -ffdx -e src-tauri\/target/)
+// 3. CARGO_INCREMENTAL is the payoff (196.9s -> 10.3-12.8s warm) and must stay
+//    self-hosted-only: on a hosted runner rust-cache strips incremental/ before
+//    saving, so generating it there is pure cost.
+assert.match(workflow, /if:\s*env\.BUILD_MATRIX_ENTRY == 'true' && runner\.environment == 'self-hosted'\n\s+shell:\s*bash\n\s+run:\s*echo "CARGO_INCREMENTAL=1" >> "\$GITHUB_ENV"/)
+// 4. No cache step may run on a self-hosted runner. Restoring is redundant there,
+//    but SAVING would push 600-735 MB per leg into a 10 GB repo quota that is
+//    already at the cap, evicting the macOS/Linux target dirs that keep those
+//    legs at 9 minutes instead of 30. A self-hosted Windows leg must not buy its
+//    own speed with everyone else's.
+for (const step of ['Cache Cargo registry base', 'Cache Rust build outputs', 'Cache Tauri bundle tools']) {
+  assert.match(
+    workflow,
+    new RegExp(`name: ${step}\\n\\s+if: env\\.BUILD_MATRIX_ENTRY == 'true' && runner\\.environment == 'github-hosted'`),
+    `${step} must be gated to hosted runners so it cannot evict the other legs' caches`,
+  )
+}
 
 const root = await mkdtemp(join(tmpdir(), 'bat-bundle-mode-test-'))
 try {

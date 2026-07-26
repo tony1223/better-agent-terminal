@@ -23,11 +23,96 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    outputs:
+      win_labels: ${{ steps.win-runner.outputs.labels }}
 
     steps:
       - name: Skip release verification
         if: env.RUN_RELEASE_VERIFICATION != 'true'
         run: echo "Skipping release verification. Re-run manually with run_verification=true to enable it."
+
+      # Decides which runner the two Windows legs land on. This lives in `verify`
+      # rather than a job of its own because verify is a ~5s no-op by default
+      # (every step above is gated on run_verification) and `build` already needs
+      # it — so the decision costs no extra queue time on the critical path.
+      #
+      # Windows *is* the critical path: 7.1 min on v3.1.53 against macOS's 4.6.
+      # Most of that gap is work a reused machine would not repeat — `Setup Rust`
+      # 39s (macOS: 8s), `Cache Rust build outputs` 25s (macOS: 8s), and ~130s of
+      # cargo. Keeping src-tauri/target between runs lets CARGO_INCREMENTAL do the
+      # rest: measured locally, our crate goes 196.9s -> 10.3-12.8s once the
+      # target dir is warm. That is the whole point of the self-hosted leg.
+      #
+      # Note the trade: one runner executes one job at a time, so the two Windows
+      # legs (all-in-one and lightweight) go from parallel to sequential. That is
+      # still a win only because the second leg reuses the first's target dir —
+      # they differ by bundle_mode, which the Rust build barely notices. Register
+      # a second runner if that assumption ever stops holding.
+      #
+      # Opt in by setting the repo variable WIN_RUNNER_LABELS to a JSON array of
+      # the runner's labels — ["self-hosted","Windows","X64","bat-win"] is what
+      # scripts/setup-self-hosted-windows-runner.ps1 registers. Unset means
+      # windows-latest, so every self-hosted change below is inert until a runner
+      # actually exists and someone sets the variable.
+      #
+      # A job waiting on a self-hosted runner that never comes back queues for 24
+      # hours before failing, which would be a terrible way to find out the VM is
+      # off. So if RUNNER_STATUS_TOKEN is set (a fine-grained PAT with
+      # Administration: Read — GITHUB_TOKEN cannot be granted that scope, it is
+      # not in the permissions list at all) we confirm the runner is online first
+      # and quietly fall back to windows-latest when it is not. Without that PAT
+      # the variable is taken on trust, which means turning the VM off requires
+      # clearing the variable too.
+      - name: Decide where the Windows legs run
+        id: win-runner
+        env:
+          WANTED: ${{ vars.WIN_RUNNER_LABELS }}
+          GH_TOKEN: ${{ secrets.RUNNER_STATUS_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          # No `set -e` on purpose: every failure path below has to end in a
+          # valid `labels` output, because runs-on calls fromJSON on it. A step
+          # that dies here would take the whole release with it, and the honest
+          # answer to "we could not tell" is windows-latest, not a broken run.
+          set -uo pipefail
+          hosted='["windows-latest"]'
+          emit() { echo "labels=$1" >> "$GITHUB_OUTPUT"; echo "Windows legs -> $1"; }
+
+          if [ -z "${WANTED:-}" ]; then
+            echo "WIN_RUNNER_LABELS is unset."
+            emit "$hosted"; exit 0
+          fi
+          if ! printf '%s' "$WANTED" | jq -e 'type == "array" and length > 0' >/dev/null 2>&1; then
+            echo "::warning::WIN_RUNNER_LABELS is not a non-empty JSON array: $WANTED"
+            emit "$hosted"; exit 0
+          fi
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "No RUNNER_STATUS_TOKEN, so the runner's liveness cannot be checked."
+            emit "$WANTED"; exit 0
+          fi
+
+          runners=$(gh api "repos/$GH_REPO/actions/runners" 2>/dev/null) || runners=''
+          if [ -z "$runners" ]; then
+            echo "::warning::Could not read the runner list; trusting WIN_RUNNER_LABELS."
+            emit "$WANTED"; exit 0
+          fi
+          # Count runners that are online AND carry every requested label.
+          # `busy` is deliberately not checked: a runner mid-job frees up on its
+          # own, and failing over for that would give up the warm target dir for
+          # no reason.
+          count=$(printf '%s' "$runners" | jq --argjson want "$WANTED" '
+            [ .runners[]
+              | select(.status == "online")
+              | select([.labels[].name] as $have | all($want[]; . as $l | ($have | index($l)) != null))
+            ] | length')
+          if [ "${count:-0}" -gt 0 ]; then
+            echo "$count online runner(s) carry $WANTED."
+            emit "$WANTED"
+          else
+            echo "::warning::No online runner carries $WANTED; using windows-latest instead."
+            emit "$hosted"
+          fi
 
       - name: Checkout code
         if: env.RUN_RELEASE_VERIFICATION == 'true'
@@ -73,8 +158,52 @@ jobs:
         if: env.RUN_RELEASE_VERIFICATION == 'true'
         run: pnpm run verify:tauri-release-ci
 
-  build:
+  # The release page is opened BEFORE anything is built, so each platform can
+  # publish its own installer the moment that platform finishes instead of every
+  # download waiting on the slowest leg. A leg that fails simply never uploads:
+  # its installer is missing from the page, and the rest of the release stands.
+  # (Previously `release` needed the whole matrix, so one flaky leg withheld
+  # every platform's build.)
+  #
+  # Auto-update is unaffected by the page being briefly incomplete: clients read
+  # latest-*.json from the pinned `manifests` release, and that is still written
+  # once at the end by `release`, from whichever legs actually succeeded.
+  create-release:
     needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Open the release page with no assets yet
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists (re-run?); reusing it."
+          else
+            PRERELEASE=()
+            case "$RELEASE_TAG" in *-pre*) PRERELEASE=(--prerelease);; esac
+            gh release create "$RELEASE_TAG" \
+              --title "$RELEASE_TAG" \
+              --generate-notes \
+              "${PRERELEASE[@]}"
+          fi
+          # Say so on the page itself, so an incomplete asset list reads as
+          # "still working" rather than "this release is broken". `release`
+          # strips this line once every leg has reported in.
+          BANNER='> ⏳ **Builds in progress.** Installers are uploaded as each platform finishes.'
+          # Strip first, then prepend: re-running a partially failed release must
+          # not stack a second banner on top of the first.
+          body=$(gh release view "$RELEASE_TAG" --json body --jq .body \
+                   | sed '/^> ⏳ \*\*Builds in progress\.\*\*/,+1d' \
+                   | sed '/^> ⚠️ \*\*Some platforms did not build\.\*\*/,+1d')
+          printf '%s\n\n%s\n' "$BANNER" "$body" > release-notes.md
+          gh release edit "$RELEASE_TAG" --notes-file release-notes.md
+
+  build:
+    needs: [verify, create-release]
     strategy:
       fail-fast: false
       matrix:
@@ -175,8 +304,16 @@ jobs:
             prerelease: true
             pre_only: false
 
-    runs-on: ${{ matrix.os }}
+    # Every non-Windows leg uses its matrix.os verbatim. The Windows legs take
+    # whatever `verify` decided — ["windows-latest"] unless a self-hosted runner
+    # is opted in and (when RUNNER_STATUS_TOKEN allows checking) actually online.
+    # verify's step always runs and always writes valid JSON, so fromJSON here
+    # never sees an empty or malformed value.
+    runs-on: ${{ matrix.platform == 'win' && fromJSON(needs.verify.outputs.win_labels) || matrix.os }}
     timeout-minutes: 90
+    # Each leg publishes its own installer straight to the release page.
+    permissions:
+      contents: write
     env:
       # pre_only legs (e.g. linux arm64) build ONLY on -pre tags and are skipped on
       # stable tags, so an unstable leg can never block a stable release. All other
@@ -194,6 +331,52 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ env.RELEASE_TAG }}
+          # checkout's default clean is `git clean -ffdx` + `git reset --hard`.
+          # On a hosted runner that is free — the VM is new anyway. On a reused
+          # self-hosted workspace the -x would delete every gitignored file,
+          # including src-tauri/target, which is the one thing the self-hosted
+          # runner exists to keep. Take the clean over ourselves in the next step
+          # so the target dir survives and nothing else does.
+          clean: ${{ runner.environment == 'github-hosted' }}
+
+      # Only reached on a self-hosted runner, where checkout was told not to
+      # clean. This reproduces exactly what it would have done, minus the target
+      # dir: a stale generated file surviving into a shipped bundle is a much
+      # worse failure than a slow build, so everything except src-tauri/target is
+      # still wiped. `git clean` skips excluded directories rather than walking
+      # them, so the 60k files in target/ cost nothing here.
+      - name: Reset the reused workspace, keeping only the Rust target dir
+        if: env.BUILD_MATRIX_ENTRY == 'true' && runner.environment == 'self-hosted'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clean -ffdx -e src-tauri/target
+          git reset --hard HEAD
+          # Deliberately not `du -sh`: sizing 60k files on Windows costs more than
+          # the line is worth. Existence is the only thing worth reporting, since
+          # it is the difference between a ~10s and a ~200s cargo step.
+          if [ -d src-tauri/target ]; then
+            echo "src-tauri/target survived the reset — incremental build expected"
+          else
+            echo "src-tauri/target absent — first run on this runner, expect a cold build"
+          fi
+
+      # The payoff for keeping the target dir. Incremental caches at codegen-unit
+      # level *inside* our crate, which is where 97% of the build time is (the
+      # front end for all 34k lines is 4.5s; LLVM optimising them is ~155s), so it
+      # gives us the benefit of splitting the crate with none of the refactor.
+      # Measured locally on the release profile: 196.9s cold -> 10.3-12.8s warm.
+      #
+      # Hosted runners must stay at the default 0. Their target dir arrives from
+      # Swatinem/rust-cache, and rust-cache deletes incremental/ before saving
+      # (cleanup.ts keeps an allowlist of build/.fingerprint/deps), so paying to
+      # generate 0.8-1.6 GB of incremental state there buys nothing and would
+      # crowd the 10 GB repo cache quota. Skipping rust-cache on self-hosted also
+      # means nothing is left to force CARGO_INCREMENTAL=0 behind our back.
+      - name: Turn on incremental compilation for the reused target dir
+        if: env.BUILD_MATRIX_ENTRY == 'true' && runner.environment == 'self-hosted'
+        shell: bash
+        run: echo "CARGO_INCREMENTAL=1" >> "$GITHUB_ENV"
 
       - name: Setup pnpm
         if: env.BUILD_MATRIX_ENTRY == 'true'
@@ -281,8 +464,25 @@ jobs:
         id: rust-base-cache-key
         run: node scripts/rust-base-cache-key.mjs
 
+      # The next three caches — Cargo registry, Rust target dir, Tauri bundle
+      # tools — are hosted-only. On a self-hosted runner they are worse than
+      # useless: ~/.cargo, src-tauri/target and the Tauri tool cache all live
+      # outside the git tree, so they already survive the reset above and
+      # restoring them is redundant. *Saving* them is actively harmful — 600-735
+      # MB per leg into a 10 GB repo quota that is already pinned at the cap, so
+      # GitHub evicts least-recently-used entries, and the entries worth keeping
+      # are the macOS and Linux legs' target dirs. Losing one costs a full
+      # dependency rebuild (the difference between a 9- and a 30-minute release).
+      # A self-hosted Windows leg must not buy its own speed with everyone else's.
+      #
+      # The three caches further down (node-sidecar/runtime,
+      # node-sidecar/dist-node_modules, codex-runtime) are deliberately NOT gated:
+      # they sit inside the work tree, so the reset above deletes them on every
+      # self-hosted run and the cache is the only thing that brings them back.
+      # They are also content-keyed downloads, which is what makes reusing them
+      # safe at all — persisting them locally instead would skip that check.
       - name: Cache Cargo registry base
-        if: env.BUILD_MATRIX_ENTRY == 'true'
+        if: env.BUILD_MATRIX_ENTRY == 'true' && runner.environment == 'github-hosted'
         continue-on-error: true
         uses: actions/cache@v4
         with:
@@ -295,7 +495,7 @@ jobs:
             ${{ runner.os }}-${{ matrix.arch }}-cargo-registry-base-
 
       - name: Cache Rust build outputs
-        if: env.BUILD_MATRIX_ENTRY == 'true'
+        if: env.BUILD_MATRIX_ENTRY == 'true' && runner.environment == 'github-hosted'
         continue-on-error: true
         uses: Swatinem/rust-cache@v2
         with:
@@ -312,7 +512,7 @@ jobs:
           cache-bin: "false"
 
       - name: Cache Tauri bundle tools
-        if: env.BUILD_MATRIX_ENTRY == 'true'
+        if: env.BUILD_MATRIX_ENTRY == 'true' && runner.environment == 'github-hosted'
         continue-on-error: true
         uses: actions/cache@v4
         with:
@@ -504,15 +704,24 @@ jobs:
       - name: Build Tauri release bundle
         if: env.BUILD_MATRIX_ENTRY == 'true' && matrix.platform != 'linux'
         env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE || secrets.APPLE_CERTIFICATE_P12 }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD || secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_PROVIDER_SHORT_NAME: ${{ secrets.APPLE_PROVIDER_SHORT_NAME }}
-          # Sign the updater artifacts (.app.tar.gz.sig on mac, -setup.exe.sig on
-          # win) with the minisign key matching the pubkey in tauri.conf.json.
+          # This step covers mac AND win (platform != linux), but only mac can use
+          # an Apple credential — nothing in a Windows build codesigns or notarizes
+          # with Apple, and scripts/tauri-build-mode.mjs reads none of these (the
+          # consumer is Tauri's macOS bundler/notarizer). So gate them per-platform
+          # instead of handing all seven to a leg that cannot use them.
+          #
+          # This is what keeps a self-hosted Windows runner cheap to trust: the
+          # only secrets that reach it are the ones it genuinely needs.
+          APPLE_CERTIFICATE: ${{ matrix.platform == 'mac' && (secrets.APPLE_CERTIFICATE || secrets.APPLE_CERTIFICATE_P12) || '' }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ matrix.platform == 'mac' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+          APPLE_ID: ${{ matrix.platform == 'mac' && secrets.APPLE_ID || '' }}
+          APPLE_PASSWORD: ${{ matrix.platform == 'mac' && (secrets.APPLE_PASSWORD || secrets.APPLE_APP_SPECIFIC_PASSWORD) || '' }}
+          APPLE_TEAM_ID: ${{ matrix.platform == 'mac' && secrets.APPLE_TEAM_ID || '' }}
+          APPLE_SIGNING_IDENTITY: ${{ matrix.platform == 'mac' && secrets.APPLE_SIGNING_IDENTITY || '' }}
+          APPLE_PROVIDER_SHORT_NAME: ${{ matrix.platform == 'mac' && secrets.APPLE_PROVIDER_SHORT_NAME || '' }}
+          # Both platforms genuinely need this one: it signs the updater artifacts
+          # (.app.tar.gz.sig on mac, -setup.exe.sig on win) with the minisign key
+          # matching the pubkey in tauri.conf.json.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: node scripts/tauri-build-mode.mjs --mode ${{ matrix.bundle_mode }} --bundles ${{ matrix.bundle }}
@@ -572,6 +781,32 @@ jobs:
           path: |
             src-tauri/target/release/bundle/**/*.AppImage
 
+      # Deliberately ahead of the updater metadata upload. If publishing the
+      # installer fails, this step fails and the metadata never ships either —
+      # which is what we want, because a manifest entry pointing at an asset
+      # that is not on the release page would hand every client a 404.
+      - name: Publish this platform's installer to the release
+        if: env.BUILD_MATRIX_ENTRY == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          shopt -s globstar nullglob
+          published=0
+          for asset in src-tauri/target/release/bundle/**/*.{dmg,exe,AppImage}; do
+            # bundle_dmg.sh leaves its scratch image behind next to the real one.
+            case "$(basename "$asset")" in rw.*.dmg) continue;; esac
+            echo "uploading $(basename "$asset")"
+            gh release upload "$RELEASE_TAG" "$asset" --clobber
+            published=$((published + 1))
+          done
+          if [ "$published" -eq 0 ]; then
+            echo "::error::no installer found to publish for ${{ matrix.artifact }}"
+            exit 1
+          fi
+
       - name: Upload updater metadata
         if: env.BUILD_MATRIX_ENTRY == 'true'
         uses: actions/upload-artifact@v4
@@ -583,8 +818,17 @@ jobs:
           path: updater-meta
           if-no-files-found: error
 
+  # Runs once the matrix has settled, whatever the outcome. The installers are
+  # already on the release page — each leg put its own there — so this only has
+  # to do the parts that need a whole-release view: the update manifests, the
+  # Homebrew bump, and clearing the "builds in progress" banner.
+  #
+  # `always()` is the point of the job: a matrix with one failed leg still needs
+  # manifests published for the legs that worked. Only a failure to open the
+  # release page in the first place stops it.
   release:
-    needs: build
+    needs: [create-release, build]
+    if: ${{ always() && needs.create-release.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -602,12 +846,10 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Download desktop release artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: release-*
-          path: artifacts
-
+      # Only the updater sidecars. The installers are not downloaded any more —
+      # they went straight from each build leg to the release page, and
+      # generate-update-manifest reads nothing but updater-meta.json plus the
+      # *.tar.gz bundles staged beside it.
       - name: Download updater metadata
         uses: actions/download-artifact@v4
         with:
@@ -621,23 +863,29 @@ jobs:
         id: version
         run: echo "VERSION=${RELEASE_TAG#v}" >> $GITHUB_OUTPUT
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: ${{ env.RELEASE_TAG }}
-          # Installers ONLY. The macOS/Linux updater bundles (*.app.tar.gz /
-          # *.AppImage.tar.gz) are published to the pinned `manifests` release
-          # under fixed names, so the versioned release page stays unambiguous
-          # for humans (just .dmg / .exe / .AppImage).
-          files: |
-            artifacts/**/*.dmg
-            artifacts/**/*.exe
-            artifacts/**/*.AppImage
-          generate_release_notes: true
-          draft: false
-          prerelease: ${{ contains(env.RELEASE_TAG, '-pre') }}
+      - name: Report which platforms made it
+        id: legs
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          assets=$(gh release view "$RELEASE_TAG" --json assets --jq '[.assets[].name] | sort | .[]')
+          echo "published assets:"
+          echo "$assets" | sed 's/^/  /'
+          # The Homebrew cask installs the macOS build; bumping the tap when no
+          # .dmg shipped would point users at a download that does not exist.
+          if echo "$assets" | grep -q '\.dmg$'; then
+            echo "has_mac=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_mac=false" >> $GITHUB_OUTPUT
+            echo "::warning::no .dmg on the release; skipping the Homebrew tap update"
+          fi
+          {
+            echo 'list<<EOF'
+            echo "$assets" | sed 's/^/- /'
+            echo EOF
+          } >> $GITHUB_OUTPUT
 
       - name: Generate update manifests
         env:
@@ -691,7 +939,7 @@ jobs:
         run: gh release upload manifests manifests-out/* --clobber
 
       - name: Update Homebrew tap
-        if: ${{ !contains(env.RELEASE_TAG, '-pre') }}
+        if: ${{ !contains(env.RELEASE_TAG, '-pre') && steps.legs.outputs.has_mac == 'true' }}
         uses: peter-evans/repository-dispatch@v3
         with:
           token: ${{ secrets.TAP_GITHUB_TOKEN }}
@@ -700,7 +948,7 @@ jobs:
           client-payload: '{"version": "${{ steps.version.outputs.VERSION }}"}'
 
       - name: Update Homebrew tap (pre-release)
-        if: ${{ contains(env.RELEASE_TAG, '-pre') }}
+        if: ${{ contains(env.RELEASE_TAG, '-pre') && steps.legs.outputs.has_mac == 'true' }}
         uses: peter-evans/repository-dispatch@v3
         with:
           token: ${{ secrets.TAP_GITHUB_TOKEN }}
@@ -708,10 +956,36 @@ jobs:
           event-type: update-cask-pre
           client-payload: '{"version": "${{ steps.version.outputs.VERSION }}"}'
 
+      # Last, so the banner only clears once the manifests are live and the tap
+      # has been told. What lands on the page is the plain generated changelog
+      # again, plus a note if any platform is missing — better than silently
+      # shipping a short asset list that looks complete.
+      - name: Clear the in-progress banner
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          BUILD_RESULT: ${{ needs.build.result }}
+        run: |
+          set -euo pipefail
+          body=$(gh release view "$RELEASE_TAG" --json body --jq .body)
+          # Drop the banner line create-release prepended, and the blank line after it.
+          printf '%s' "$body" | sed '/^> ⏳ \*\*Builds in progress\.\*\*/,+1d' > release-notes.md
+          if [ "$BUILD_RESULT" != "success" ]; then
+            {
+              echo
+              echo "> ⚠️ **Some platforms did not build.** Only the installers listed above are available for this version."
+              echo "> See [the workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details."
+            } >> release-notes.md
+          fi
+          gh release edit "$RELEASE_TAG" --notes-file release-notes.md
+
   choco:
     needs: [build, release]
+    # `always()` for the same reason as `release`: a failed Linux or macOS leg
+    # says nothing about whether the Windows installer is publishable.
+    if: ${{ always() && !contains(inputs.release_tag, '-pre') && needs.release.result == 'success' }}
     runs-on: windows-latest
-    if: ${{ !contains(inputs.release_tag, '-pre') }}
 
     steps:
       - name: Check if Chocolatey publish is enabled
@@ -727,26 +1001,36 @@ jobs:
           fi
 
       - name: Checkout code
-        if: steps.gate.outputs.skip != 'true'
+        if: steps.gate.outputs.skip != 'true' && steps.winartifact.outcome == 'success'
         uses: actions/checkout@v4
         with:
           ref: ${{ env.RELEASE_TAG }}
 
+      # Tolerated, not required: if the Windows leg is the one that failed there
+      # is no artifact to package, and that must not fail the run — the other
+      # platforms have already shipped.
       - name: Download Windows artifact
-        if: steps.gate.outputs.skip != 'true'
+        if: steps.gate.outputs.skip != 'true' && steps.winartifact.outcome == 'success'
+        id: winartifact
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           name: release-win-all-in-one
           path: artifacts
 
+      - name: Skip Chocolatey without a Windows installer
+        if: steps.gate.outputs.skip != 'true' && steps.winartifact.outcome != 'success'
+        shell: bash
+        run: echo "::warning::the Windows leg produced no artifact; skipping the Chocolatey push"
+
       - name: Extract version from tag
-        if: steps.gate.outputs.skip != 'true'
+        if: steps.gate.outputs.skip != 'true' && steps.winartifact.outcome == 'success'
         id: version
         shell: bash
         run: echo "VERSION=${RELEASE_TAG#v}" >> $GITHUB_OUTPUT
 
       - name: Find installer and compute checksum
-        if: steps.gate.outputs.skip != 'true'
+        if: steps.gate.outputs.skip != 'true' && steps.winartifact.outcome == 'success'
         id: checksum
         shell: pwsh
         run: |
@@ -759,7 +1043,7 @@ jobs:
           echo "EXE_NAME=$($exe.Name)" >> $env:GITHUB_OUTPUT
 
       - name: Prepare Chocolatey package
-        if: steps.gate.outputs.skip != 'true'
+        if: steps.gate.outputs.skip != 'true' && steps.winartifact.outcome == 'success'
         shell: pwsh
         run: |
           $version = "${{ steps.version.outputs.VERSION }}"
@@ -778,7 +1062,7 @@ jobs:
           Set-Content choco/tools/chocolateyinstall.ps1 $install
 
       - name: Pack and push
-        if: steps.gate.outputs.skip != 'true'
+        if: steps.gate.outputs.skip != 'true' && steps.winartifact.outcome == 'success'
         shell: pwsh
         run: |
           choco pack choco/better-agent-terminal.nuspec --output-directory .
@@ -942,8 +1226,11 @@ jobs:
           if-no-files-found: error
 
   bat-server-publish:
-    needs: [release, bat-server-build]
-    if: ${{ always() && needs.release.result == 'success' }}
+    # Only the release page needs to exist, not the desktop matrix. The server
+    # bundles are independent deliverables, so they land as soon as they are
+    # built rather than queueing behind the slowest desktop leg.
+    needs: [create-release, bat-server-build]
+    if: ${{ always() && needs.create-release.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
