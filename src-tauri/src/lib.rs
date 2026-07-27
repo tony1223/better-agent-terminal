@@ -20,6 +20,9 @@ mod commands;
 mod electron_safe_storage;
 mod event_hub;
 mod host_context;
+// Not desktop-gated: turns run on the headless bat-server too, and its samples
+// are the ones worth having — that is the machine actually calling the API.
+mod latency_store;
 mod linux_wayland;
 mod log_file;
 mod network_addresses;
@@ -430,6 +433,7 @@ fn app_builder(headless: bool) -> tauri::Builder<tauri::Wry> {
             agent_cmd::agent_list_presets,
             claude_usage::agent_usage_snapshot,
             claude_usage::agent_usage_peek,
+            agent_cmd::agent_latency_samples,
             worker_buffer_cmd::worker_buffer_init,
             worker_buffer_cmd::worker_buffer_append,
             worker_buffer_cmd::worker_buffer_read_all,
@@ -473,9 +477,14 @@ fn run_headless_server(args: HeadlessServerArgs) -> Result<(), String> {
     // the connected remote clients through the RemoteServer broadcast.
     let emit_sink: crate::sidecar::EventSink = {
         let broadcast_state = remote_state.clone();
-        std::sync::Arc::new(move |topic: &str, payload: &Value| {
-            broadcast_state.broadcast_event(topic, payload);
-        })
+        // Latency samples never reach the broadcast: the tap peels them off into
+        // <data-dir>/metrics and swallows them. See latency_store::tap_latency_samples.
+        latency_store::tap_latency_samples(
+            Some(data_dir.clone()),
+            std::sync::Arc::new(move |topic: &str, payload: &Value| {
+                broadcast_state.broadcast_event(topic, payload);
+            }),
+        )
     };
 
     let mut host = HeadlessHost::new(Some(data_dir.clone()), emit_sink);

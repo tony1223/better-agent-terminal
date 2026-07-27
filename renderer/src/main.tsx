@@ -2,6 +2,7 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import './i18n'
 import App from './App'
+import { LatencyStatsPanel } from './components/LatencyStatsPanel'
 import { getHostKind, host, installTauriShim } from './host-api'
 
 // Install a permissive Tauri host shim before React mounts. It is keyed off the
@@ -209,9 +210,14 @@ root.style.display = ''
 
 dlog(`[startup] before createRoot: +${Date.now() - t0}ms`)
 
+// LatencyStatsPanel sits beside <App /> rather than inside it: App returns early
+// in four different shapes (profile startup, detached window, missing workspace,
+// normal), and the Statistics menu item can fire while any of them is on screen.
+// It renders null until the menu event arrives, so it costs one listener.
 ReactDOM.createRoot(root).render(
   <RootErrorBoundary>
     <App />
+    <LatencyStatsPanel />
   </RootErrorBoundary>
 )
 

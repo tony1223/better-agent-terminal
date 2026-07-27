@@ -8,6 +8,7 @@ const APP_LABEL: &str = "BetterAgentTerminal";
 const MENU_NEW_WINDOW: &str = "app.new-window";
 const MENU_NEXT_WINDOW: &str = "app.next-window";
 const MENU_OPEN_LOGS: &str = "app.open-logs";
+const MENU_STATS: &str = "app.stats";
 
 #[cfg(target_os = "macos")]
 const NEXT_WINDOW_ACCELERATOR: &str = "CmdOrCtrl+Backquote";
@@ -39,6 +40,16 @@ pub(crate) fn build(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
         Some(NEXT_WINDOW_ACCELERATOR),
     )?;
     let open_logs = MenuItem::with_id(app, MENU_OPEN_LOGS, "Open Logs Folder", true, None::<&str>)?;
+    // Labelled experimental in the menu as well as on the page: the numbers come
+    // from samples the app only started collecting recently, so an early window
+    // can look wrong simply for having four data points in it.
+    let stats = MenuItem::with_id(
+        app,
+        MENU_STATS,
+        "Response Time (Experimental)",
+        true,
+        None::<&str>,
+    )?;
 
     #[cfg(target_os = "macos")]
     let app_menu = SubmenuBuilder::new(app, APP_LABEL)
@@ -108,6 +119,19 @@ pub(crate) fn build(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
         .close_window_with_text("Close Window")
         .build()?;
 
+    // Its own top-level menu rather than an entry under Help: Help is about the
+    // app, this is about the user's own data, and a submenu is what renders as a
+    // menu-bar entry on both platforms (a bare item at the root does not).
+    #[cfg(target_os = "macos")]
+    let stats_menu = SubmenuBuilder::new(app, "Statistics")
+        .item(&stats)
+        .build()?;
+
+    #[cfg(not(target_os = "macos"))]
+    let stats_menu = SubmenuBuilder::new(app, "&Statistics")
+        .item(&stats)
+        .build()?;
+
     #[cfg(target_os = "macos")]
     let help_menu = SubmenuBuilder::new(app, "Help").item(&open_logs).build()?;
 
@@ -125,6 +149,7 @@ pub(crate) fn build(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
             .item(&file_menu)
             .item(&edit_menu)
             .item(&window_menu)
+            .item(&stats_menu)
             .item(&help_menu)
             .build()
     }
@@ -135,6 +160,7 @@ pub(crate) fn build(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
             .item(&file_menu)
             .item(&edit_menu)
             .item(&window_menu)
+            .item(&stats_menu)
             .item(&help_menu)
             .build()
     }
@@ -147,6 +173,9 @@ pub(crate) fn handle_event(app: &AppHandle, event: MenuEvent) {
         }
         MENU_NEXT_WINDOW => {
             let _ = app_cmd::app_focus_next_window_from_active(app);
+        }
+        MENU_STATS => {
+            app_cmd::request_stats_page(app);
         }
         MENU_OPEN_LOGS => {
             let app = app.clone();

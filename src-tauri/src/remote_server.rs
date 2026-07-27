@@ -14,6 +14,7 @@ use crate::electron_safe_storage::{
     read_secret_json, read_secret_string, write_secret_json, write_secret_string, SecretJsonRead,
 };
 use crate::host_context::HostContext;
+use crate::latency_store;
 use crate::network_addresses;
 use crate::remote_core::{
     canonical_remote_channel, decode_remote_binary_frame, decode_remote_text_frame,
@@ -2163,6 +2164,18 @@ fn invoke_rust_for_remote(
         "agent:usage-snapshot" | "claude:usage-snapshot" => {
             Ok(claude_usage::agent_usage_snapshot())
         }
+        // Response-time samples belong to whichever machine made the API calls,
+        // which in remote mode is the host. A client reading its own would show
+        // an empty page, so this is host-owned like usage: read-only, no side
+        // effects, and the client renders whatever the host returns.
+        "agent:latency-samples" => remote_app_data_dir(ctx, channel).and_then(|data_dir| {
+            // Both bounds required. Defaulting a missing one would hand back
+            // whatever range happened to be convenient, and a statistics page
+            // silently showing the wrong window is worse than an error.
+            let from_ms = i64_param(params, "fromMs", channel)?;
+            let to_ms = i64_param(params, "toMs", channel)?;
+            Ok(latency_store::latency_samples_core(&data_dir, from_ms, to_ms))
+        }),
         "claude:auth-status" => Ok(claude_cmd::fetch_auth_status_native(&ctx)),
         "claude:account-list" => remote_app_data_dir(ctx, channel).and_then(|data_dir| {
             serde_json::to_value(account_store::read_index(&data_dir))

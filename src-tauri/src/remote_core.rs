@@ -270,6 +270,9 @@ pub fn canonical_remote_channel(channel: &str) -> String {
             // which silently dropped the broadcast for every remote client.
             | "usage"
             | "usage-snapshot"
+            // Born agent:-native: nothing older than this build knows the channel,
+            // so there is no legacy `claude:` spelling to stay compatible with.
+            | "latency-samples"
     ) {
         channel.to_string()
     } else {
@@ -341,6 +344,10 @@ fn legacy_v1_param_keys(channel: &str) -> Option<&'static [&'static str]> {
         // are listed: `agent:` is the name to keep, `claude:` is accepted only so a
         // client that tries the legacy name first still gets an answer.
         "agent:usage-snapshot" | "claude:usage-snapshot" => Some(&[]),
+        // Read-only pull of the host's response-time samples in a window. Also
+        // host-wide rather than per session — the page slices by model and effort
+        // across every session the host has run.
+        "agent:latency-samples" => Some(&["fromMs", "toMs"]),
         "claude:auth-login-submit-code" => Some(&["code", "loginId"]),
         "claude:auth-login-cancel" => Some(&["loginId"]),
         "claude:prepare-cli-session" => Some(&[
@@ -1086,6 +1093,29 @@ mod tests {
             // broadcast, which keeps its own single-provider shape.
             assert!(!is_proxied_remote_event(channel));
         }
+    }
+
+    #[test]
+    fn latency_sample_pull_maps_its_positional_range_onto_named_params() {
+        assert_eq!(
+            canonical_remote_channel("agent:latency-samples"),
+            "agent:latency-samples"
+        );
+        // The desktop client sends the window as two positional args (legacy v1);
+        // the host reads params.fromMs / params.toMs. Registering the key list is
+        // what bridges the two — without it the `_` fallback would make the first
+        // arg the whole params and the host would report a missing fromMs.
+        assert_eq!(
+            legacy_v1_args_to_params(
+                "agent:latency-samples",
+                &[json!(1_700_000_000_000i64), json!(1_700_086_400_000i64)]
+            ),
+            json!({ "fromMs": 1_700_000_000_000i64, "toMs": 1_700_086_400_000i64 })
+        );
+        // Samples are written straight to disk by the host's own event tap, so this
+        // channel exists only as a pull; nothing proxies it as an event.
+        assert!(!is_proxied_remote_event("agent:latency-samples"));
+        assert!(!is_proxied_remote_event("agent:latency-sample"));
     }
 
     #[test]

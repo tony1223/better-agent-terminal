@@ -34,6 +34,7 @@ import {
 import { loadAnthropicSdk } from '../lib/sdk-loader.mjs'
 import { info as logInfo, warn as logWarn } from '../lib/logger.mjs'
 import { runtimeEffortForMode, isUltracodeMode, parseEffortRejection, fallbackEffortFrom } from '../lib/claude-effort.mjs'
+import { turnLatencySample, compactLatencySample, latencySampleIsUseful } from '../lib/latency-sample.mjs'
 import { autoCompactWindowForClaudeSelection, sdkModelForClaudeSelection } from '../lib/models.mjs'
 import { loadInstalledPlugins, dataUrlToContentBlock } from '../lib/plugins.mjs'
 import { resolveClaudeCliBinaryWithInstall } from './claude-auth.mjs'
@@ -380,6 +381,14 @@ function resultErrorMessage(msg) {
   return `Claude query ended without success: subtype=${subtype}${stopReason}`
 }
 
+// Publish one latency sample. Dropped when it carries no timing at all: some
+// SDK/CLI builds omit the duration fields, and a record with nothing in it would
+// still be counted by the UI when it decides whether a bucket has enough data.
+function emitLatencySample(sample) {
+  if (!latencySampleIsUseful(sample)) return
+  sendEvent('agent:latency-sample', sample)
+}
+
 // processMessage: dispatch a single SDKMessage to the renderer-shaped
 // event(s). Pure-ish — only mutates session state (sdkSessionId, model,
 // permissionMode, lastUsage) and emits via sendEvent.
@@ -421,6 +430,10 @@ function processMessage(s, sessionId, msg) {
   if (t === 'system' && msg.subtype === 'compact_boundary') {
     const cm = msg.compact_metadata || {}
     logInfo(`claude.compact(${shortSessionId(sessionId)}): boundary trigger=${cm.trigger || 'unknown'} preTokens=${cm.pre_tokens ?? '?'} postTokens=${cm.post_tokens ?? '?'} durationMs=${cm.duration_ms ?? '?'}`)
+    // Compaction is the only place its own duration is ever reported, and it
+    // used to end here. Emit it as a sample so the cost of compaction can be
+    // read separately from the cost of an API call.
+    emitLatencySample(compactLatencySample(sessionId, s, cm))
     return
   }
   if (t === 'system' && (msg.subtype === 'task_started' || msg.subtype === 'task_updated')) {
@@ -606,6 +619,12 @@ function processMessage(s, sessionId, msg) {
         numTurns: msg.num_turns ?? s.totalUsage?.numTurns ?? 0,
       }
     }
+    // Before the branches below, so an interrupted or failed turn is recorded
+    // too — a turn that errored still consumed real API time, and excluding
+    // those would quietly bias the numbers towards the happy path.
+    s.lastTurnApiMs = typeof msg.duration_api_ms === 'number' ? msg.duration_api_ms : null
+    s.lastTurnTtftMs = typeof msg.ttft_ms === 'number' ? msg.ttft_ms : null
+    emitLatencySample(turnLatencySample(sessionId, s, msg))
     if (s.interruptRequested) {
       // Turn-only interrupt (1× Esc): the SDK ended this turn but the
       // subprocess + any background workflow stay alive. Report it as an

@@ -211,6 +211,18 @@ export function buildSessionMeta(s) {
       + (total?.cache_creation_input_tokens ?? 0)
       + (total?.cache_read_input_tokens ?? 0),
     totalOutputTokens: total?.output_tokens ?? 0,
+    // Server-side timing of the last completed turn, straight from the SDK
+    // result. Claude had no turn timing at all before this — only the Codex path
+    // set lastTurnDurationMs — so the panel's duration columns were blank for
+    // every Claude session.
+    //
+    // Deliberately NOT reported as lastTurnDurationMs / lastTurnFirstTokenMs,
+    // which Codex fills by wall-clocking the turn host-side. These come from the
+    // SDK and exclude both our overhead and any wait for a human to approve a
+    // tool. Same units, different thing measured — sharing a field would put two
+    // incomparable numbers in one column.
+    lastTurnApiMs: s.lastTurnApiMs ?? null,
+    lastTurnTtftMs: s.lastTurnTtftMs ?? null,
     callCacheRead: 0,
     callCacheWrite: 0,
     lastQueryCalls: 0,

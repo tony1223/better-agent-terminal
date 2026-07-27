@@ -778,6 +778,11 @@ function createTauriHost(): BatAppAPI {
             if (currentWindowId === request.windowId) callback(request)
           })
         }),
+      // The Statistics menu item. Rust emits this to one window only (the focused
+      // one), so unlike the close request above it needs no windowId filter —
+      // adding one would just race the async window-id lookup.
+      onStatsRequested: (callback: () => void) =>
+        listenAdapter<unknown>('app:stats-requested', () => callback()),
       newWindow: () => getInvoke()<string>('app_new_window'),
       takeFreshWindowFlag: () => getInvoke()<boolean>('app_take_fresh_window_flag'),
       focusNextWindow: () => getInvoke()<boolean>('app_focus_next_window'),
@@ -1441,6 +1446,11 @@ function createTauriHost(): BatAppAPI {
       // only; short host-side cache; null when its stored token expired).
       peekUsage: (accountId: string) =>
         getInvoke()<Record<string, unknown> | null>('agent_usage_peek', { accountId }),
+      // Raw server-side response-time samples in [fromMs, toMs], oldest first.
+      // Host-owned like usage: on a remote-profile window the command forwards to
+      // the host, which is the machine that actually made the API calls.
+      getLatencySamples: (fromMs: number, toMs: number) =>
+        getInvoke()<unknown>('agent_latency_samples', { fromMs, toMs }),
     },
     workerBuffer: {
       // Renderer-side terminal buffer cache. We back this with a Rust

@@ -56,31 +56,42 @@ pub async fn agent_list_presets(app: AppHandle, window: WebviewWindow) -> Value 
     agent_supported_session_presets()
 }
 
+/// Response-time samples for the statistics page, in `[from_ms, to_ms]`.
+///
+/// Raw records rather than aggregates: the page shows a per-sample list, and
+/// bucketing by hour needs the local UTC offset, which only the renderer knows.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn agent_latency_samples(
+    app: AppHandle,
+    window: WebviewWindow,
+    from_ms: i64,
+    to_ms: i64,
+) -> Result<Value, String> {
+    // Host-owned, like usage: in remote mode the host is the machine that made
+    // the API calls, so its files are the only ones with anything in them.
+    if let Some(remote) = remote_agent_invoke(
+        &app,
+        &window,
+        "agent:latency-samples",
+        vec![json!(from_ms), json!(to_ms)],
+    )
+    .await
+    {
+        return remote;
+    }
+    let data_dir = crate::app_data::app_data_dir(&app)?;
+    Ok(crate::latency_store::latency_samples_core(
+        &data_dir, from_ms, to_ms,
+    ))
+}
+
 #[cfg(feature = "desktop")]
 async fn remote_supported_session_types(
     app: &AppHandle,
     window: &WebviewWindow,
 ) -> Option<Result<Value, String>> {
-    if !is_remote_profile_window(app, window) {
-        return None;
-    }
-    let remote_client = app.state::<RustRemoteClientState>().inner().clone();
-    let window_label = window.label().to_string();
-    Some(
-        crate::async_rt::spawn_blocking(move || {
-            remote_client.invoke(
-                &window_label,
-                "agent:get-supported-session-types",
-                Vec::new(),
-                Duration::from_secs(10),
-            )
-        })
-        .await
-        .map_err(|err| {
-            format!("remote.invoke agent:get-supported-session-types worker failed: {err}")
-        })
-        .and_then(|value| value),
-    )
+    remote_agent_invoke(app, window, "agent:get-supported-session-types", Vec::new()).await
 }
 
 #[cfg(feature = "desktop")]
@@ -88,6 +99,21 @@ async fn remote_agent_presets(
     app: &AppHandle,
     window: &WebviewWindow,
 ) -> Option<Result<Value, String>> {
+    remote_agent_invoke(app, window, "agent:list-presets", Vec::new()).await
+}
+
+/// Forward a host-owned read to the remote host this window is attached to, or
+/// `None` when the window is local and the caller should answer it itself.
+///
+/// `args` is positional (legacy v1); the host maps it back onto named params via
+/// the key list registered for the channel in remote_core::remote_channel_keys.
+#[cfg(feature = "desktop")]
+async fn remote_agent_invoke(
+    app: &AppHandle,
+    window: &WebviewWindow,
+    channel: &'static str,
+    args: Vec<Value>,
+) -> Option<Result<Value, String>> {
     if !is_remote_profile_window(app, window) {
         return None;
     }
@@ -95,15 +121,10 @@ async fn remote_agent_presets(
     let window_label = window.label().to_string();
     Some(
         crate::async_rt::spawn_blocking(move || {
-            remote_client.invoke(
-                &window_label,
-                "agent:list-presets",
-                Vec::new(),
-                Duration::from_secs(10),
-            )
+            remote_client.invoke(&window_label, channel, args, Duration::from_secs(10))
         })
         .await
-        .map_err(|err| format!("remote.invoke agent:list-presets worker failed: {err}"))
+        .map_err(|err| format!("remote.invoke {channel} worker failed: {err}"))
         .and_then(|value| value),
     )
 }

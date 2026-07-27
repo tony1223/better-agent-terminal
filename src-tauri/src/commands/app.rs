@@ -301,6 +301,19 @@ fn active_webview_window(app: &AppHandle) -> Option<WebviewWindow> {
         .or_else(|| windows.values().next().cloned())
 }
 
+/// Ask the focused window to open the response-time statistics page.
+///
+/// The only menu item that hands work to the renderer — the other three are
+/// answered entirely in Rust. Targeted at one window rather than broadcast so
+/// choosing Statistics does not open the page in every window at once.
+#[cfg(feature = "desktop")]
+pub(crate) fn request_stats_page(app: &AppHandle) {
+    let Some(window) = active_webview_window(app) else {
+        return;
+    };
+    let _ = app.emit_to(window.label(), "app:stats-requested", Value::Null);
+}
+
 #[cfg(feature = "desktop")]
 pub(crate) fn app_new_window_for_active(app: &AppHandle) -> Option<String> {
     let window = active_webview_window(app)?;

@@ -492,16 +492,22 @@ pub type EventSink = Arc<dyn Fn(&str, &Value) + Send + Sync + 'static>;
 #[cfg(feature = "desktop")]
 pub fn app_handle_emit_sink(app: AppHandle) -> EventSink {
     use crate::host_context::HostContext;
-    Arc::new(move |name: &str, params: &Value| {
-        publish_runtime_event(
-            &HostContext::from_app(app.clone()),
-            name,
-            params.clone(),
-            "node-sidecar",
-        );
-        app.state::<crate::remote_server::RustRemoteServerState>()
-            .broadcast_event(name, params);
-    })
+    // Latency samples are peeled off into <data-dir>/metrics and go no further —
+    // see latency_store::tap_latency_samples for why they are not forwarded.
+    let data_dir = HostContext::from_app(app.clone()).data_dir_opt();
+    crate::latency_store::tap_latency_samples(
+        data_dir,
+        Arc::new(move |name: &str, params: &Value| {
+            publish_runtime_event(
+                &HostContext::from_app(app.clone()),
+                name,
+                params.clone(),
+                "node-sidecar",
+            );
+            app.state::<crate::remote_server::RustRemoteServerState>()
+                .broadcast_event(name, params);
+        }),
+    )
 }
 
 fn emit_sidecar_metric(
