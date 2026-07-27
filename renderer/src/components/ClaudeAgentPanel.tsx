@@ -3006,6 +3006,26 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
       const message = formatUnknownError(err)
       if (isSendMessageTimeout(message)) {
         host.debug.log(`[Claude:${sessionId.slice(0, 8)}] sendMessage RPC timed out; turn still active, letting claude:* events drive completion. detail=${message}`)
+        // Say so in the timeline. The request deadline is not the turn's
+        // deadline, but until now this was a debug-log-only event: the UI went
+        // silent at the 5-minute mark and a long turn looked exactly like a
+        // hung one, with nothing to tell the user which they were watching.
+        setMessages(prev => {
+          const noticeId = `sys-send-timeout-${userMsgId}`
+          if (prev.some(m => m.id === noticeId)) return prev
+          // The host took the prompt — it is the acknowledgement that was lost,
+          // so stop showing the message as still being sent.
+          const settled = prev.map(m => (!isToolCall(m) && m.id === userMsgId)
+            ? { ...m, status: 'sent' as const }
+            : m)
+          return [...settled, {
+            id: noticeId,
+            sessionId,
+            role: 'system' as const,
+            content: 'This turn outran the 5-minute request deadline. It is still running — only the acknowledgement timed out, and output will keep arriving.',
+            timestamp: Date.now(),
+          }]
+        })
         return
       }
       setIsStreaming(false)
