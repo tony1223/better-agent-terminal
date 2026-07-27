@@ -370,21 +370,27 @@
   position: relative;
   padding: 3px 0 3px var(--claude-timeline-gutter);
   min-height: 22px;
-  /* A long session leaves hundreds of these in the DOM at once, and today a
-     single re-render makes the engine lay out and paint every one of them.
-     Skipping the off-screen ones makes that cost track what is actually on
-     screen instead of the length of the transcript.
+  /* A long session leaves hundreds of these in the DOM at once, so keep each
+     row's layout and paint from escaping it: appending a row then re-lays out
+     only that row rather than dirtying every sibling. Nothing inside a message
+     escapes its box (the dot is 15px from left 9px, and its widest halo
+     another 3px, so both stay inside the gutter, and every modal is rendered
+     at panel level), so the paint containment is not observable.
 
-     The `auto` in contain-intrinsic-size is what keeps the scrollbar honest:
-     once an item has been on screen the engine reuses its real height instead
-     of the placeholder, so only never-yet-seen history is estimated -- which
-     is why the estimate only has to be in the right neighbourhood of a
-     compacted row. Nothing inside a message escapes its box (the dot is 15px
-     from left 9px, and its widest halo another 3px, so both stay inside the
-     gutter, and every modal is rendered at panel level), so the paint
-     containment this turns on is not observable. */
-  content-visibility: auto;
-  contain-intrinsic-size: auto 48px;
+     This deliberately stops short of content-visibility: auto, which also
+     skips off-screen rows and would make that cost track the viewport instead
+     of the transcript. Two things in this app make it unsafe. A skipped row
+     reports its contain-intrinsic-size estimate rather than its real height,
+     and the panel pins itself to the tail by scrolling to
+     scrollHeight - clientHeight -- so every never-yet-seen row understates the
+     scroll extent, the pin lands short, and the rows that then lay out push
+     the tail further away, which reads as the panel freezing on old output
+     mid-turn. Worse, an inactive panel is display: none (see
+     .terminal-wrapper.hidden) and an inactive workspace is visibility: hidden,
+     which puts every row back into the skipped state; on the switch back the
+     transcript paints blank until the engine's relevance pass promotes the
+     rows again. */
+  contain: layout paint style;
 }
 
 /* Vertical line */

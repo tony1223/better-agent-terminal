@@ -659,6 +659,7 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
   const followOutputRef = useRef(true)
   const lastScrollTopRef = useRef(0)
   const userScrollIntentUntilRef = useRef(0)
+  const scrollSettleRafRef = useRef<number | null>(null)
   const middleMessageScrollRef = useRef<{ startX: number; startY: number; startScrollTop: number; startScrollLeft: number } | null>(null)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; kind: 'messages' } | null>(null)
   const activeTasksRef = useRef<HTMLDivElement>(null)
@@ -691,13 +692,38 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
     followOutputRef.current = true
   }, [])
 
+  // A row's height is not final at the frame React commits it: markdown
+  // reflows, code blocks and tool output expand, and images and web fonts land
+  // later still. Reading scrollHeight once and scrolling there lands short of
+  // the real bottom, and the growth that follows pushes the tail further away
+  // again — the panel reads as frozen on older output while the turn is still
+  // streaming. Keep re-scrolling until the measurement stops moving instead.
+  const scrollToBottomAfterRender = useCallback(() => {
+    if (scrollSettleRafRef.current !== null) cancelAnimationFrame(scrollSettleRafRef.current)
+    let frames = 0
+    let stableFrames = 0
+    let lastHeight = -1
+    const settle = () => {
+      scrollSettleRafRef.current = null
+      const el = messagesContainerRef.current
+      // followOutput drops the moment the user scrolls up, which is what keeps
+      // this from fighting them for the rest of the budget.
+      if (!el || !followOutputRef.current) return
+      scrollToBottomNow()
+      stableFrames = el.scrollHeight === lastHeight ? stableFrames + 1 : 0
+      lastHeight = el.scrollHeight
+      if (stableFrames >= 2 || ++frames >= 12) return
+      scrollSettleRafRef.current = requestAnimationFrame(settle)
+    }
+    scrollSettleRafRef.current = requestAnimationFrame(settle)
+  }, [scrollToBottomNow])
+
+  // The jump-to-bottom button has the furthest to travel — every row between
+  // here and the tail is unmeasured — so it needs the same convergence.
   const forceScrollToBottom = useCallback(() => {
     scrollToBottomNow()
-    requestAnimationFrame(scrollToBottomNow)
-    requestAnimationFrame(() => requestAnimationFrame(scrollToBottomNow))
-    window.setTimeout(scrollToBottomNow, 50)
-    window.setTimeout(scrollToBottomNow, 150)
-  }, [scrollToBottomNow])
+    scrollToBottomAfterRender()
+  }, [scrollToBottomNow, scrollToBottomAfterRender])
 
   const handleScrollToBottomPointerDown = useCallback((e: React.PointerEvent<HTMLButtonElement>) => {
     e.preventDefault()
@@ -710,14 +736,6 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
     e.stopPropagation()
     forceScrollToBottom()
   }, [forceScrollToBottom])
-
-  const scrollToBottomAfterRender = useCallback(() => {
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        scrollToBottomNow()
-      })
-    })
-  }, [scrollToBottomNow])
 
   // Handle user scroll events on messages container
   const handleMessagesScroll = useCallback(() => {

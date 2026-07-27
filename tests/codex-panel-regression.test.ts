@@ -15,6 +15,20 @@ async function main() {
   const source = await readFile('renderer/src/components/CodexAgentPanel.tsx', 'utf8')
   const claudeSource = await readFile('renderer/src/components/ClaudeAgentPanel.tsx', 'utf8')
   const messageSkipSource = await readFile('renderer/src/components/messageSkip.tsx', 'utf8')
+  const timelineCss = await readFile('renderer/src/styles/claude-agent.css', 'utf8')
+
+  // Both panels pin themselves to the tail by scrolling to
+  // scrollHeight - clientHeight, and both are display: none while their tab is
+  // inactive. Skipping off-screen rows makes a never-seen row report its
+  // intrinsic-size estimate instead of its height, so the pin lands short and
+  // the transcript reads as frozen mid-turn -- and every row is back to skipped
+  // after a tab switch, so it repaints blank. Containment is fine; skipping is
+  // not.
+  assert.equal(
+    /^\s*content-visibility\s*:/m.test(timelineCss),
+    false,
+    'Timeline rows must not skip off-screen layout while the panel pins to scrollHeight',
+  )
 
   assert.equal(normalizeClaudeModelSelection('claude-opus-5'), 'claude-opus-5:1m')
   assert.equal(normalizeClaudeModelSelection('claude-opus-5[1m]'), 'claude-opus-5:1m')
@@ -208,6 +222,20 @@ async function main() {
       panelSource.includes('onPointerDown={handleScrollToBottomPointerDown}'),
       true,
       `${name} scroll-to-bottom button should run on pointer down, not only click`,
+    )
+    // Rows keep growing after React commits them — markdown reflow, expanding
+    // tool output, late images and fonts — so one post-render scroll lands
+    // short of the real bottom and the growth that follows pushes the tail
+    // further away, which reads as the panel freezing mid-turn.
+    assert.match(
+      panelSource,
+      /const scrollToBottomAfterRender = useCallback\([\s\S]*stableFrames = el\.scrollHeight === lastHeight \? stableFrames \+ 1 : 0[\s\S]*requestAnimationFrame\(settle\)/,
+      `${name} auto-scroll must re-scroll until scrollHeight stops moving`,
+    )
+    assert.equal(
+      /const scrollToBottomAfterRender = useCallback\(\(\) => \{\s*requestAnimationFrame\(\(\) => \{\s*requestAnimationFrame\(/.test(panelSource),
+      false,
+      `${name} auto-scroll must not trust a single post-render scrollHeight reading`,
     )
     assert.equal(
       panelSource.includes('const sendClaudeMessage = useCallback(async ('),
