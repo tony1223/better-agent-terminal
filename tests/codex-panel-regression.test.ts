@@ -122,8 +122,18 @@ async function main() {
   )
   assert.match(
     claudeSource,
-    /const shouldReplayHistory = isRemoteConnected\s*\|\| \(!isCodexSession && existingMessages\.length === 0\)[\s\S]*const hostMeta = await host\.claude\.getSessionMeta\(sessionId\)[\s\S]*const historySdkSessionId = hostMeta\?\.sdkSessionId \|\| savedSdkSessionId \|\| ''[\s\S]*host\.claude\.clientResume\([\s\S]*historySdkSessionId,[\s\S]*historyCwd,/,
+    /const shouldReplayHistory = \(!!existingState \|\| !!savedSdkSessionId\)\s*&& \(isRemoteConnected \|\| \(!!existingState && !isCodexSession && existingMessages\.length === 0\)\)[\s\S]*const hostMeta = await host\.claude\.getSessionMeta\(sessionId\)[\s\S]*const historySdkSessionId = hostMeta\?\.sdkSessionId \|\| savedSdkSessionId \|\| ''[\s\S]*host\.claude\.clientResume\([\s\S]*historySdkSessionId,[\s\S]*historyCwd,/,
     'Claude attach should recover host-owned metadata and replay empty local snapshots as well as remote history',
+  )
+  // A remote reattach must not depend on the host still holding an in-memory
+  // record. getSessionState returns null whenever the host sidecar rebuilt (or
+  // never materialized) the session, and routing that case to resumeSession
+  // tears down the host's in-flight turn and skips the exact-id history lookup
+  // — the panel then renders blank while the agent keeps streaming.
+  assert.equal(
+    /const shouldReplayHistory = isRemoteConnected\s*\|\| \(!isCodexSession/.test(claudeSource),
+    false,
+    'Remote reattach must reach clientResume even when the host has no session record',
   )
   assert.match(
     claudeSource,

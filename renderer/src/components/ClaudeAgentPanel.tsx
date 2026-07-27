@@ -1874,61 +1874,83 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
       const effectiveUltracode = isUltracodeEffortMode(effectiveEffortMode)
 
       const existingState = await host.claude.getSessionState(sessionId).catch(() => null)
-      if (existingState) {
-        const existingMessages = Array.isArray(existingState.messages) ? existingState.messages : []
-        // Remote clients always request a host replay on (re)attach. Local
-        // clients normally hydrate from getSessionState, but an idle panel may
-        // have been evicted by the bounded terminal LRU while its sidecar only
-        // retains the SDK identity. In that empty-snapshot case, replay the
-        // persisted transcript non-destructively instead of rendering blank.
-        const shouldReplayHistory = isRemoteConnected
-          || (!isCodexSession && existingMessages.length === 0)
-        if (shouldReplayHistory) {
-          // The host's live metadata is authoritative. Another client (or an
-          // earlier renderer mount) may know an SDK id that was never written
-          // into this workspace snapshot.
-          const hostMeta = await host.claude.getSessionMeta(sessionId).catch(() => null) as SessionMeta | null
-          const historySdkSessionId = hostMeta?.sdkSessionId || savedSdkSessionId || ''
-          const historyCwd = hostMeta?.cwd || cwd
-          // A remote live session can derive its SDK id host-side. A local
-          // brand-new session with no id has no transcript to replay.
-          if (!isRemoteConnected && !historySdkSessionId) {
-            localHistoryAttachedRef.current = true
-            dlog(`${stag} ensureSessionStarted: existing empty local session has no transcript id`)
-            return
-          }
-          const attachKind = isRemoteConnected ? 'remote attach' : 'local remount'
-          dlog(`${stag} ensureSessionStarted: ${attachKind}; clientResume for history sdkSessionId=${historySdkSessionId ? historySdkSessionId.slice(0, 8) : 'host-owned'}`)
-          try {
-            await host.claude.clientResume(
-              sessionId,
-              historySdkSessionId,
-              historyCwd,
-              hostMeta?.model || effectiveModel || savedModel,
-              apiVersion,
-              useWorktree ? true : undefined,
-              terminalState?.worktreePath,
-              terminalState?.worktreeBranch,
-              terminalState?.agentPreset,
-              undefined,
-              undefined,
-              permissionMode,
-              effectiveEffort,
-              effectiveUltracode ? true : undefined,
-            )
-            if (isRemoteConnected) {
-              remoteHistoryAttachedRef.current = true
-            } else {
-              localHistoryAttachedRef.current = true
-            }
-            if (historySdkSessionId && historySdkSessionId !== savedSdkSessionId) {
-              workspaceStore.setTerminalSdkSessionId(sessionId, historySdkSessionId)
-            }
-          } catch (err: unknown) {
-            dlog(`${stag} clientResume failed: ${err instanceof Error ? err.message : String(err)}`)
-          }
+      const existingMessages = existingState && Array.isArray(existingState.messages)
+        ? existingState.messages
+        : []
+      // Remote clients always reattach through clientResume. It is
+      // non-destructive (it never tears down a turn the host still has in
+      // flight) and resolves the transcript by exact SDK id, so it also works
+      // when the host sidecar holds no in-memory record — precisely the case
+      // where resumeSession would instead rebuild the session, skip the global
+      // history lookup, and leave the panel blank while the host keeps
+      // streaming.
+      // Local clients normally hydrate from getSessionState, but an idle panel
+      // may have been evicted by the bounded terminal LRU while its sidecar
+      // only retains the SDK identity. In that empty-snapshot case, replay the
+      // persisted transcript non-destructively instead of rendering blank.
+      // Either way there has to be something to replay — a host record or a
+      // saved SDK id. With neither this is a brand-new session, so fall
+      // through to startSession.
+      const shouldReplayHistory = (!!existingState || !!savedSdkSessionId)
+        && (isRemoteConnected || (!!existingState && !isCodexSession && existingMessages.length === 0))
+      if (shouldReplayHistory) {
+        // The host's live metadata is authoritative. Another client (or an
+        // earlier renderer mount) may know an SDK id that was never written
+        // into this workspace snapshot.
+        const hostMeta = await host.claude.getSessionMeta(sessionId).catch(() => null) as SessionMeta | null
+        const historySdkSessionId = hostMeta?.sdkSessionId || savedSdkSessionId || ''
+        const historyCwd = hostMeta?.cwd || cwd
+        // A remote live session can derive its SDK id host-side. A local
+        // brand-new session with no id has no transcript to replay.
+        if (!isRemoteConnected && !historySdkSessionId) {
+          localHistoryAttachedRef.current = true
+          dlog(`${stag} ensureSessionStarted: existing empty local session has no transcript id`)
           return
         }
+        const attachKind = isRemoteConnected
+          ? (existingState ? 'remote attach' : 'remote attach (no host record)')
+          : 'local remount'
+        dlog(`${stag} ensureSessionStarted: ${attachKind}; clientResume for history sdkSessionId=${historySdkSessionId ? historySdkSessionId.slice(0, 8) : 'host-owned'}`)
+        try {
+          await host.claude.clientResume(
+            sessionId,
+            historySdkSessionId,
+            historyCwd,
+            hostMeta?.model || effectiveModel || savedModel,
+            apiVersion,
+            useWorktree ? true : undefined,
+            terminalState?.worktreePath,
+            terminalState?.worktreeBranch,
+            terminalState?.agentPreset,
+            undefined,
+            undefined,
+            permissionMode,
+            effectiveEffort,
+            effectiveUltracode ? true : undefined,
+          )
+          if (isRemoteConnected) {
+            remoteHistoryAttachedRef.current = true
+          } else {
+            localHistoryAttachedRef.current = true
+          }
+          if (historySdkSessionId && historySdkSessionId !== savedSdkSessionId) {
+            workspaceStore.setTerminalSdkSessionId(sessionId, historySdkSessionId)
+          }
+          return
+        } catch (err: unknown) {
+          dlog(`${stag} clientResume failed: ${err instanceof Error ? err.message : String(err)}`)
+          // Stop rather than "recover" into a worse state. A host record means
+          // the session lives there, and a remote host may be mid-turn even
+          // when it reports no record (its read-only probes answer from a map
+          // that only local startSession populates). resumeSession would tear
+          // that turn down, and it is redundant besides: the sidecar's
+          // clientResume already falls back to a resume internally.
+          if (existingState || isRemoteConnected) return
+          // Local session with no host record — fall through to
+          // resumeSession / startSession.
+        }
+      }
+      if (existingState) {
         localHistoryAttachedRef.current = true
         dlog(`${stag} ensureSessionStarted: existing session`)
         return
