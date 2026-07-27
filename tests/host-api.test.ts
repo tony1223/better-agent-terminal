@@ -567,6 +567,20 @@ async function run() {
     mod.host.claude.onStream(() => {})()
     mod.host.claude.onStatus(() => {})()
     mod.host.claude.onModeChange(() => {})()
+    // Claude Code's slash-command list. Registered in the explicit
+    // eventListeners map, so it must take the real listen() path rather than
+    // the permissive fallback that silently swallows unknown keys.
+    const unsubCommands = (mod.host.claude as unknown as Record<string, (cb: unknown) => unknown>)
+      .onCommands(() => {})
+    assert.equal(typeof unsubCommands, 'function')
+    ;(unsubCommands as () => void)()
+    assert.deepEqual(
+      mod.resolveClaudeEventSecondArg('onCommands', {
+        sessionId: 's-1',
+        commands: [{ name: 'review', description: 'Review', argumentHint: '' }],
+      }),
+      [{ name: 'review', description: 'Review', argumentHint: '' }],
+    )
     // Slice #38: 6 panel-state lifecycle listeners. They're in the
     // explicit eventListeners map (not the permissive fallback), so
     // each must register a real Tauri listen() and return a function

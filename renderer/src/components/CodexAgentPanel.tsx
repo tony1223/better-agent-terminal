@@ -2905,10 +2905,15 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
     textareaRef.current?.focus()
   }, [clearPendingAutoContinue, sessionId, isStreaming, isInterrupted])
 
-  const permissionModes = ['default', 'acceptEdits', 'bypassPermissions', 'bypassPlan', 'plan'] as const
+  // Claude-only modes; the button carrying them is gated on !isCodexSession.
+  // auto and dontAsk stay outside the allowBypassPermissions gate below because
+  // neither is a bypass \u2014 see the same list in ClaudeAgentPanel.
+  const permissionModes = ['default', 'auto', 'acceptEdits', 'dontAsk', 'bypassPermissions', 'bypassPlan', 'plan'] as const
   const permissionModeLabels: Record<string, string> = {
     default: '\u270F Ask before edits',
+    auto: '\uD83E\uDD16 Auto (AI-reviewed)',
     acceptEdits: '\u270F Auto-accept edits',
+    dontAsk: '\uD83D\uDEAB Never ask (deny)',
     bypassPermissions: '\u26A0 Bypass permissions',
     bypassPlan: '\uD83D\uDCCB Plan (auto-approve)',
     plan: '\uD83D\uDCCB Plan mode',

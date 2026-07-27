@@ -60,12 +60,29 @@ export function buildCanUseTool(session, sessionId, toolName, input, opts) {
   if (session.permissionMode === 'bypassPermissions') {
     return { behavior: 'allow', updatedInput: input || {} }
   }
+  // dontAsk is bypassPermissions' mirror image: never prompt, and deny anything
+  // not already pre-approved. Anything reaching us here was not pre-approved by
+  // definition — the CLI answers from its own rules first and only calls back for
+  // what it could not decide — so the answer is no. Falling through to the prompt
+  // below would turn "don't ask me" into a stream of questions.
+  if (session.permissionMode === 'dontAsk') {
+    return {
+      behavior: 'deny',
+      message: `${toolName} is not pre-approved and permission mode is dontAsk.`,
+    }
+  }
   // acceptEdits auto-allows safe file/read tools; everything else still
   // prompts.
   if (session.permissionMode === 'acceptEdits' && ACCEPT_EDITS_AUTO_APPROVED_TOOLS.has(toolName)) {
     return { behavior: 'allow', updatedInput: input || {} }
   }
-  // default / acceptEdits-not-listed / plan: surface UI and await user.
+  // default / acceptEdits-not-listed / plan / auto: surface UI and await user.
+  //
+  // auto belongs here rather than in a branch of its own. Its classifier runs
+  // inside Claude Code, ahead of this callback, and only escalates what it will
+  // not decide on its own; those escalations are exactly the prompts a human
+  // should see. Adding an auto-allow here would delete the safety net that is the
+  // entire reason to pick auto over bypassPermissions.
   return new Promise((resolve) => {
     const wrappedResolve = toolName === 'ExitPlanMode'
       ? (result) => {

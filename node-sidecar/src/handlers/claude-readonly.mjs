@@ -213,7 +213,15 @@ registerHandler('claude.listSessions', async (params) => {
 const META_CACHE_TTL_MS = 5 * 60 * 1000
 const metaCache = new Map()  // key → { value, ts, inflight }
 
-async function cachedSdkRead(key, build) {
+// An empty command/agent list is an answer we must not remember. readFromLiveQuery
+// returns [] both when the session genuinely has nothing and — far more often —
+// when it was asked before any turn had spawned a CLI to ask. Caching that for
+// five minutes is what kept Claude Code's own commands, plugin commands and
+// skills out of the slash menu: the panel asks once on mount, gets [] because no
+// query is live yet, and the query coming up a second later could not dislodge it.
+const isNonEmptyList = (value) => Array.isArray(value) && value.length > 0
+
+async function cachedSdkRead(key, build, worthCaching) {
   const now = Date.now()
   const entry = metaCache.get(key)
   if (entry && entry.value !== undefined && now - entry.ts < META_CACHE_TTL_MS) {
@@ -223,6 +231,12 @@ async function cachedSdkRead(key, build) {
   const inflight = (async () => {
     try {
       const value = await build()
+      if (worthCaching && !worthCaching(value)) {
+        // Hand the value back but leave the slot cold, so the next caller asks
+        // again rather than inheriting a placeholder.
+        metaCache.set(key, { value: undefined, ts: 0, inflight: null })
+        return value
+      }
       metaCache.set(key, { value, ts: Date.now(), inflight: null })
       return value
     } catch (err) {
@@ -246,6 +260,16 @@ export function invalidateAccountMetadataCache() {
   metaCache.delete('getSupportedCommands')
   metaCache.delete('getSupportedAgents')
 }
+// Drop one session's command/agent lists. Called when the CLI tells us the set
+// changed (system/init, system/commands_changed) — the CLI discovers skills
+// lazily as the agent moves around the tree, so a list cached from init can be
+// short by the time the user opens the menu.
+export function invalidateSessionCommandCache(sessionId) {
+  if (typeof sessionId !== 'string' || !sessionId) return
+  metaCache.delete(`getSupportedCommands:${sessionId}`)
+  metaCache.delete(`getSupportedAgents:${sessionId}`)
+}
+
 // Test hook: clear the cache so tests can verify cold-path behaviour
 // without restarting the module.
 export function __resetMetadataCacheForTests() {
@@ -314,13 +338,13 @@ registerHandler('claude.getSupportedCommands', async (params) =>
   isCodexSession(String(params?.sessionId ?? '')) ? [] : cachedSdkRead(`getSupportedCommands:${params?.sessionId ?? ''}`, async () => {
     const result = await readFromLiveQuery(params?.sessionId, 'supportedCommands', [])
     return Array.isArray(result) ? result : []
-  })
+  }, isNonEmptyList)
 )
 registerHandler('claude.getSupportedAgents', async (params) =>
   isCodexSession(String(params?.sessionId ?? '')) ? [] : cachedSdkRead(`getSupportedAgents:${params?.sessionId ?? ''}`, async () => {
     const result = await readFromLiveQuery(params?.sessionId, 'supportedAgents', [])
     return Array.isArray(result) ? result : []
-  })
+  }, isNonEmptyList)
 )
 registerHandler('claude.getAccountInfo', async (params) =>
   isCodexSession(String(params?.sessionId ?? '')) ? null : cachedSdkRead(`getAccountInfo:${params?.sessionId ?? ''}`, async () => {

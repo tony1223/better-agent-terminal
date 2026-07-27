@@ -380,6 +380,7 @@ const CLAUDE_EVENT_PAYLOAD_KEYS: Record<string, string> = {
   onError: 'error',
   onStream: 'data',
   onStatus: 'meta',
+  onCommands: 'commands',
   onModeChange: 'mode',
   onPermissionRequest: 'data',
   onAskUser: 'data',
@@ -1274,6 +1275,11 @@ function createTauriHost(): BatAppAPI {
           onError: 'claude:error',
           onStream: 'claude:stream',
           onStatus: 'claude:status',
+          // The CLI's slash-command list (its built-ins, plugin commands and
+          // skills), pushed on init and again whenever the CLI discovers more.
+          // Push rather than poll: the panel mounts before any CLI exists, so
+          // asking on mount always came back empty.
+          onCommands: 'claude:commands',
           onModeChange: 'claude:modeChange',
           // canUseTool round-trip events. The sidecar emits permission-
           // request / ask-user when the SDK is blocked on a tool call;

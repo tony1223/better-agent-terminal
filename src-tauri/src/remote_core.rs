@@ -638,6 +638,7 @@ pub fn event_params_to_legacy_v1_args(channel: &str, params: &Value) -> Vec<Valu
         "claude:turn-end" => vec![params["sessionId"].clone(), params["payload"].clone()],
         "claude:error" => vec![params["sessionId"].clone(), params["error"].clone()],
         "claude:status" => vec![params["sessionId"].clone(), params["meta"].clone()],
+        "claude:commands" => vec![params["sessionId"].clone(), params["commands"].clone()],
         "claude:modeChange" => vec![params["sessionId"].clone(), params["mode"].clone()],
         "claude:history" => vec![
             params["sessionId"].clone(),
@@ -703,6 +704,7 @@ pub fn legacy_v1_event_args_to_params(channel: &str, args: &[Value]) -> Value {
         "claude:turn-end" => claude_event_params(args, "payload"),
         "claude:error" => claude_event_params(args, "error"),
         "claude:status" => claude_event_params(args, "meta"),
+        "claude:commands" => claude_event_params(args, "commands"),
         "claude:permission-request" => claude_event_params(args, "data"),
         "claude:permission-resolved" => claude_event_params(args, "toolUseId"),
         "claude:ask-user" => claude_event_params(args, "data"),
@@ -752,6 +754,9 @@ pub fn is_proxied_remote_event(channel: &str) -> bool {
             | "claude:turn-end"
             | "claude:error"
             | "claude:status"
+            // The CLI's own slash-command / skill list. A remote client builds the
+            // same menu from it, so it has to cross the boundary too.
+            | "claude:commands"
             | "claude:permission-request"
             | "claude:permission-resolved"
             | "claude:ask-user"
@@ -1541,6 +1546,29 @@ mod tests {
         assert_eq!(
             event_params_to_legacy_v1_args("workspace:reload", &json!("{\"workspaces\":[]}")),
             vec![json!("{\"workspaces\":[]}")]
+        );
+    }
+
+    /// The CLI's own slash-command / skill list has to reach a remote client, or
+    /// the phone builds its `/` menu from BAT's commands alone — the same gap
+    /// GH #123 reported on the desktop.
+    ///
+    /// Three separate places have to agree for that to work, and each fails
+    /// silently on its own: an unproxied event is dropped at the boundary, and a
+    /// missing arg mapping degrades to the `_ =>` catch-all that ships the whole
+    /// params object as one positional arg.
+    #[test]
+    fn command_pushes_reach_remote_clients_intact() {
+        assert!(is_proxied_remote_event("claude:commands"));
+
+        let commands = json!([{ "name": "security-review", "description": "", "argumentHint": "" }]);
+        let params = json!({ "sessionId": "s1", "commands": commands });
+        let args = event_params_to_legacy_v1_args("claude:commands", &params);
+        assert_eq!(args, vec![json!("s1"), commands.clone()]);
+        // Round-trips: a legacy-v1 client's args rebuild the same named params.
+        assert_eq!(
+            legacy_v1_event_args_to_params("claude:commands", &args),
+            params
         );
     }
 

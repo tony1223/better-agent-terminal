@@ -727,6 +727,37 @@ async function inProcess() {
   const throwAccount = await dispatch({ jsonrpc: '2.0', id: 91, method: 'claude.getAccountInfo', params: { sessionId: 'live-meta' } })
   assert.equal(throwAccount.result, null)
 
+  // (e) An empty answer must not be remembered. This is the whole of GH #123:
+  // the panel asks on mount, before any turn has spawned a CLI, so the honest
+  // answer is []. Caching that for the full 5-minute TTL meant the query coming
+  // up a second later could not dislodge it, and Claude Code's own commands,
+  // plugin commands and skills stayed invisible in the slash menu for the rest
+  // of the session. The empty answer is still returned — it just goes uncached.
+  __resetMetadataCacheForTests()
+  liveSession.currentQuery = null
+  const tooEarly = await dispatch({ jsonrpc: '2.0', id: 92, method: 'claude.getSupportedCommands', params: { sessionId: 'live-meta' } })
+  assert.deepEqual(tooEarly.result, [], 'no live query yet still answers []')
+
+  let lateCallCount = 0
+  liveSession.currentQuery = {
+    async supportedCommands() {
+      lateCallCount++
+      return [{ name: 'security-review', description: 'from the CLI' }]
+    },
+    async supportedAgents() { return [{ name: 'late-agent', description: 'from the CLI' }] },
+  }
+  const afterQueryLive = await dispatch({ jsonrpc: '2.0', id: 93, method: 'claude.getSupportedCommands', params: { sessionId: 'live-meta' } })
+  assert.equal(lateCallCount, 1, 'the cached [] must not short-circuit the retry')
+  assert.equal(afterQueryLive.result[0].name, 'security-review')
+  // A real answer is still worth caching — the fix must not turn every menu
+  // open into a fresh SDK read.
+  await dispatch({ jsonrpc: '2.0', id: 94, method: 'claude.getSupportedCommands', params: { sessionId: 'live-meta' } })
+  assert.equal(lateCallCount, 1, 'a non-empty answer must still be cached')
+
+  // Same trap, same fix, for the agent list.
+  const lateAgents = await dispatch({ jsonrpc: '2.0', id: 95, method: 'claude.getSupportedAgents', params: { sessionId: 'live-meta' } })
+  assert.equal(lateAgents.result[0].name, 'late-agent')
+
   // Cleanup: drop the test session so later assertions don't see it.
   mod.sessions.delete('live-meta')
   __resetMetadataCacheForTests()
@@ -2187,6 +2218,36 @@ async function inProcess() {
       const globalHistory = ccCaptured.find(e => e.name === 'claude:history')
       assert.deepEqual(globalHistory.payload.items.map(i => `${i.role}:${i.content}`), ['user:moved', 'assistant:found'])
 
+      // GH #125: a transcript we cannot find is not a transcript we know to be
+      // empty. The file lives at a path derived from the cwd, so a moved
+      // worktree or a session first run elsewhere reads as "no file" — and
+      // treating that as "no history" used to reset the host's own in-memory
+      // copy, emptying the conversation on the desktop because a phone opened
+      // it. Whatever we still hold is a partial answer but never a wrong one.
+      ccCaptured.length = 0
+      const strandedRef = mod.sessions.get('cc-1')
+      strandedRef.sdkSessionId = 'sdk-cc-vanished'
+      strandedRef.messages = [
+        { id: 'm-1', sessionId: 'cc-1', role: 'user', content: 'still here', timestamp: 1 },
+        { id: 'm-2', sessionId: 'cc-1', role: 'assistant', content: 'and so am I', timestamp: 2 },
+      ]
+      const strandedReply = await dispatch({ jsonrpc: '2.0', id: 706, method: 'claude.clientResume',
+        params: { sessionId: 'cc-1', sdkSessionId: 'sdk-cc-vanished', options: { cwd: ccCwd } } })
+      assert.equal(strandedReply.result.ok, true)
+      assert.equal(strandedReply.result.found, false, 'the disk read genuinely found nothing')
+      assert.deepEqual(
+        strandedRef.messages.map(i => `${i.role}:${i.content}`),
+        ['user:still here', 'assistant:and so am I'],
+        'a missing transcript must not wipe the host transcript',
+      )
+      const strandedHistory = ccCaptured.find(e => e.name === 'claude:history')
+      assert.ok(strandedHistory, 'a missing transcript still emits claude:history')
+      assert.deepEqual(
+        strandedHistory.payload.items.map(i => `${i.role}:${i.content}`),
+        ['user:still here', 'assistant:and so am I'],
+        'the client must be sent what we have, not an empty conversation',
+      )
+
       // Validation mirrors resumeSession.
       const noSid = await dispatch({ jsonrpc: '2.0', id: 704, method: 'claude.clientResume', params: { sessionId: 'x' } })
       assert.match(noSid.error?.message || '', /missing sdkSessionId/)
@@ -2994,6 +3055,66 @@ async function inProcess() {
     bypassCanUse = null
   }
 
+  // GH #124: the two modes BAT did not previously understand.
+  //
+  // dontAsk means "never prompt, deny anything not pre-approved". Everything
+  // reaching canUseTool is by definition not pre-approved — the CLI answers from
+  // its own rules first and only calls back for what it could not decide — so the
+  // answer is no. Falling through to the prompt would turn "don't ask me" into a
+  // stream of questions, which is the one thing the mode exists to prevent.
+  //
+  // auto is the opposite trap: its classifier runs inside Claude Code, ahead of
+  // this callback, and only escalates what it will not decide alone. Those
+  // escalations are precisely the prompts a human should see, so auto must keep
+  // surfacing UI. Auto-allowing here would delete the safety net that is the
+  // whole reason to pick auto over bypassPermissions.
+  for (const [mode, sessionId, sdkId, expectPrompt] of [
+    ['dontAsk', 'da-1', 'da-sdk', false],
+    ['auto', 'au-1', 'au-sdk', true],
+  ]) {
+    const captured = []
+    const restoreSend = mod.__setSendEventForTests((name, payload) => captured.push({ name, payload }))
+    let canUse = null
+    __setSdkOverrideForTests({
+      query({ options }) {
+        canUse = options.canUseTool
+        // The mode must reach the CLI unmangled; only bypassPlan is rewritten.
+        assert.equal(options.permissionMode, mode, `${mode} must be passed through to the SDK`)
+        return (async function*() {
+          yield { type: 'system', subtype: 'init', session_id: sdkId, permissionMode: mode }
+          yield { type: 'result', subtype: 'success', session_id: sdkId, result: 'ok', stop_reason: 'end_turn', total_cost_usd: 0, num_turns: 1 }
+        })()
+      },
+    })
+    try {
+      await dispatch({ jsonrpc: '2.0', id: 274, method: 'claude.startSession',
+        params: { sessionId, options: { cwd: '/p', permissionMode: mode } } })
+      await dispatch({ jsonrpc: '2.0', id: 275, method: 'claude.sendMessage',
+        params: { sessionId, prompt: 'go' } })
+      assert.ok(canUse, `${mode} must still install a canUseTool callback`)
+      const pending = canUse('Bash', { command: 'rm -rf /' }, { toolUseID: `${sessionId}-tool` })
+      await new Promise(r => setTimeout(r, 5))
+      const permEvents = captured.filter(e => e.name === 'claude:permission-request')
+      if (expectPrompt) {
+        assert.equal(permEvents.length, 1, 'auto must still surface the prompts its classifier escalates')
+        await dispatch({ jsonrpc: '2.0', id: 276, method: 'claude.resolvePermission',
+          params: { sessionId, toolUseId: `${sessionId}-tool`, result: { behavior: 'deny', message: 'no' } } })
+        await pending
+      } else {
+        assert.equal(permEvents.length, 0, 'dontAsk must not emit permission-request')
+        const decision = await Promise.resolve(pending)
+        assert.equal(decision.behavior, 'deny')
+        // message is required on a deny result, not optional.
+        assert.equal(typeof decision.message, 'string')
+        assert.ok(decision.message.includes('Bash'), 'the denial should name the tool it refused')
+      }
+    } finally {
+      __setSdkOverrideForTests(undefined)
+      restoreSend()
+      mod.sessions.delete(sessionId)
+    }
+  }
+
   // acceptEdits auto-allows file/read tools but still prompts for Bash.
   const acceptCaptured = []
   const restoreAcceptSend = mod.__setSendEventForTests((name, payload) => acceptCaptured.push({ name, payload }))
@@ -3581,6 +3702,111 @@ async function inProcess() {
   } finally {
     __setSdkOverrideForTests(undefined)
     restoreTcEmit()
+  }
+
+  // GH #123: Claude Code's own slash commands, plugin commands and skills reach
+  // the renderer over claude:commands rather than being polled for.
+  //
+  // Polling is what broke: the panel asks on mount, which is before any turn has
+  // spawned a CLI to ask, and there is no second trigger it can rely on. Pushing
+  // at init — the first moment the list exists — removes the timing question.
+  const cmdCaptured = []
+  const restoreCmdEmit = mod.__setSendEventForTests((n, p) => cmdCaptured.push({ name: n, payload: p }))
+  const fakeSdkWithCommands = {
+    query() {
+      const gen = (async function*() {
+        yield { type: 'system', subtype: 'init', session_id: 'sdk-cmds', cwd: '/x' }
+        // Mid-session discovery: the CLI finds skills as the agent moves around
+        // the tree and re-pushes the whole list. Its contract is REPLACE.
+        yield {
+          type: 'system',
+          subtype: 'commands_changed',
+          session_id: 'sdk-cmds',
+          commands: [
+            { name: 'security-review', description: 'built in', argumentHint: '' },
+            { name: 'acme:deploy', description: 'from a plugin', argumentHint: '' },
+            { name: 'my-skill', description: 'a skill', argumentHint: '' },
+          ],
+        }
+        yield { type: 'result', subtype: 'success', session_id: 'sdk-cmds', result: 'ok', stop_reason: 'end_turn', total_cost_usd: 0, num_turns: 1 }
+      })()
+      // The real SDK Query exposes this alongside the async iterator; the init
+      // push reads it off the same object.
+      gen.supportedCommands = async () => [
+        { name: 'security-review', description: 'built in', argumentHint: '' },
+      ]
+      return gen
+    },
+  }
+  __setSdkOverrideForTests(fakeSdkWithCommands)
+  try {
+    await dispatch({ jsonrpc: '2.0', id: 244, method: 'claude.startSession',
+      params: { sessionId: 'cmds-1', options: { cwd: '/x' } } })
+    await dispatch({ jsonrpc: '2.0', id: 245, method: 'claude.sendMessage',
+      params: { sessionId: 'cmds-1', prompt: 'hi' } })
+    // The init push is fire-and-forget so a slow query cannot stall the frame
+    // carrying the turn's first tokens; let its microtask land.
+    await new Promise(resolve => setImmediate(resolve))
+
+    const commandEvents = cmdCaptured.filter(e => e.name === 'claude:commands')
+    assert.ok(commandEvents.length >= 1, 'expected at least one claude:commands push')
+    for (const ev of commandEvents) {
+      assert.equal(ev.payload.sessionId, 'cmds-1', 'events are keyed by BAT session, not the SDK session')
+      assert.ok(Array.isArray(ev.payload.commands))
+    }
+    // Only one of the two pushes is synchronous. The init push has to await a
+    // read off the Query, and here commands_changed overtakes it — exactly the
+    // race the epoch counter exists for. Since the renderer REPLACEs on each
+    // push, the last one to arrive is the one the menu ends up showing, so the
+    // stale init answer must never be it.
+    const last = commandEvents[commandEvents.length - 1].payload.commands
+    assert.deepEqual(
+      last.map(c => c.name),
+      ['security-review', 'acme:deploy', 'my-skill'],
+      'a late init read must not overwrite the fuller commands_changed list',
+    )
+    // Forwarded verbatim rather than re-read: the payload is authoritative and
+    // re-reading would race the very change it is announcing.
+    assert.equal(last.length, 3)
+  } finally {
+    __setSdkOverrideForTests(undefined)
+    restoreCmdEmit()
+    mod.sessions.delete('cmds-1')
+  }
+
+  // The init push on its own — the common case, and the one that replaces the
+  // mount-time poll that could never work. Nothing overtakes it here, so it must
+  // actually reach the renderer.
+  const initCaptured = []
+  const restoreInitEmit = mod.__setSendEventForTests((n, p) => initCaptured.push({ name: n, payload: p }))
+  __setSdkOverrideForTests({
+    query() {
+      const gen = (async function*() {
+        yield { type: 'system', subtype: 'init', session_id: 'sdk-init-cmds', cwd: '/x' }
+        yield { type: 'result', subtype: 'success', session_id: 'sdk-init-cmds', result: 'ok', stop_reason: 'end_turn', total_cost_usd: 0, num_turns: 1 }
+      })()
+      gen.supportedCommands = async () => [
+        { name: 'init', description: 'built in', argumentHint: '' },
+        { name: 'acme:deploy', description: 'from a plugin', argumentHint: '' },
+      ]
+      return gen
+    },
+  })
+  try {
+    await dispatch({ jsonrpc: '2.0', id: 246, method: 'claude.startSession',
+      params: { sessionId: 'cmds-2', options: { cwd: '/x' } } })
+    await dispatch({ jsonrpc: '2.0', id: 247, method: 'claude.sendMessage',
+      params: { sessionId: 'cmds-2', prompt: 'hi' } })
+    await new Promise(resolve => setImmediate(resolve))
+    const pushed = initCaptured.filter(e => e.name === 'claude:commands')
+    assert.equal(pushed.length, 1, `expected exactly one init push, got ${pushed.length}`)
+    assert.deepEqual(pushed[0].payload.commands.map(c => c.name), ['init', 'acme:deploy'])
+    // claude:status still goes out; the command push is additive, not a swap.
+    assert.ok(initCaptured.some(e => e.name === 'claude:status'), 'init must still emit claude:status')
+  } finally {
+    __setSdkOverrideForTests(undefined)
+    restoreInitEmit()
+    mod.sessions.delete('cmds-2')
   }
 
   // SDK-unavailable fallback: claude.sendMessage stays usable as a stub

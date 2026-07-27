@@ -39,6 +39,7 @@ import { autoCompactWindowForClaudeSelection, sdkModelForClaudeSelection } from 
 import { loadInstalledPlugins, dataUrlToContentBlock } from '../lib/plugins.mjs'
 import { resolveClaudeCliBinaryWithInstall } from './claude-auth.mjs'
 import { buildCanUseTool } from './claude-permission.mjs'
+import { invalidateSessionCommandCache } from './claude-readonly.mjs'
 import { LiveQuery } from '../lib/live-query.mjs'
 import { isCodexSession, sendCodexMessage, isCodexAgentPreset } from './codex.mjs'
 
@@ -389,6 +390,48 @@ function emitLatencySample(sample) {
   sendEvent('agent:latency-sample', sample)
 }
 
+// Push the CLI's own slash-command list — built-ins, plugin commands and skills
+// alike — at the two moments it is knowable: `init`, and the CLI's own
+// `commands_changed` notice.
+//
+// The renderer used to discover these by polling claude.getSupportedCommands on
+// panel mount, which is before any turn has spawned a CLI to ask, so the menu
+// only ever showed BAT's own commands. Pushing removes the timing question
+// entirely: the list arrives when it exists.
+//
+// Fire-and-forget on purpose — processMessage is synchronous and a slow or dead
+// query must not stall the frame carrying the turn's first tokens. A failure
+// leaves the menu showing whatever it already had.
+//
+// The counter exists because only one of the two pushes is synchronous. The init
+// one has to await a read off the Query, and a commands_changed arriving while
+// that read is in flight is both newer and authoritative. Since the renderer's
+// contract is REPLACE, letting the older answer land second would quietly swap a
+// full list for a shorter one — so a push that lost its slot is dropped.
+function bumpCommandsEpoch(s) {
+  if (!s) return 0
+  s.commandsEpoch = (s.commandsEpoch || 0) + 1
+  return s.commandsEpoch
+}
+
+function emitSupportedCommands(s, sessionId) {
+  invalidateSessionCommandCache(sessionId)
+  const query = s?.currentQuery || s?.liveQuery?.generator
+  if (!query || typeof query.supportedCommands !== 'function') return
+  const epoch = bumpCommandsEpoch(s)
+  Promise.resolve()
+    .then(() => query.supportedCommands())
+    .then((commands) => {
+      if (s.commandsEpoch !== epoch) return
+      if (!Array.isArray(commands) || commands.length === 0) return
+      debugLog('emit-commands', sessionId, { count: commands.length })
+      sendEvent('claude:commands', { sessionId, commands })
+    })
+    .catch((err) => {
+      logWarn(`claude.supportedCommands(${shortSessionId(sessionId)}) failed: ${err?.message || err}`)
+    })
+}
+
 // processMessage: dispatch a single SDKMessage to the renderer-shaped
 // event(s). Pure-ish — only mutates session state (sdkSessionId, model,
 // permissionMode, lastUsage) and emits via sendEvent.
@@ -400,7 +443,18 @@ function processMessage(s, sessionId, msg) {
   if (t === 'system' && msg.subtype === 'init') {
     if (typeof msg.session_id === 'string') s.sdkSessionId = msg.session_id
     if (typeof msg.model === 'string') s.model = msg.model
-    if (typeof msg.permissionMode === 'string') s.permissionMode = msg.permissionMode
+    if (typeof msg.permissionMode === 'string') {
+      // The CLI echoes the mode it actually adopted, which is how a mode this
+      // build knows but the installed CLI does not (or the account is not
+      // entitled to) degrades gracefully: we take the CLI's word for it, and the
+      // claude:status below carries the real mode back to the UI so the button
+      // stops claiming something that isn't in force. Worth a log line — silently
+      // running in a weaker mode than the one on screen is the bad outcome here.
+      if (s.permissionMode && msg.permissionMode !== s.permissionMode) {
+        logWarn(`claude.sendMessage(${shortSessionId(sessionId)}): requested permissionMode=${s.permissionMode} but the CLI reports ${msg.permissionMode}`)
+      }
+      s.permissionMode = msg.permissionMode
+    }
     // Persist the freshly-issued sdkSessionId so ensureSession can rebuild
     // a resumable session even after stopSession / resetSession.
     saveSessionConfig(sessionId, s)
@@ -412,6 +466,19 @@ function processMessage(s, sessionId, msg) {
       cwd: meta?.cwd || null,
     })
     sendEvent('claude:status', { sessionId, meta })
+    emitSupportedCommands(s, sessionId)
+    return
+  }
+  // The CLI re-pushes the whole list when it discovers more (e.g. skills found
+  // while the agent works in a subdirectory). Its contract is REPLACE, not
+  // merge, so pass the payload straight through rather than re-reading.
+  if (t === 'system' && msg.subtype === 'commands_changed') {
+    invalidateSessionCommandCache(sessionId)
+    bumpCommandsEpoch(s)
+    if (Array.isArray(msg.commands) && msg.commands.length > 0) {
+      debugLog('emit-commands', sessionId, { count: msg.commands.length, reason: 'changed' })
+      sendEvent('claude:commands', { sessionId, commands: msg.commands })
+    }
     return
   }
   if (t === 'system' && msg.subtype === 'status') {

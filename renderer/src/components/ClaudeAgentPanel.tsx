@@ -25,6 +25,7 @@ import { getHostUsageSnapshot, rateLimitsFromHostUsage, subscribeHostUsage } fro
 import { autoCompactWindowForClaudeSelection, claudeModelValueForRow, displayNameForClaudeSelection, groupClaudeModelRows, normalizeClaudeModelSelection, pickClaudeModelOption, sdkModelForClaudeSelection, type ClaudeCompactWindow } from '../utils/claude-model-presets'
 import { shouldNavigateInputHistoryFromTextarea } from '../utils/input-history-navigation'
 import { buildSnippetContextPrompt, parseSnippetSlashCommand, type SnippetForContext } from '../utils/snippet-command'
+import { filterSlashCommands, flattenSlashGroups, groupSlashCommands, mergeSlashCommands, type SlashCommandInfo } from '../utils/slash-commands'
 import { createToolRenderCache, getOrComputeToolRender, pruneToolRenderCache } from '../utils/tool-result-cache'
 import { useRafBatchedString } from '../utils/use-raf-batched-string'
 import { translateRuntimeMessage } from '../utils/runtime-status-message'
@@ -159,12 +160,6 @@ interface PendingPermission {
   input: Record<string, unknown>
   suggestions?: unknown[]
   decisionReason?: string
-}
-
-interface SlashCommandInfo {
-  name: string
-  description: string
-  argumentHint: string
 }
 
 interface AskUserQuestion {
@@ -537,6 +532,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
   const showSlashMenuRef = useRef(false)
   const [slashFilter, setSlashFilter] = useState('')
   const [slashMenuIndex, setSlashMenuIndex] = useState(0)
+  const selectedSlashItemRef = useRef<HTMLDivElement | null>(null)
   // Ctrl+P file picker
   const [showFilePicker, setShowFilePicker] = useState(false)
   const [filePickerMode, setFilePickerMode] = useState<'preview' | 'attach'>('preview')
@@ -1741,6 +1737,16 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
       api.onModeChange((sid: string, mode: string) => {
         if (sid !== sessionId) return
         setPermissionMode(mode)
+      }),
+
+      // Claude Code's own command list, pushed when the CLI first knows it and
+      // again whenever it discovers more (skills found while working in a
+      // subdirectory, plugins reloaded). Its contract is REPLACE, not merge.
+      api.onCommands((sid: string, commands: SlashCommandInfo[]) => {
+        if (sid !== sessionId) return
+        if (!Array.isArray(commands) || commands.length === 0) return
+        setSlashCommands(commands)
+        window.dispatchEvent(new CustomEvent('claude-skills-updated', { detail: { sessionId, commands } }))
       }),
 
       api.onPromptSuggestion((sid: string, suggestion: string) => {
@@ -3116,10 +3122,17 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
     textareaRef.current?.focus()
   }, [sessionId, isStreaming, isInterrupted])
 
-  const permissionModes = ['default', 'acceptEdits', 'bypassPermissions', 'bypassPlan', 'plan'] as const
+  // auto and dontAsk are deliberately outside the allowBypassPermissions gate
+  // below: neither hands out a blank cheque. auto has Claude Code's classifier
+  // vet each action and still escalates what it won't decide, and dontAsk denies
+  // anything not pre-approved. Gating them behind the bypass opt-in would hide
+  // the two modes a cautious user most wants.
+  const permissionModes = ['default', 'auto', 'acceptEdits', 'dontAsk', 'bypassPermissions', 'bypassPlan', 'plan'] as const
   const permissionModeLabels: Record<string, string> = {
     default: '\u270F Ask before edits',
+    auto: '\uD83E\uDD16 Auto (AI-reviewed)',
     acceptEdits: '\u270F Auto-accept edits',
+    dontAsk: '\uD83D\uDEAB Never ask (deny)',
     bypassPermissions: '\u26A0 Bypass permissions',
     bypassPlan: '\uD83D\uDCCB Plan (auto-approve)',
     plan: '\uD83D\uDCCB Plan mode',
@@ -3139,9 +3152,8 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
   useEffect(() => { showSlashMenuRef.current = showSlashMenu }, [showSlashMenu])
 
   // Filtered slash commands based on current input
-  const filteredSlashCommands = useMemo(() => {
+  const slashGroups = useMemo(() => {
     if (!showSlashMenu) return []
-    const q = slashFilter.toLowerCase()
     const builtIn: SlashCommandInfo[] = isCodexSession
       ? [
           { name: 'new', description: 'Reset session (clear conversation)', argumentHint: '' },
@@ -3164,9 +3176,37 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
           { name: 'whoami', description: 'Show current account info', argumentHint: '' },
           { name: 'switch', description: 'Switch between registered accounts', argumentHint: '<number|email>' },
         ]
-    const all = [...builtIn, ...slashCommands]
-    return q ? all.filter(c => c.name.toLowerCase().includes(q)) : all
+    // slashCommands is Claude Code's own list — its built-ins, plugin commands
+    // and skills. Merged rather than concatenated because the two sides share
+    // half a dozen names (/model, /compact, /login …) that BAT intercepts before
+    // the prompt is ever sent, so the CLI's copy would be a row that does nothing.
+    return groupSlashCommands(
+      filterSlashCommands(mergeSlashCommands(builtIn, slashCommands), slashFilter),
+    )
   }, [showSlashMenu, slashFilter, slashCommands, isCodexSession])
+
+  // Arrow keys index this flat list while the menu renders headed sections.
+  // Deriving it from the groups (instead of building both from the same source)
+  // is what guarantees the highlighted row is the row Enter runs.
+  const filteredSlashCommands = useMemo(() => flattenSlashGroups(slashGroups), [slashGroups])
+  const slashIndexByName = useMemo(() => {
+    const map = new Map<string, number>()
+    filteredSlashCommands.forEach((cmd, i) => map.set(cmd.name, i))
+    return map
+  }, [filteredSlashCommands])
+
+  // Typing narrows the list under the cursor; without this the highlight can sit
+  // past the end and Enter sends a literal "/" instead of a command.
+  useEffect(() => {
+    setSlashMenuIndex(prev => (prev < filteredSlashCommands.length ? prev : 0))
+  }, [filteredSlashCommands.length])
+
+  // The list is no longer capped at ten rows, so the highlight can walk out of
+  // the scroll viewport. Keep it visible.
+  useEffect(() => {
+    if (!showSlashMenu) return
+    selectedSlashItemRef.current?.scrollIntoView({ block: 'nearest' })
+  }, [showSlashMenu, slashMenuIndex])
 
   // Auto-resize textarea to fit content
   const autoResizeTextarea = useCallback(() => {
@@ -5428,16 +5468,34 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
         {/* Slash command autocomplete menu */}
         {showSlashMenu && filteredSlashCommands.length > 0 && (
           <div className="claude-slash-menu">
-            {filteredSlashCommands.slice(0, 10).map((cmd, i) => (
-              <div
-                key={cmd.name}
-                className={`claude-slash-item${i === slashMenuIndex ? ' selected' : ''}`}
-                onClick={() => handleSlashSelect(cmd)}
-                onMouseEnter={() => setSlashMenuIndex(i)}
-              >
-                <span className="claude-slash-name">/{cmd.name}</span>
-                <span className="claude-slash-desc">{cmd.description}</span>
-              </div>
+            {slashGroups.map(group => (
+              <Fragment key={group.source}>
+                {/* Headings only earn their space once there is more than one
+                    group — with Claude Code unreachable the menu is BAT's list
+                    alone, and a lone "BAT" header over it says nothing. */}
+                {slashGroups.length > 1 && (
+                  <div className="claude-slash-group">{group.label}</div>
+                )}
+                {group.items.map(cmd => {
+                  const i = slashIndexByName.get(cmd.name) ?? -1
+                  const selected = i === slashMenuIndex
+                  return (
+                    <div
+                      key={cmd.name}
+                      ref={selected ? selectedSlashItemRef : undefined}
+                      className={`claude-slash-item${selected ? ' selected' : ''}`}
+                      onClick={() => handleSlashSelect(cmd)}
+                      onMouseEnter={() => setSlashMenuIndex(i)}
+                    >
+                      <span className="claude-slash-name">/{cmd.name}</span>
+                      {cmd.argumentHint && (
+                        <span className="claude-slash-hint">{cmd.argumentHint}</span>
+                      )}
+                      <span className="claude-slash-desc">{cmd.description}</span>
+                    </div>
+                  )
+                })}
+              </Fragment>
             ))}
           </div>
         )}

@@ -2025,6 +2025,16 @@
   color: #dcdcaa;
 }
 
+/* auto is supervised, not permissive — keep it well clear of the red that means
+   bypassPermissions so a glance never confuses the two. */
+.claude-mode-auto {
+  color: #c586c0;
+}
+
+.claude-mode-dontAsk {
+  color: #9d9d9d;
+}
+
 .claude-mode-bypassPermissions {
   color: var(--danger-color);
 }
@@ -3101,6 +3111,20 @@
   max-height: 240px;
   overflow-y: auto;
 }
+/* Source heading (BAT / Claude Code / Plugins / Skills). Sticky so the group a
+   long scroll is currently inside stays named. */
+.claude-slash-group {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 4px 12px 2px;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-size: calc(var(--claude-font-size) - 2px);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 600;
+}
 .claude-slash-item {
   display: flex;
   align-items: center;
@@ -3108,6 +3132,13 @@
   padding: 6px 12px;
   cursor: pointer;
   transition: background 0.1s;
+}
+.claude-slash-hint {
+  font-size: calc(var(--claude-font-size) - 2px);
+  color: var(--text-secondary);
+  font-family: monospace;
+  opacity: 0.75;
+  flex-shrink: 0;
 }
 .claude-slash-item:hover,
 .claude-slash-item.selected {

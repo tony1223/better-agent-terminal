@@ -44,10 +44,12 @@ type ClaudeChannelControls = {
   effort: string
 }
 
-const PERMISSION_MODES = ['default', 'acceptEdits', 'bypassPermissions', 'bypassPlan', 'plan'] as const
+const PERMISSION_MODES = ['default', 'auto', 'acceptEdits', 'dontAsk', 'bypassPermissions', 'bypassPlan', 'plan'] as const
 const PERMISSION_MODE_LABELS: Record<string, string> = {
   default: 'Default',
+  auto: 'Auto (AI-reviewed)',
   acceptEdits: 'Accept edits',
+  dontAsk: 'Never ask (deny)',
   bypassPermissions: 'Bypass permissions',
   bypassPlan: 'Bypass plan',
   plan: 'Plan mode',

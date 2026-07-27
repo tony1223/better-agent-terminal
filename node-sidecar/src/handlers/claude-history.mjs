@@ -170,12 +170,38 @@ function historyItemsFromJsonl(raw, sessionId) {
   return items
 }
 
+// What we still hold in memory for a session. Used only when the on-disk
+// transcript cannot be read: it is a partial answer (capped, and empty for a
+// session this process never ran) but it is never a *wrong* one, and it beats
+// telling the client the conversation is empty.
+//
+// Looked up at the point of use rather than once up front — the disk read is
+// awaited in between, and a concurrent resume can replace the session record
+// while it is in flight.
+function rememberedTranscript(sessionId) {
+  const session = sessions.get(sessionId)
+  return Array.isArray(session?.messages) ? session.messages : []
+}
+
 export async function loadSessionHistory(sessionId, sdkSessionId, cwd, opts = {}) {
   sendEvent('claude:resume-loading', { sessionId, loading: true })
   try {
     const raw = await readHistoryFile(sdkSessionId, cwd, opts)
-    const items = raw !== null ? historyItemsFromJsonl(raw, sessionId) : []
     const session = sessions.get(sessionId)
+    // A transcript we could not find is not a transcript we know to be empty.
+    // The file lives at a path derived from the cwd, so a moved worktree, a
+    // drive-letter casing difference or a session first run elsewhere all read
+    // as "no file". Treating that as "no history" used to reset the host's own
+    // in-memory copy — so a phone opening the session emptied it on the desktop
+    // too, and the phone got [] with only a `found: false` it had no reason to
+    // inspect (GH #125).
+    if (raw === null) {
+      const remembered = rememberedTranscript(sessionId)
+      logWarn(`claude.loadSessionHistory(${sessionId}): no transcript on disk for ${sdkSessionId}; replaying ${remembered.length} in-memory message(s)`)
+      sendEvent('claude:history', { sessionId, items: remembered })
+      return { ok: true, found: false, itemCount: remembered.length }
+    }
+    const items = historyItemsFromJsonl(raw, sessionId)
     // `preserveLiveMessages` is set by claude.clientResume when a remote
     // client re-opens a session whose turn is still streaming here: re-emit
     // the persisted history to that client WITHOUT clobbering the running
@@ -185,11 +211,14 @@ export async function loadSessionHistory(sessionId, sdkSessionId, cwd, opts = {}
       session.messages = items.slice(-300)
     }
     sendEvent('claude:history', { sessionId, items })
-    return { ok: true, found: raw !== null, itemCount: items.length }
+    return { ok: true, found: true, itemCount: items.length }
   } catch (err) {
+    // Same reasoning as the not-found path: a read that blew up says nothing
+    // about whether the conversation happened.
+    const remembered = rememberedTranscript(sessionId)
     logWarn(`claude.loadSessionHistory: ${err instanceof Error ? err.message : String(err)}`)
-    sendEvent('claude:history', { sessionId, items: [] })
-    return { ok: false, found: false, error: err instanceof Error ? err.message : String(err) }
+    sendEvent('claude:history', { sessionId, items: remembered })
+    return { ok: false, found: false, itemCount: remembered.length, error: err instanceof Error ? err.message : String(err) }
   } finally {
     sendEvent('claude:resume-loading', { sessionId, loading: false })
   }
