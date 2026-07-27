@@ -52,6 +52,12 @@ const INVOKE_TIMEOUT: Duration = Duration::from_secs(15);
 const RUNTIME_STATUS_TIMEOUT: Duration = Duration::from_secs(30);
 const SESSION_INVOKE_TIMEOUT: Duration = Duration::from_secs(300);
 const CLAUDE_REMOTE_LOGIN_TTL: Duration = Duration::from_secs(180);
+/// Owner label for sessions a remote client established. Remote clients are not
+/// host windows, so they have no registry id of their own. One shared, stable
+/// label keeps a reconnecting client from tripping the cross-window ownership
+/// guard — that guard exists to stop two local profiles sharing a runtime, and
+/// a client that reconnects is still the same owner.
+const REMOTE_AGENT_SESSION_WINDOW: &str = "remote-client";
 
 struct ClaudeRemoteLoginClaim {
     touched: Instant,
@@ -1338,6 +1344,44 @@ fn remote_debug_enabled() -> bool {
     matches!(std::env::var("BAT_DEBUG").as_deref(), Ok("1") | Ok("true"))
 }
 
+/// Mirror the local `claude_start_session` bookkeeping for a session a remote
+/// client is establishing.
+///
+/// Locally every session-establishing command registers the session in
+/// `AgentNotificationState` (commands/claude.rs) before routing to a runtime.
+/// The remote path returns to the client before reaching that code, so without
+/// this the host never learns a remote session exists: it cannot capture
+/// `sdkSessionId` off `claude:status` (notification.rs bails on an unknown
+/// session), cannot raise a completion notification when the turn ends, and
+/// answers every read-only probe with "no such session".
+///
+/// Failures are logged, not propagated: registration is bookkeeping, and a
+/// remote client that cannot start a session because of it would be strictly
+/// worse off than before.
+fn register_remote_agent_session(ctx: &HostContext, channel: &str, params: &Value) {
+    if !matches!(
+        channel,
+        "claude:start-session" | "claude:resume-session" | "claude:client-resume"
+    ) {
+        return;
+    }
+    let Ok(session_id) = string_param(params, "sessionId", channel) else {
+        return;
+    };
+    let options = params.get("options").cloned().unwrap_or(Value::Null);
+    if let Err(err) = notification_cmd::register_agent_session_from_options(
+        ctx,
+        REMOTE_AGENT_SESSION_WINDOW,
+        &session_id,
+        Some(&options),
+    ) {
+        remote_debug_log(
+            ctx,
+            format!("{channel}: register agent session failed: {err}"),
+        );
+    }
+}
+
 fn remote_debug_log(app: &HostContext, message: impl AsRef<str>) {
     if remote_debug_enabled() {
         crate::commands::app::log_tauri(app, &format!("[remote-server] {}", message.as_ref()));
@@ -1543,6 +1587,10 @@ fn invoke_sidecar_for_remote(
         }
     }
     log_remote_pty_write_params(&ctx, "remote-server.decoded", channel, &params);
+    // Ahead of the dispatch below so it covers both runtimes: Codex is served
+    // natively by invoke_rust_for_remote, Claude is forwarded to the sidecar,
+    // and locally both are registered by the same claude_start_session call.
+    register_remote_agent_session(ctx, channel, &params);
     if let Some(result) = invoke_rust_for_remote(ctx, channel, &params) {
         return result;
     }
@@ -1898,37 +1946,60 @@ fn invoke_rust_for_remote(
                 &claude_cmd::fetch_auth_status_native(&ctx),
             )),
         },
+        // The three probes below answer from the host's session map when it
+        // knows the session, and otherwise fall through (`return None`) to the
+        // sidecar, which owns the live Claude session. Reporting Null instead
+        // would be a lie the client cannot tell apart from "no such session":
+        // it drops the panel into a destructive resume that tears down a turn
+        // the host is still streaming, and leaves the transcript unreplayed.
         "claude:get-session-state" => match codex_for_remote_session(ctx, channel, params) {
             Some(route) => route.map(|(codex, session_id)| {
                 codex.get_session_state(&session_id).unwrap_or(Value::Null)
             }),
-            None => string_param(params, "sessionId", channel).map(|session_id| {
-                notification_cmd::get_agent_session_snapshot(&ctx, &session_id)
-                    .map(|session| claude_cmd::session_state_from_notification_snapshot(&session))
-                    .unwrap_or(Value::Null)
-            }),
+            None => match string_param(params, "sessionId", channel) {
+                Ok(session_id) => {
+                    match notification_cmd::get_agent_session_snapshot(&ctx, &session_id) {
+                        Some(session) => {
+                            Ok(claude_cmd::session_state_from_notification_snapshot(&session))
+                        }
+                        None => return None,
+                    }
+                }
+                Err(err) => Err(err),
+            },
         },
         "claude:get-session-meta" => match codex_for_remote_session(ctx, channel, params) {
             Some(route) => route.map(|(codex, session_id)| {
                 codex.get_session_meta(&session_id).unwrap_or(Value::Null)
             }),
-            None => string_param(params, "sessionId", channel).map(|session_id| {
-                notification_cmd::get_agent_session_snapshot(&ctx, &session_id)
-                    .map(|session| claude_cmd::session_meta_from_notification_snapshot(&session))
-                    .unwrap_or(Value::Null)
-            }),
+            None => match string_param(params, "sessionId", channel) {
+                Ok(session_id) => {
+                    match notification_cmd::get_agent_session_snapshot(&ctx, &session_id) {
+                        Some(session) => {
+                            Ok(claude_cmd::session_meta_from_notification_snapshot(&session))
+                        }
+                        None => return None,
+                    }
+                }
+                Err(err) => Err(err),
+            },
         },
         "claude:get-context-usage" => match codex_for_remote_session(ctx, channel, params) {
             Some(route) => route.map(|(codex, session_id)| {
                 codex.get_context_usage(&session_id).unwrap_or(Value::Null)
             }),
-            None => string_param(params, "sessionId", channel).map(|session_id| {
-                notification_cmd::get_agent_session_snapshot(&ctx, &session_id)
-                    .and_then(|session| {
-                        claude_cmd::context_usage_from_notification_snapshot(&session)
-                    })
-                    .unwrap_or(Value::Null)
-            }),
+            None => match string_param(params, "sessionId", channel) {
+                Ok(session_id) => {
+                    match notification_cmd::get_agent_session_snapshot(&ctx, &session_id)
+                        .and_then(|session| {
+                            claude_cmd::context_usage_from_notification_snapshot(&session)
+                        }) {
+                        Some(usage) => Ok(usage),
+                        None => return None,
+                    }
+                }
+                Err(err) => Err(err),
+            },
         },
         "claude:set-auto-continue" | "claude:set-permission-mode" => {
             let Some(route) = codex_for_remote_session(ctx, channel, params) else {
