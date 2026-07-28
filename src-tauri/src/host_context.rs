@@ -178,9 +178,14 @@ impl HostContext {
         (self.inner.emit_sink)(topic, &payload);
     }
 
+    /// The desktop backing reads this from Tauri's generated package info;
+    /// headless has no Tauri context, so `build.rs` exports the same
+    /// `tauri.conf.json` version as `BAT_APP_VERSION`. `CARGO_PKG_VERSION` is
+    /// *not* it — the release pipeline never rewrites Cargo.toml, so it would
+    /// pin every `bat-server` release to a stale 0.1.0.
     #[allow(dead_code)]
     pub fn version(&self) -> String {
-        env!("CARGO_PKG_VERSION").to_string()
+        env!("BAT_APP_VERSION").to_string()
     }
 
     #[allow(dead_code)]
@@ -219,5 +224,24 @@ impl HostContext {
 
     pub fn sidecar_emit_sink(&self) -> EventSink {
         self.inner.emit_sink.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // `bat-server` reports `BAT_APP_VERSION` as `serverVersion` in the auth
+    // handshake, and remote clients compare it against their own version to warn
+    // about skew (issue #115). If it ever drifts from the version the release
+    // pipeline writes into tauri.conf.json, every connection to a headless host
+    // raises a false mismatch.
+    #[test]
+    fn app_version_matches_tauri_config() {
+        let config: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json"))
+            .expect("tauri.conf.json must parse");
+        assert_eq!(
+            config["version"].as_str(),
+            Some(env!("BAT_APP_VERSION")),
+            "build.rs must export the tauri.conf.json version as BAT_APP_VERSION",
+        );
     }
 }

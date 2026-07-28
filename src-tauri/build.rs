@@ -3,6 +3,7 @@ fn main() {
     // out of rustc's environment lets all-in-one and lightweight releases
     // share the same compiled application library.
     ensure_bundle_mode_marker();
+    export_app_version();
     configure_windows_common_controls_manifest();
     // Tauri's build-time codegen (context, capabilities, resource copy) is only
     // needed for the desktop shell. A headless `--no-default-features` build
@@ -24,11 +25,33 @@ fn main() {
     }
 }
 
-fn ensure_bundle_mode_marker() {
-    let manifest_dir = std::env::var_os("CARGO_MANIFEST_DIR")
+// `tauri.conf.json` is the single source of truth for the app version: the
+// release pipeline rewrites it from the git tag (scripts/build-version.js) and
+// Tauri's generated context feeds it to `package_info()` on desktop. Cargo.toml
+// is never touched by that pipeline, so anything reading `CARGO_PKG_VERSION`
+// reports a stale "0.1.0" — which is what the headless `bat-server` (no Tauri
+// context) sent as `serverVersion`, making every desktop client flag a bogus
+// version skew. Export the real version so both backings agree.
+fn export_app_version() {
+    let config_path = manifest_dir().join("tauri.conf.json");
+    println!("cargo:rerun-if-changed={}", config_path.display());
+    let raw = std::fs::read_to_string(&config_path).expect("read tauri.conf.json");
+    let config: serde_json::Value = serde_json::from_str(&raw).expect("parse tauri.conf.json");
+    let version = config
+        .get("version")
+        .and_then(|value| value.as_str())
+        .expect("tauri.conf.json must declare a version");
+    println!("cargo:rustc-env=BAT_APP_VERSION={version}");
+}
+
+fn manifest_dir() -> std::path::PathBuf {
+    std::env::var_os("CARGO_MANIFEST_DIR")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-    let marker = manifest_dir.join("target").join("bundle-mode.txt");
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
+fn ensure_bundle_mode_marker() {
+    let marker = manifest_dir().join("target").join("bundle-mode.txt");
     if marker.is_file() {
         return;
     }
@@ -49,10 +72,7 @@ fn configure_windows_common_controls_manifest() {
     // before tests run with STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139). Embed the
     // same Common Controls v6 activation manifest through the linker for every
     // executable; Tauri's duplicate manifest resource is disabled above.
-    let manifest_dir = std::env::var_os("CARGO_MANIFEST_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-    let manifest = manifest_dir.join("windows-common-controls.manifest");
+    let manifest = manifest_dir().join("windows-common-controls.manifest");
     println!("cargo:rerun-if-changed={}", manifest.display());
     println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
     // Match Tauri's previous resource manifest exactly instead of letting the
