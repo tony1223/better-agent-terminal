@@ -2015,6 +2015,34 @@ fn codex_history_items_from_content(session_id: &str, content: &str) -> Vec<Valu
                         }),
                     );
                 }
+                Some("image_generation_end") => {
+                    // This event carries the saved path; the matching
+                    // function_call_output holds only the raw image block,
+                    // which has no text for history to show.
+                    let call_id = payload
+                        .get("call_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("hist-image-gen");
+                    let input = history_tool_input_for_call(&items, call_id)
+                        .filter(|input| {
+                            input.as_object().is_some_and(|input| !input.is_empty())
+                        })
+                        .unwrap_or_else(|| {
+                            json!({ "prompt": first_str(payload, &["revised_prompt"]).unwrap_or("") })
+                        });
+                    upsert_history_tool_call(
+                        &mut items,
+                        json!({
+                            "id": call_id,
+                            "sessionId": session_id,
+                            "toolName": "image_gen",
+                            "input": input,
+                            "status": history_status_from_event(payload),
+                            "result": image_generation_result(payload),
+                            "timestamp": timestamp,
+                        }),
+                    );
+                }
                 _ => {}
             },
             Some("response_item") => match payload.get("type").and_then(Value::as_str) {
@@ -2058,14 +2086,16 @@ fn codex_history_items_from_content(session_id: &str, content: &str) -> Vec<Valu
                 }
                 Some("function_call_output" | "custom_tool_call_output") => {
                     if let Some(call_id) = payload.get("call_id").and_then(Value::as_str) {
-                        update_history_tool_call(
-                            &mut items,
-                            call_id,
-                            json!({
-                                "status": "completed",
-                                "result": text_from_value(payload.get("output").unwrap_or(&Value::Null)),
-                            }),
-                        );
+                        let text = text_from_value(payload.get("output").unwrap_or(&Value::Null));
+                        let mut updates = json!({ "status": "completed" });
+                        // An image output is a bare image block with no text in
+                        // it, and image_generation_end has already recorded the
+                        // real result — writing the empty string back over it
+                        // would blank the card out.
+                        if !text.is_empty() {
+                            updates["result"] = json!(text);
+                        }
+                        update_history_tool_call(&mut items, call_id, updates);
                     }
                 }
                 _ => {}
@@ -2125,6 +2155,9 @@ fn history_tool_name(name: &str) -> String {
     match name {
         "exec_command" => "Bash".to_string(),
         "web_search" | "web_search_call" => "WebSearch".to_string(),
+        // The rollout records this call as "imagegen"; the panel keys its image
+        // card on "image_gen".
+        "imagegen" | "image_gen" | "image_generation" => "image_gen".to_string(),
         other => other.to_string(),
     }
 }
@@ -2286,6 +2319,84 @@ fn tool_result_value(item: &Value) -> Option<Value> {
         .or_else(|| item.get("result"))
         .or_else(|| item.get("error"))
         .cloned()
+}
+
+/// Codex saves a generated image to disk itself and reports where, so the bytes
+/// never have to travel as a megabyte of base64 through the event bus or get
+/// persisted into session history. The renderer turns this path back into a
+/// data URL with `host.image.readAsDataUrl` only when the card is on screen.
+///
+/// Live `imageGeneration` items spell these fields in camelCase; the rollout
+/// files replayed by history use snake_case, so accept both and keep one shape
+/// on the wire.
+fn image_generation_result(item: &Value) -> Option<String> {
+    let saved_path = first_str(item, &["savedPath", "saved_path"])?;
+    let mut payload = json!({ "type": "image_generation", "path": saved_path });
+    if let Some(prompt) = first_str(item, &["revisedPrompt", "revised_prompt"]) {
+        payload["revisedPrompt"] = json!(prompt);
+    }
+    serde_json::to_string(&payload).ok()
+}
+
+fn first_str<'a>(item: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter()
+        .find_map(|key| item.get(*key).and_then(Value::as_str))
+        .filter(|value| !value.is_empty())
+}
+
+fn started_tool_call(session_id: &str, item: &Value, name: &str, input: Value) -> Value {
+    json!({
+        "id": item_id(item),
+        "sessionId": session_id,
+        "toolName": name,
+        "input": input,
+        "status": tool_status(item),
+        "timestamp": now_millis(),
+    })
+}
+
+fn push_tool_call(
+    app: &HostContext,
+    state: &CodexAppServerState,
+    session_id: &str,
+    tool_call: Value,
+) {
+    if let Some(session) = state
+        .inner
+        .sessions
+        .lock()
+        .expect("codex sessions lock")
+        .get_mut(session_id)
+    {
+        upsert_session_tool_call(session, tool_call.clone());
+    }
+    emit(app, "claude:tool-use", session_id, "toolCall", tool_call);
+}
+
+/// A result only lands if the matching `item/started` already created the row —
+/// `update_session_tool_call` returns silently when it finds nothing — so every
+/// type handled here has to be handled there too.
+fn push_tool_result(
+    app: &HostContext,
+    state: &CodexAppServerState,
+    session_id: &str,
+    tool_result: Value,
+) {
+    let id = tool_result
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if let Some(session) = state
+        .inner
+        .sessions
+        .lock()
+        .expect("codex sessions lock")
+        .get_mut(session_id)
+    {
+        update_session_tool_call(session, &id, tool_result.clone());
+    }
+    emit(app, "claude:tool-result", session_id, "result", tool_result);
 }
 
 fn completed_tool_result(item: &Value) -> Value {
@@ -6184,7 +6295,7 @@ fn handle_notification(
         "item/commandExecution/outputDelta" => {
             handle_command_execution_output_delta(app, state, &session_id, &params);
         }
-        _ => {}
+        other => log_codex(app, &session_id, format!("unhandled notification {other}")),
     }
 }
 
@@ -6540,7 +6651,119 @@ fn handle_item_started(
             }
             emit(app, "claude:tool-use", session_id, "toolCall", tool_call);
         }
-        _ => {}
+        // Everything below is an item type Codex has been sending all along and
+        // bat used to drop on the floor. None of them need bespoke rendering —
+        // an honest tool row beats a silent gap in the transcript.
+        Some("imageGeneration") => {
+            // "image_gen" is the name CodexAgentPanel keys its image card on.
+            push_tool_call(
+                app,
+                state,
+                session_id,
+                started_tool_call(
+                    session_id,
+                    item,
+                    "image_gen",
+                    json!({ "prompt": first_str(item, &["revisedPrompt", "prompt"]).unwrap_or("") }),
+                ),
+            );
+        }
+        Some("imageView") => {
+            // The same card renders this: an image the agent opened rather than
+            // drew, but a path on disk either way.
+            push_tool_call(
+                app,
+                state,
+                session_id,
+                started_tool_call(
+                    session_id,
+                    item,
+                    "image_view",
+                    json!({ "path": first_str(item, &["path"]).unwrap_or("") }),
+                ),
+            );
+        }
+        Some("dynamicToolCall") => {
+            let name = match (
+                item.get("namespace").and_then(Value::as_str),
+                item.get("tool").and_then(Value::as_str),
+            ) {
+                (Some(namespace), Some(tool)) => format!("{namespace}/{tool}"),
+                (_, Some(tool)) => tool.to_string(),
+                _ => "Tool".to_string(),
+            };
+            let input = item.get("arguments").cloned().unwrap_or_else(|| json!({}));
+            push_tool_call(
+                app,
+                state,
+                session_id,
+                started_tool_call(session_id, item, &name, input),
+            );
+        }
+        Some("collabAgentToolCall") => {
+            let name = first_str(item, &["tool"]).unwrap_or("collab");
+            push_tool_call(
+                app,
+                state,
+                session_id,
+                started_tool_call(
+                    session_id,
+                    item,
+                    name,
+                    json!({
+                        "prompt": first_str(item, &["prompt"]).unwrap_or(""),
+                        "model": item.get("model").cloned(),
+                    }),
+                ),
+            );
+        }
+        Some("subAgentActivity") => {
+            push_tool_call(
+                app,
+                state,
+                session_id,
+                started_tool_call(
+                    session_id,
+                    item,
+                    "subagent",
+                    json!({
+                        "kind": first_str(item, &["kind"]).unwrap_or(""),
+                        "agent": first_str(item, &["agentPath"]).unwrap_or(""),
+                    }),
+                ),
+            );
+        }
+        Some("plan") => {
+            push_tool_call(
+                app,
+                state,
+                session_id,
+                started_tool_call(
+                    session_id,
+                    item,
+                    "plan",
+                    json!({ "text": first_str(item, &["text"]).unwrap_or("") }),
+                ),
+            );
+        }
+        Some("sleep") => {
+            push_tool_call(
+                app,
+                state,
+                session_id,
+                started_tool_call(
+                    session_id,
+                    item,
+                    "sleep",
+                    json!({ "durationMs": item.get("durationMs").cloned() }),
+                ),
+            );
+        }
+        other => log_codex(
+            app,
+            session_id,
+            format!("item/started: unhandled item type {:?}", other),
+        ),
     }
 }
 
@@ -6650,7 +6873,80 @@ fn handle_item_completed(
             }
             emit(app, "claude:tool-result", session_id, "result", tool_result);
         }
-        _ => {}
+        Some("imageGeneration") => {
+            // Fall back to whatever the item carried when there is no saved
+            // path, so a failed generation still surfaces its error instead of
+            // rendering as an empty card.
+            let result = image_generation_result(item)
+                .map(Value::String)
+                .or_else(|| tool_result_value(item));
+            let mut tool_result = json!({
+                "id": item_id(item),
+                "status": completed_tool_status(item),
+                "result": result,
+            });
+            if let Some(prompt) = first_str(item, &["revisedPrompt", "prompt"]) {
+                tool_result["input"] = json!({ "prompt": prompt });
+            }
+            push_tool_result(app, state, session_id, tool_result);
+        }
+        Some("imageView") => {
+            push_tool_result(
+                app,
+                state,
+                session_id,
+                json!({
+                    "id": item_id(item),
+                    "status": completed_tool_status(item),
+                    "result": image_generation_result(item),
+                }),
+            );
+        }
+        Some("dynamicToolCall") => {
+            // contentItems is a list of inputText/inputImage blocks;
+            // text_from_value keeps the prose and drops the rest.
+            let text = text_from_value(item.get("contentItems").unwrap_or(&Value::Null));
+            push_tool_result(
+                app,
+                state,
+                session_id,
+                json!({
+                    "id": item_id(item),
+                    "status": completed_tool_status(item),
+                    "result": if text.is_empty() { tool_result_value(item) } else { Some(json!(text)) },
+                }),
+            );
+        }
+        Some("collabAgentToolCall" | "subAgentActivity" | "sleep") => {
+            push_tool_result(
+                app,
+                state,
+                session_id,
+                json!({
+                    "id": item_id(item),
+                    "status": completed_tool_status(item),
+                    "result": tool_result_value(item),
+                }),
+            );
+        }
+        Some("plan") => {
+            push_tool_result(
+                app,
+                state,
+                session_id,
+                json!({
+                    "id": item_id(item),
+                    "status": "completed",
+                    "input": { "text": first_str(item, &["text"]).unwrap_or("") },
+                    "result": first_str(item, &["text"]),
+                }),
+            );
+        }
+        other => log_codex(
+            app,
+            session_id,
+            format!("item/completed: unhandled item type {:?}", other),
+        ),
     }
 }
 
@@ -7806,6 +8102,56 @@ mod tests {
         assert_eq!(items[1]["status"], "completed");
         assert_eq!(items[2]["id"], "reasoning-2");
         assert_eq!(items[2]["thinking"], "verify next");
+    }
+
+    #[test]
+    fn codex_history_loader_recovers_generated_image() {
+        // The three lines a real image generation leaves behind, in the order
+        // the rollout writes them. Only the middle one knows where the file
+        // went, and the output block it is sandwiched between carries no text.
+        let content = r#"
+{"timestamp":"2026-05-11T00:00:01Z","type":"response_item","payload":{"type":"function_call","name":"imagegen","namespace":"image_gen","arguments":"{\"prompt\":\"flowchart\"}","call_id":"call-img"}}
+{"timestamp":"2026-05-11T00:00:02Z","type":"event_msg","payload":{"type":"image_generation_end","call_id":"call-img","status":"completed","revised_prompt":"a wide flowchart","saved_path":"C:\\tmp\\call-img.png"}}
+{"timestamp":"2026-05-11T00:00:03Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-img","output":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}}
+"#;
+        let items = codex_history_items_from_content("s-1", content);
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["id"], "call-img");
+        assert_eq!(items[0]["toolName"], "image_gen");
+        assert_eq!(items[0]["status"], "completed");
+        assert_eq!(items[0]["input"]["prompt"], "flowchart");
+
+        let result = items[0]["result"]
+            .as_str()
+            .expect("image result should survive the empty function_call_output");
+        let parsed: Value = serde_json::from_str(result).expect("image result is json");
+        assert_eq!(parsed["type"], "image_generation");
+        assert_eq!(parsed["path"], "C:\\tmp\\call-img.png");
+        assert_eq!(parsed["revisedPrompt"], "a wide flowchart");
+    }
+
+    #[test]
+    fn codex_image_generation_result_reads_live_and_replay_spellings() {
+        let live = image_generation_result(&json!({
+            "type": "imageGeneration",
+            "savedPath": "/tmp/live.png",
+            "revisedPrompt": "live prompt"
+        }))
+        .expect("live item yields a result");
+        let live: Value = serde_json::from_str(&live).expect("json");
+        assert_eq!(live["path"], "/tmp/live.png");
+        assert_eq!(live["revisedPrompt"], "live prompt");
+
+        let replay = image_generation_result(&json!({"saved_path": "/tmp/replay.png"}))
+            .expect("replay item yields a result");
+        let replay: Value = serde_json::from_str(&replay).expect("json");
+        assert_eq!(replay["path"], "/tmp/replay.png");
+        assert!(replay.get("revisedPrompt").is_none());
+
+        // No path means nothing to show; the caller falls back to the raw item.
+        assert!(image_generation_result(&json!({"savedPath": ""})).is_none());
+        assert!(image_generation_result(&json!({"status": "failed"})).is_none());
     }
 
     #[test]

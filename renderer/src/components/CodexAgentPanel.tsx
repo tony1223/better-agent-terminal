@@ -176,15 +176,21 @@ function formatContextWindowSuffix(displayName: string, contextWindow?: number):
   return displayName.toLowerCase().includes(label.toLowerCase()) ? '' : ` (${label})`
 }
 
-function parseGeneratedImageResult(result: unknown): { dataUrl: string; revisedPrompt?: string } | null {
+type GeneratedImage = { dataUrl?: string; path?: string; revisedPrompt?: string }
+
+function parseGeneratedImageResult(result: unknown): GeneratedImage | null {
   if (typeof result !== 'string') return null
   try {
-    const parsed = JSON.parse(result) as { type?: string; dataUrl?: string; revisedPrompt?: string }
-    if (parsed.type === 'image_generation' && typeof parsed.dataUrl === 'string' && parsed.dataUrl.startsWith('data:image/')) {
-      return {
-        dataUrl: parsed.dataUrl,
-        revisedPrompt: parsed.revisedPrompt,
-      }
+    const parsed = JSON.parse(result) as { type?: string; dataUrl?: string; path?: string; revisedPrompt?: string }
+    if (parsed.type !== 'image_generation') return null
+    if (typeof parsed.dataUrl === 'string' && parsed.dataUrl.startsWith('data:image/')) {
+      return { dataUrl: parsed.dataUrl, revisedPrompt: parsed.revisedPrompt }
+    }
+    // Codex saves the image itself and reports where. Carrying the path instead
+    // of the bytes keeps a megabyte of base64 out of session history; the file
+    // is read back on demand once the card is actually rendered.
+    if (typeof parsed.path === 'string' && parsed.path) {
+      return { path: parsed.path, revisedPrompt: parsed.revisedPrompt }
     }
   } catch {
     return null
@@ -200,6 +206,64 @@ function filenameForGeneratedImage(prompt: string, id?: string): string {
     .slice(0, 64)
     .replace(/^[.-]+|[.-]+$/g, '')
   return `${base || 'generated-image'}.png`
+}
+
+function GeneratedImageCard({ image, prompt, onOpen, onSave }: {
+  image: GeneratedImage
+  prompt: string
+  onOpen: (dataUrl: string) => void
+  onSave: (dataUrl: string) => void
+}) {
+  const [dataUrl, setDataUrl] = useState<string | null>(image.dataUrl ?? null)
+  const [failed, setFailed] = useState(false)
+
+  useEffect(() => {
+    if (image.dataUrl) { setDataUrl(image.dataUrl); return }
+    if (!image.path) return
+    let cancelled = false
+    setFailed(false)
+    host.image.readAsDataUrl(image.path)
+      .then(url => { if (!cancelled) setDataUrl(url) })
+      .catch(() => { if (!cancelled) setFailed(true) })
+    return () => { cancelled = true }
+  }, [image.dataUrl, image.path])
+
+  // Codex keeps generated images under $CODEX_HOME, which the user is free to
+  // clean out, so a card rebuilt from history can outlive its file. Show the
+  // path rather than a broken frame — it is still what they need to go looking.
+  if (failed) {
+    return (
+      <div className="codex-generated-image-card">
+        <div className="codex-generated-image-prompt">Image unavailable: {image.path}</div>
+      </div>
+    )
+  }
+
+  if (!dataUrl) {
+    return (
+      <div className="codex-generated-image-card">
+        <div className="codex-generated-image-prompt">Loading image...</div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="codex-generated-image-card">
+      <button
+        type="button"
+        className="codex-generated-image-open"
+        onClick={() => onOpen(dataUrl)}
+        title="Open generated image"
+      >
+        <img src={dataUrl} alt={prompt || 'Generated image'} />
+      </button>
+      <div className="codex-generated-image-actions">
+        <button type="button" onClick={() => onOpen(dataUrl)}>Open</button>
+        <button type="button" onClick={() => onSave(dataUrl)}>Save as...</button>
+      </div>
+      {prompt && <div className="codex-generated-image-prompt">{prompt}</div>}
+    </div>
+  )
 }
 
 function includeCurrentOption(values: readonly string[], current: string): string[] {
@@ -3715,35 +3779,28 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
         }
       }
 
-      if (item.toolName === 'image_gen') {
+      // image_view is the same card: an image the agent opened rather than drew.
+      if (item.toolName === 'image_gen' || item.toolName === 'image_view') {
         const generatedImage = parseGeneratedImageResult(item.result)
-        const prompt = generatedImage?.revisedPrompt || String(item.input.prompt || '')
+        const prompt = generatedImage?.revisedPrompt
+          || String(item.input.prompt || item.input.path || '')
         const filename = filenameForGeneratedImage(prompt, item.id)
         return (
           <div key={item.id || index} className="tl-item" data-tool-id={item.id}>
             <div className={`tl-dot ${dotClass}`} />
             <div className="tl-content">
               <div className="claude-tool-header" onClick={() => toggleTool(item.id)}>
-                <span className="claude-tool-name">image_gen</span>
+                <span className="claude-tool-name">{item.toolName}</span>
                 {prompt && <span className="claude-tool-desc">{truncateMiddle(prompt, 120)}</span>}
                 {item.timestamp > 0 && <span className="claude-tool-time" title={formatFullTimestamp(item.timestamp)}>{formatTimestamp(item.timestamp)}</span>}
               </div>
               {generatedImage ? (
-                <div className="codex-generated-image-card">
-                  <button
-                    type="button"
-                    className="codex-generated-image-open"
-                    onClick={() => setImageModal({ dataUrl: generatedImage.dataUrl, prompt, filename })}
-                    title="Open generated image"
-                  >
-                    <img src={generatedImage.dataUrl} alt={prompt || 'Generated image'} />
-                  </button>
-                  <div className="codex-generated-image-actions">
-                    <button type="button" onClick={() => setImageModal({ dataUrl: generatedImage.dataUrl, prompt, filename })}>Open</button>
-                    <button type="button" onClick={() => handleSaveGeneratedImage({ dataUrl: generatedImage.dataUrl, filename })}>Save as...</button>
-                  </div>
-                  {prompt && <div className="codex-generated-image-prompt">{prompt}</div>}
-                </div>
+                <GeneratedImageCard
+                  image={generatedImage}
+                  prompt={prompt}
+                  onOpen={dataUrl => setImageModal({ dataUrl, prompt, filename })}
+                  onSave={dataUrl => handleSaveGeneratedImage({ dataUrl, filename })}
+                />
               ) : (
                 <div className="claude-tool-blocks">
                   <div className="claude-tool-row">

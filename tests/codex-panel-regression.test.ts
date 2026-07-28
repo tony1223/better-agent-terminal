@@ -278,6 +278,79 @@ async function main() {
     )
   }
 
+  // A generated image reaches the panel as a file on disk, not as bytes: the
+  // app-server writes it under $CODEX_HOME and reports `savedPath`, so keeping
+  // the path on the wire keeps a megabyte of base64 out of session history.
+  // Both spellings matter — live items are camelCase, replayed rollouts are
+  // snake_case — and the panel keys its card on the tool name `image_gen`,
+  // which is neither of the names the wire uses (`imageGeneration` live,
+  // `imagegen` in the rollout). Nothing compiles or runs the Rust in CI, so
+  // these source assertions are the only automated guard that the two halves
+  // still agree on a shape.
+  const appServerSource = await readFile('src-tauri/src/codex_app_server.rs', 'utf8')
+  assert.match(
+    appServerSource,
+    /Some\("imageGeneration"\) =>/,
+    'codex app-server should handle the live imageGeneration item',
+  )
+  assert.match(
+    appServerSource,
+    /"imagegen" \| "image_gen" \| "image_generation" => "image_gen"/,
+    'replayed rollouts should map their image tool name onto the one the panel renders',
+  )
+  assert.match(
+    appServerSource,
+    /first_str\(item, &\["savedPath", "saved_path"\]\)/,
+    'the image result should accept both the live and replay spellings of the saved path',
+  )
+  // image_generation_end lands before the function_call_output that closes the
+  // same call, and that output is a bare image block with no text in it.
+  // Writing its empty text back over the result would blank the card again.
+  assert.match(
+    appServerSource,
+    /if !text\.is_empty\(\) \{\s*updates\["result"\] = json!\(text\);/,
+    'an empty tool output should not overwrite a result that is already populated',
+  )
+
+  // Codex's ThreadItem union has 18 variants and bat used to render 6 of them,
+  // so plans, skill/plugin tool calls, subagent activity and viewed images all
+  // vanished from the transcript with no trace. A result only lands if
+  // item/started already created the row, so each of these has to appear in
+  // both handlers.
+  for (const itemType of ['dynamicToolCall', 'collabAgentToolCall', 'subAgentActivity', 'imageView', 'plan', 'sleep']) {
+    const started = appServerSource.indexOf('fn handle_item_started')
+    const completed = appServerSource.indexOf('fn handle_item_completed')
+    const usage = appServerSource.indexOf('fn handle_usage_updated')
+    assert.ok(started > 0 && completed > started && usage > completed, 'handler order assumption holds')
+    const inStarted = appServerSource.slice(started, completed).includes(`"${itemType}"`)
+    const inCompleted = appServerSource.slice(completed, usage).includes(`"${itemType}"`)
+    assert.ok(inStarted, `${itemType} should open a tool row in handle_item_started`)
+    assert.ok(inCompleted, `${itemType} should close its tool row in handle_item_completed`)
+  }
+
+  assert.match(
+    source,
+    /typeof parsed\.path === 'string' && parsed\.path/,
+    'the panel should accept a generated image delivered as a path',
+  )
+  assert.match(
+    source,
+    /item\.toolName === 'image_gen' \|\| item\.toolName === 'image_view'/,
+    'a viewed image should render in the same card as a generated one',
+  )
+  assert.match(
+    source,
+    /host\.image\.readAsDataUrl\(image\.path\)/,
+    'the panel should resolve a generated image path into bytes on demand',
+  )
+  // $CODEX_HOME is the user's to clean out, so a card rebuilt from history can
+  // outlive its file. Showing the path beats a broken image frame.
+  assert.match(
+    source,
+    /Image unavailable: \{image\.path\}/,
+    'the panel should name the missing file when a generated image cannot be read',
+  )
+
   console.log('Codex panel regression: passed')
 }
 
