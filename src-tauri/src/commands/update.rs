@@ -266,9 +266,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cargo_pkg_version_is_non_empty() {
-        let v = env!("CARGO_PKG_VERSION");
-        assert!(!v.is_empty(), "CARGO_PKG_VERSION must not be empty");
+    fn app_version_is_non_empty() {
+        // Not `CARGO_PKG_VERSION` — the release pipeline never rewrites
+        // Cargo.toml. `BAT_APP_VERSION` tracks tauri.conf.json, the same source
+        // as the `package_info()` version `update_get_version` returns.
+        let v = env!("BAT_APP_VERSION");
+        assert!(!v.is_empty(), "BAT_APP_VERSION must not be empty");
         assert!(v.contains('.'), "version should contain a dot: {v}");
     }
 

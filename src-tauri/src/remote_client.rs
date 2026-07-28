@@ -1014,7 +1014,7 @@ fn connect_socket(
         .map_err(|err| format!("remote stream polling timeout failed: {err}"))?;
     let mut client_info = json!({
         "appName": "Better Agent Terminal Desktop",
-        "appVersion": env!("CARGO_PKG_VERSION"),
+        "appVersion": env!("BAT_APP_VERSION"),
         "deviceName": label,
         "label": label,
         "platform": std::env::consts::OS,
