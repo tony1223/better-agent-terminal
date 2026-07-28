@@ -42,6 +42,52 @@ const VIEWS: Array<{ id: View; label: string }> = [
   { id: 'raw', label: 'Raw records' },
 ]
 
+// The metrics a view can summarise, and which record kinds carry each. `title`
+// is where the difference between the three turn durations is spelled out —
+// they are easy to confuse and reading the wrong one silently answers a
+// different question.
+const METRICS: Array<{
+  id: LatencyMetric
+  label: string
+  summaryLabel: string
+  title: string
+  kinds: Array<LatencySample['kind']>
+}> = [
+  {
+    id: 'apiMs',
+    label: 'API time',
+    summaryLabel: 'API time',
+    title: "The SDK's duration_api_ms: every API round-trip in the turn, added up.",
+    kinds: ['turn', 'compact', 'request'],
+  },
+  {
+    id: 'apiMsPerRequest',
+    label: 'Per request',
+    summaryLabel: 'API time per request',
+    title:
+      'API time divided by the turn\'s request count. One 40s call and twelve 3s calls have '
+      + 'nearly the same API time; this tells them apart.',
+    kinds: ['turn'],
+  },
+  {
+    id: 'wallMs',
+    label: 'Wall time',
+    summaryLabel: 'wall time',
+    title:
+      'The turn end to end, including tool execution and any wait for a human to approve one. '
+      + 'The only figure that matches how long the turn felt — and the only one you can make '
+      + 'worse by going to lunch.',
+    kinds: ['turn'],
+  },
+  {
+    id: 'ttftMs',
+    label: 'First token',
+    summaryLabel: 'time to first token',
+    title: 'Time from the request going out to its first token.',
+    kinds: ['turn', 'request'],
+  },
+]
+
 const COL = { label: 110, count: 64, mean: 90, median: 90, p90: 90, max: 90 }
 const HEADER_STYLE: React.CSSProperties = {
   display: 'flex',
@@ -195,8 +241,9 @@ function RawTable({ samples }: { samples: LatencySample[] }): React.ReactElement
           </span>
           {num(70, formatDuration(sample.apiMs), '#8be9fd')}
           {num(70, formatDuration(sample.ttftMs ?? null), '#eee')}
-          {/* Recorded but never averaged: wall time includes waiting for a human
-              to approve a tool, which says nothing about the server. */}
+          {/* Dimmed, not hidden: wall time is selectable as a metric now, but it
+              includes waiting for a human to approve a tool, so it does not
+              belong in the eye's path when scanning for a slow server. */}
           {num(70, formatDuration(sample.wallMs ?? null), '#666')}
           {num(70, sample.outputTokens != null ? sample.outputTokens.toLocaleString() : '—', '#d19a66')}
           <span style={{ flex: 1, minWidth: 80, color: '#777' }}>
@@ -204,9 +251,19 @@ function RawTable({ samples }: { samples: LatencySample[] }): React.ReactElement
               ? [sample.trigger, sample.preTokens != null ? `${sample.preTokens.toLocaleString()}→${(sample.postTokens ?? 0).toLocaleString()}` : null]
                   .filter(Boolean)
                   .join(' ')
-              : sample.subtype && sample.subtype !== 'success'
-                ? sample.subtype
-                : ''}
+              : sample.kind === 'request'
+                // Prompt size is the point of a request record: it is what the
+                // per-turn number cannot correlate against.
+                ? [
+                    sample.subagent ? 'subagent' : null,
+                    sample.inputTokens != null ? `in ${sample.inputTokens.toLocaleString()}` : null,
+                    sample.cacheReadTokens ? `cache ${sample.cacheReadTokens.toLocaleString()}` : null,
+                    sample.stopReason && sample.stopReason !== 'end_turn' ? sample.stopReason : null,
+                  ].filter(Boolean).join(' · ')
+                : [
+                    sample.subtype && sample.subtype !== 'success' ? sample.subtype : null,
+                    sample.requestCount != null ? `${sample.requestCount} req` : null,
+                  ].filter(Boolean).join(' · ')}
           </span>
         </div>
       ))}
@@ -270,9 +327,14 @@ export function LatencyStatsPanel(): React.ReactElement | null {
 
   const dims = useMemo(() => availableDimensions(samples), [samples])
 
-  // ttft only exists on turn samples, so offering it alongside Compactions would
-  // show an empty table with no explanation.
-  const effectiveMetric: LatencyMetric = kind === 'compact' ? 'apiMs' : metric
+  // Only offer a metric the selected kind actually carries, and fall back to
+  // apiMs rather than showing an empty table with no explanation: a compaction
+  // has no ttft, and a request record is one request that never waited on a
+  // tool, so neither "per request" nor wall time means anything on it.
+  const metricsForKind = METRICS.filter(item => item.kinds.includes(kind))
+  const effectiveMetric: LatencyMetric = metricsForKind.some(item => item.id === metric)
+    ? metric
+    : 'apiMs'
 
   const filter: LatencyFilter = useMemo(
     () => ({ kind, model, effort, autoCompactWindow: compactWindow }),
@@ -303,7 +365,7 @@ export function LatencyStatsPanel(): React.ReactElement | null {
 
   if (!open) return null
 
-  const metricLabel = effectiveMetric === 'ttftMs' ? 'time to first token' : 'API time'
+  const metricLabel = METRICS.find(item => item.id === effectiveMetric)?.summaryLabel ?? 'API time'
 
   return (
     <div className="claude-plan-overlay" onClick={() => setOpen(false)}>
@@ -368,19 +430,30 @@ export function LatencyStatsPanel(): React.ReactElement | null {
               <button style={chip(kind === 'turn')} onClick={() => setKind('turn')}>
                 Turns
               </button>
+              <button
+                style={chip(kind === 'request')}
+                onClick={() => setKind('request')}
+                title="One record per API request inside a turn, timed here rather than reported by the SDK — so it carries this process's own overhead. Read it for shape, and Turns for absolute API time."
+              >
+                Requests
+              </button>
               <button style={chip(kind === 'compact')} onClick={() => setKind('compact')}>
                 Compactions
               </button>
             </div>
-            {kind === 'turn' && (
+            {metricsForKind.length > 1 && (
               <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
                 <span style={{ color: '#888' }}>Metric</span>
-                <button style={chip(metric === 'apiMs')} onClick={() => setMetric('apiMs')}>
-                  API time
-                </button>
-                <button style={chip(metric === 'ttftMs')} onClick={() => setMetric('ttftMs')}>
-                  First token
-                </button>
+                {metricsForKind.map(item => (
+                  <button
+                    key={item.id}
+                    style={chip(effectiveMetric === item.id)}
+                    onClick={() => setMetric(item.id)}
+                    title={item.title}
+                  >
+                    {item.label}
+                  </button>
+                ))}
               </div>
             )}
             <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>

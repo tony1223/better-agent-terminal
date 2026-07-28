@@ -13,6 +13,7 @@ import { readFileSync } from 'node:fs'
 
 import {
   turnLatencySample,
+  requestLatencySample,
   compactLatencySample,
   latencySampleIsUseful,
 } from '../src/lib/latency-sample.mjs'
@@ -202,6 +203,111 @@ test('a turn sample is emitted before the branches that can return early', () =>
     source.includes('emitLatencySample(compactLatencySample('),
     'compact_boundary still records the compaction',
   )
+})
+
+// A request record is timed here, not reported by the SDK: message_start opens
+// it, the first content_block_delta is its first token, message_delta closes it.
+const pending = {
+  startedAt: NOW - 3_100,
+  firstTokenAt: NOW - 2_200,
+  parentToolUseId: null,
+  inputTokens: 48_000,
+  cacheReadTokens: 44_000,
+  outputTokens: 512,
+  stopReason: 'tool_use',
+}
+
+test('a request sample measures its own span rather than reporting one', () => {
+  const s = requestLatencySample('sess-1', session, pending, NOW)
+  assert.equal(s.kind, 'request')
+  assert.equal(s.apiMs, 3_100)
+  assert.equal(s.ttftMs, 900)
+  // `at` is when the request opened, so it buckets into the hour it went out in
+  // — the same rule the turn record follows.
+  assert.equal(s.at, NOW - 3_100)
+  assert.equal(s.inputTokens, 48_000)
+  assert.equal(s.stopReason, 'tool_use')
+})
+
+// The dimensions have to be on the record, not looked up from the session at
+// read time: a session's model can change between one request and the next.
+test('a request sample carries the dimensions it was taken under', () => {
+  const s = requestLatencySample('sess-1', session, pending, NOW)
+  assert.equal(s.model, 'claude-opus-4-8')
+  assert.equal(s.effort, 'ultracode')
+  assert.equal(s.ultracode, true)
+  assert.equal(s.autoCompactWindow, 160_000)
+})
+
+// Parallel subagents interleave on one stream and prompt from a different
+// context entirely. Folding them in would read a fan-out as the main thread
+// slowing down.
+test('a subagent request is flagged rather than blended in', () => {
+  assert.equal(requestLatencySample('s', session, pending, NOW).subagent, false)
+  const sub = requestLatencySample('s', session, { ...pending, parentToolUseId: 'toolu_1' }, NOW)
+  assert.equal(sub.subagent, true)
+})
+
+// A clock that steps backwards mid-request must not write a negative duration
+// into a 60-day store that nothing recomputes.
+test('a backwards clock yields zero, not a negative duration', () => {
+  const s = requestLatencySample('s', session, { ...pending, startedAt: NOW + 5_000 }, NOW)
+  assert.equal(s.apiMs, 0)
+})
+
+// No first token yet means we cannot report one. Reporting 0 would say the
+// model answered instantly.
+test('a request that never streamed a token has no ttft, not a zero', () => {
+  const s = requestLatencySample('s', session, { ...pending, firstTokenAt: null }, NOW)
+  assert.equal(s.ttftMs, null)
+  assert.equal(latencySampleIsUseful(s), true, 'it still has a duration worth storing')
+})
+
+// The point of counting requests ourselves is to be able to disagree with the
+// SDK. If turnLatencySample stopped carrying our count, the only way to notice
+// our own overhead would be gone.
+test('a turn sample carries what this process observed alongside the SDK figure', () => {
+  const s = turnLatencySample('sess-1', { ...session, turnRequestCount: 7, turnRequestApiMsTotal: 43_500 }, result, NOW)
+  assert.equal(s.apiMs, 42_000, "the SDK's own figure is untouched")
+  assert.equal(s.numTurns, 7)
+  assert.equal(s.requestCount, 7)
+  assert.equal(s.requestApiMsTotal, 43_500)
+})
+
+test('a turn with no observed requests records null, not zero', () => {
+  const s = turnLatencySample('sess-1', session, result, NOW)
+  assert.equal(s.requestCount, null)
+  assert.equal(s.requestApiMsTotal, null)
+})
+
+// Same reasoning as the turn-ordering test above: processMessage is private, so
+// this pins placement rather than execution.
+test('the stream handler opens, times and closes a request', () => {
+  const source = readFileSync(new URL('../src/handlers/claude-send.mjs', import.meta.url), 'utf8')
+  const open = source.indexOf('openPendingRequest(s, ev, msg.parent_tool_use_id)')
+  const close = source.indexOf('closePendingRequest(s, sessionId, ev, msg.parent_tool_use_id)')
+  const firstToken = source.indexOf('notePendingFirstToken(s, msg.parent_tool_use_id)')
+  assert.ok(open > 0, 'message_start still opens a request')
+  assert.ok(close > 0, 'message_delta still closes it')
+  assert.ok(firstToken > 0, 'content_block_delta still marks the first token')
+
+  // Parallel subagents share this stream, so one shared slot would let them
+  // close each other's records.
+  assert.ok(
+    /s\.pendingRequests\s*=\s*new Map\(\)/.test(source),
+    'pending requests are keyed, not a single slot',
+  )
+  // The turn record reads the counters, so the reset has to follow the emit.
+  // indexOf would match `function resetTurnRequestTracking(s)`, which by
+  // definition precedes its own call site — the call is the last occurrence.
+  const emit = source.indexOf('emitLatencySample(turnLatencySample(')
+  const reset = source.lastIndexOf('resetTurnRequestTracking(s)')
+  assert.equal(
+    source.split('resetTurnRequestTracking(s)').length - 1,
+    2,
+    'one definition and one call — a second call would make lastIndexOf the wrong one to check',
+  )
+  assert.ok(reset > emit, 'the turn counters are reset after the turn record reads them')
 })
 
 console.log(failures === 0 ? '\nlatency-sample: OK' : `\nlatency-sample: ${failures} FAILED`)

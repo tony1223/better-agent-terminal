@@ -34,7 +34,12 @@ import {
 import { loadAnthropicSdk } from '../lib/sdk-loader.mjs'
 import { info as logInfo, warn as logWarn } from '../lib/logger.mjs'
 import { runtimeEffortForMode, isUltracodeMode, parseEffortRejection, fallbackEffortFrom } from '../lib/claude-effort.mjs'
-import { turnLatencySample, compactLatencySample, latencySampleIsUseful } from '../lib/latency-sample.mjs'
+import {
+  turnLatencySample,
+  requestLatencySample,
+  compactLatencySample,
+  latencySampleIsUseful,
+} from '../lib/latency-sample.mjs'
 import { autoCompactWindowForClaudeSelection, sdkModelForClaudeSelection } from '../lib/models.mjs'
 import { loadInstalledPlugins, dataUrlToContentBlock } from '../lib/plugins.mjs'
 import { resolveClaudeCliBinaryWithInstall } from './claude-auth.mjs'
@@ -382,6 +387,63 @@ function resultErrorMessage(msg) {
   return `Claude query ended without success: subtype=${subtype}${stopReason}`
 }
 
+// Per-request timing, keyed by parent tool use id so parallel subagents cannot
+// close each other's records. '' is the main thread.
+function pendingRequestKey(parentToolUseId) {
+  return typeof parentToolUseId === 'string' ? parentToolUseId : ''
+}
+
+// `message_start` opens a request. Any record still open under the same key is
+// abandoned rather than emitted: it means we never saw its `message_delta`, so
+// its duration would run to whenever the next request happened to begin.
+function openPendingRequest(s, ev, parentToolUseId, now = Date.now()) {
+  if (!s.pendingRequests) s.pendingRequests = new Map()
+  const usage = ev?.message?.usage
+  s.pendingRequests.set(pendingRequestKey(parentToolUseId), {
+    startedAt: now,
+    firstTokenAt: null,
+    parentToolUseId: parentToolUseId ?? null,
+    inputTokens: usage?.input_tokens ?? null,
+    cacheReadTokens: usage?.cache_read_input_tokens ?? null,
+    outputTokens: null,
+    stopReason: null,
+  })
+}
+
+// First token of the open request. Thinking counts: it is the model producing
+// output, and excluding it would report extended thinking as slow to respond
+// when it in fact responded immediately.
+function notePendingFirstToken(s, parentToolUseId, now = Date.now()) {
+  const pending = s.pendingRequests?.get(pendingRequestKey(parentToolUseId))
+  if (pending && pending.firstTokenAt === null) pending.firstTokenAt = now
+}
+
+// `message_delta` closes the request and carries its final usage and stop
+// reason.
+function closePendingRequest(s, sessionId, ev, parentToolUseId) {
+  const key = pendingRequestKey(parentToolUseId)
+  const pending = s.pendingRequests?.get(key)
+  if (!pending) return
+  s.pendingRequests.delete(key)
+  pending.outputTokens = ev?.usage?.output_tokens ?? null
+  pending.stopReason = ev?.delta?.stop_reason ?? null
+  const sample = requestLatencySample(sessionId, s, pending)
+  // Accumulate for the turn record's cross-check against the SDK's own figure.
+  if (typeof sample.apiMs === 'number') {
+    s.turnRequestCount = (s.turnRequestCount || 0) + 1
+    s.turnRequestApiMsTotal = (s.turnRequestApiMsTotal || 0) + sample.apiMs
+  }
+  emitLatencySample(sample)
+}
+
+// A turn is over: whatever is still open never completed, and the next turn's
+// counters start from zero.
+function resetTurnRequestTracking(s) {
+  s.pendingRequests?.clear()
+  s.turnRequestCount = 0
+  s.turnRequestApiMsTotal = 0
+}
+
 // Publish one latency sample. Dropped when it carries no timing at all: some
 // SDK/CLI builds omit the duration fields, and a record with nothing in it would
 // still be counted by the UI when it decides whether a bucket has enough data.
@@ -536,8 +598,19 @@ function processMessage(s, sessionId, msg) {
         isNewRequest: ev.type === 'message_start',
       })
     }
+    // The same two frames bound one API request. Unlike noteRequestUsage above,
+    // subagent traffic is kept rather than dropped — it is a real request, and
+    // requestLatencySample flags it so it can be filtered out downstream.
+    if (ev && ev.type === 'message_start') {
+      openPendingRequest(s, ev, msg.parent_tool_use_id)
+    } else if (ev && ev.type === 'message_delta') {
+      closePendingRequest(s, sessionId, ev, msg.parent_tool_use_id)
+    }
     markRuntimeResponded(s, sessionId)
     if (ev && ev.type === 'content_block_delta') {
+      if (ev.delta?.text || ev.delta?.thinking) {
+        notePendingFirstToken(s, msg.parent_tool_use_id)
+      }
       const d = ev.delta
       if (d?.text) {
         const data = { text: d.text, parentToolUseId: msg.parent_tool_use_id ?? null }
@@ -692,6 +765,10 @@ function processMessage(s, sessionId, msg) {
     s.lastTurnApiMs = typeof msg.duration_api_ms === 'number' ? msg.duration_api_ms : null
     s.lastTurnTtftMs = typeof msg.ttft_ms === 'number' ? msg.ttft_ms : null
     emitLatencySample(turnLatencySample(sessionId, s, msg))
+    // After the turn record — it reports what this turn observed — and before
+    // anything below can return early on an interrupt or error, so the next
+    // turn cannot inherit these counts.
+    resetTurnRequestTracking(s)
     if (s.interruptRequested) {
       // Turn-only interrupt (1× Esc): the SDK ended this turn but the
       // subprocess + any background workflow stay alive. Report it as an

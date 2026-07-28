@@ -16,7 +16,7 @@
 
 /** One record as stored on disk. Fields are null when the SDK omitted them. */
 export interface LatencySample {
-  kind: 'turn' | 'compact'
+  kind: 'turn' | 'compact' | 'request'
   provider: string
   sessionId: string | null
   /** Epoch ms — when the request went out, not when the result was processed. */
@@ -38,10 +38,34 @@ export interface LatencySample {
   trigger?: string | null
   preTokens?: number | null
   postTokens?: number | null
+  /** API requests this process observed during the turn. Turn samples only. */
+  requestCount?: number | null
+  /** Sum of those requests' measured durations, for comparison against apiMs. */
+  requestApiMsTotal?: number | null
+  /** Prompt size of a single request. Request samples only. */
+  inputTokens?: number | null
+  cacheReadTokens?: number | null
+  /** True when the request belonged to a subagent, not the main thread. */
+  subagent?: boolean
+  stopReason?: string | null
 }
 
-/** Which number a view is summarising. */
-export type LatencyMetric = 'apiMs' | 'ttftMs'
+/**
+ * Which number a view is summarising.
+ *
+ * The three duration metrics answer different questions about the same turn and
+ * none of them substitutes for another:
+ *
+ *   - `apiMs` is the SDK's `duration_api_ms`: every API round-trip in the turn,
+ *     added up. The headline, and the only figure the SDK itself vouches for.
+ *   - `apiMsPerRequest` divides that by the turn's request count. One 40s call
+ *     and twelve 3s calls have nearly the same `apiMs`; this is what tells them
+ *     apart without needing the per-request records.
+ *   - `wallMs` is the turn end to end, including tool execution and any wait for
+ *     a human to approve one. It is the only one that matches how long the turn
+ *     *felt*, and the only one a person can make slower by going to lunch.
+ */
+export type LatencyMetric = 'apiMs' | 'ttftMs' | 'apiMsPerRequest' | 'wallMs'
 
 /** The dimensions a view can be sliced by. `null` on a filter means "any". */
 export interface LatencyFilter {
@@ -96,9 +120,36 @@ const EMPTY_STAT: LatencyStat = {
   lowData: true,
 }
 
+function finite(value: number | null | undefined): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+/**
+ * How many API requests a turn's `apiMs` is spread across.
+ *
+ * `requestCount` is what this build counted from the stream, so it is the more
+ * literal answer — but it only exists on records written since per-request
+ * timing landed. `numTurns` is the SDK's own count and is on everything ever
+ * stored, which is what keeps two months of history from dropping out of this
+ * view the moment it is selected.
+ */
+function requestDivisor(sample: LatencySample): number | null {
+  const counted = finite(sample.requestCount)
+  if (counted !== null && counted >= 1) return counted
+  const sdk = finite(sample.numTurns)
+  return sdk !== null && sdk >= 1 ? sdk : null
+}
+
 function metricValue(sample: LatencySample, metric: LatencyMetric): number | null {
-  const raw = metric === 'ttftMs' ? sample.ttftMs : sample.apiMs
-  return typeof raw === 'number' && Number.isFinite(raw) ? raw : null
+  if (metric === 'ttftMs') return finite(sample.ttftMs)
+  if (metric === 'wallMs') return finite(sample.wallMs)
+  const apiMs = finite(sample.apiMs)
+  if (metric !== 'apiMsPerRequest') return apiMs
+  const divisor = requestDivisor(sample)
+  // A request record is already one request; dividing it again would report
+  // the same number under a label that promises something else.
+  if (sample.kind === 'request') return apiMs
+  return apiMs === null || divisor === null ? null : apiMs / divisor
 }
 
 /**
@@ -295,7 +346,11 @@ export function parseSamples(raw: unknown): LatencySample[] {
     const record = entry as Record<string, unknown>
     const at = record.at
     if (typeof at !== 'number' || !Number.isFinite(at)) continue
-    const kind = record.kind === 'compact' ? 'compact' : 'turn'
+    const kind: LatencySample['kind'] = record.kind === 'compact'
+      ? 'compact'
+      : record.kind === 'request'
+        ? 'request'
+        : 'turn'
     samples.push({
       kind,
       provider: typeof record.provider === 'string' ? record.provider : 'claude',
@@ -315,6 +370,13 @@ export function parseSamples(raw: unknown): LatencySample[] {
       trigger: typeof record.trigger === 'string' ? record.trigger : null,
       preTokens: typeof record.preTokens === 'number' ? record.preTokens : null,
       postTokens: typeof record.postTokens === 'number' ? record.postTokens : null,
+      requestCount: typeof record.requestCount === 'number' ? record.requestCount : null,
+      requestApiMsTotal:
+        typeof record.requestApiMsTotal === 'number' ? record.requestApiMsTotal : null,
+      inputTokens: typeof record.inputTokens === 'number' ? record.inputTokens : null,
+      cacheReadTokens: typeof record.cacheReadTokens === 'number' ? record.cacheReadTokens : null,
+      subagent: record.subagent === true,
+      stopReason: typeof record.stopReason === 'string' ? record.stopReason : null,
     })
   }
   return samples

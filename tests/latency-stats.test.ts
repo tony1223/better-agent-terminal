@@ -316,5 +316,87 @@ test('parsed samples keep the fields the raw list displays', () => {
   assert.equal(sample.subtype, 'success')
 })
 
+// The three turn durations answer different questions, and the whole point of
+// offering all three is that reading the wrong one silently answers the wrong
+// question. One 40s call and twelve 3s calls have nearly the same apiMs.
+test('per-request divides a turn by the requests it actually made', () => {
+  const oneSlowCall = turn('2026-03-02', 9, 40_000, { numTurns: 1 })
+  const twelveFastCalls = turn('2026-03-02', 9, 36_000, { numTurns: 12 })
+  assert.equal(overallStat([oneSlowCall], 'apiMsPerRequest').meanMs, 40_000)
+  assert.equal(overallStat([twelveFastCalls], 'apiMsPerRequest').meanMs, 3_000)
+  // ...while the headline metric cannot tell them apart at all.
+  assert.equal(overallStat([oneSlowCall], 'apiMs').meanMs, 40_000)
+  assert.equal(overallStat([twelveFastCalls], 'apiMs').meanMs, 36_000)
+})
+
+// requestCount is what this build counted from the stream; numTurns is the
+// SDK's. Preferring the former keeps the figure literal, falling back to the
+// latter keeps two months of history in the view instead of blanking it.
+test('per-request prefers the observed request count over the SDK turn count', () => {
+  const both = turn('2026-03-02', 9, 30_000, { numTurns: 3, requestCount: 6 })
+  assert.equal(overallStat([both], 'apiMsPerRequest').meanMs, 5_000)
+  const legacy = turn('2026-03-02', 9, 30_000, { numTurns: 3 })
+  assert.equal(overallStat([legacy], 'apiMsPerRequest').meanMs, 10_000)
+})
+
+// A divisor of zero would produce Infinity and poison every bucket it landed
+// in; a turn that reported no requests simply has no per-request figure.
+test('a turn with no request count contributes nothing to the per-request view', () => {
+  const noCount = turn('2026-03-02', 9, 30_000)
+  const zeroCount = turn('2026-03-02', 9, 30_000, { numTurns: 0, requestCount: 0 })
+  const stat = overallStat([noCount, zeroCount], 'apiMsPerRequest')
+  assert.equal(stat.count, 0)
+  assert.equal(stat.meanMs, null)
+})
+
+// wallMs was previously recorded and never aggregated. It is selectable now, but
+// it is a different question -- it includes tool execution and waiting on a
+// human -- so it must never be read off the apiMs column.
+test('wall time aggregates separately from API time', () => {
+  const sample = turn('2026-03-02', 9, 12_000, { wallMs: 300_000 })
+  assert.equal(overallStat([sample], 'wallMs').meanMs, 300_000)
+  assert.equal(overallStat([sample], 'apiMs').meanMs, 12_000)
+  assert.equal(overallStat([turn('2026-03-02', 9, 12_000)], 'wallMs').count, 0)
+})
+
+// A request record is already a single request. Dividing it again would report
+// the same number under a label promising something else.
+test('a request record is not divided again by the per-request view', () => {
+  const request: LatencySample = {
+    ...turn('2026-03-02', 9, 4_000, { numTurns: 9 }),
+    kind: 'request',
+  }
+  assert.equal(overallStat([request], 'apiMsPerRequest').meanMs, 4_000)
+})
+
+test('request records survive parsing with their own fields', () => {
+  const [sample] = parseSamples([
+    {
+      kind: 'request',
+      at: 1_700_000_000_000,
+      apiMs: 3_100,
+      ttftMs: 900,
+      inputTokens: 48_000,
+      cacheReadTokens: 44_000,
+      subagent: true,
+      stopReason: 'tool_use',
+    },
+  ])
+  assert.equal(sample.kind, 'request')
+  assert.equal(sample.inputTokens, 48_000)
+  assert.equal(sample.cacheReadTokens, 44_000)
+  assert.equal(sample.subagent, true)
+  assert.equal(sample.stopReason, 'tool_use')
+  assert.deepEqual(filterSamples([sample], { kind: 'turn' }), [])
+  assert.equal(filterSamples([sample], { kind: 'request' }).length, 1)
+})
+
+// An unknown kind from a newer build must not be silently relabelled as a turn
+// and folded into the turn statistics.
+test('an unrecognised kind does not masquerade as a turn', () => {
+  const [sample] = parseSamples([{ kind: 'request', at: 1_700_000_000_000, apiMs: 10 }])
+  assert.notEqual(sample.kind, 'turn')
+})
+
 console.log(failures === 0 ? '\nlatency-stats: OK' : `\nlatency-stats: ${failures} FAILED`)
 process.exit(failures === 0 ? 0 : 1)
