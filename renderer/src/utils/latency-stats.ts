@@ -58,9 +58,10 @@ export interface LatencySample {
  *
  *   - `apiMs` is the SDK's `duration_api_ms`: every API round-trip in the turn,
  *     added up. The headline, and the only figure the SDK itself vouches for.
- *   - `apiMsPerRequest` divides that by the turn's request count. One 40s call
- *     and twelve 3s calls have nearly the same `apiMs`; this is what tells them
- *     apart without needing the per-request records.
+ *   - `apiMsPerRequest` spreads that across the turn's request count, so both the
+ *     figure and its sample count are in API calls rather than turns. One 40s
+ *     call and twelve 3s calls have nearly the same `apiMs`; this is what tells
+ *     them apart on records written before per-request timing existed.
  *   - `wallMs` is the turn end to end, including tool execution and any wait for
  *     a human to approve one. It is the only one that matches how long the turn
  *     *felt*, and the only one a person can make slower by going to lunch.
@@ -132,24 +133,58 @@ function finite(value: number | null | undefined): number | null {
  * timing landed. `numTurns` is the SDK's own count and is on everything ever
  * stored, which is what keeps two months of history from dropping out of this
  * view the moment it is selected.
+ *
+ * Floored to a whole number: it is used both to divide and to decide how many
+ * requests the result stands for, and those two must not disagree.
  */
 function requestDivisor(sample: LatencySample): number | null {
   const counted = finite(sample.requestCount)
-  if (counted !== null && counted >= 1) return counted
+  if (counted !== null && counted >= 1) return Math.floor(counted)
   const sdk = finite(sample.numTurns)
-  return sdk !== null && sdk >= 1 ? sdk : null
+  return sdk !== null && sdk >= 1 ? Math.floor(sdk) : null
 }
 
-function metricValue(sample: LatencySample, metric: LatencyMetric): number | null {
-  if (metric === 'ttftMs') return finite(sample.ttftMs)
-  if (metric === 'wallMs') return finite(sample.wallMs)
+/**
+ * Ceiling on the per-request expansion below.
+ *
+ * The multiplier is a number read off two-month-old JSONL written by another
+ * process; a corrupt record claiming a million requests should skew one bucket,
+ * not hang the page building an array.
+ */
+const MAX_REQUEST_EXPANSION = 4096
+
+function single(value: number | null): number[] {
+  return value === null ? [] : [value]
+}
+
+/**
+ * The values one sample contributes to a metric: usually one, sometimes none,
+ * and for the per-request view as many as the turn had requests.
+ *
+ * That expansion is what makes `count` mean what the column promises. Summarised
+ * one-value-per-turn, a per-request figure counted *turns* — "12 samples" while
+ * describing requests — and its mean was a mean of per-turn means, in which a
+ * turn that made one request weighed as much as a turn that made twenty.
+ * Emitting the turn's average once per request fixes both at once: the count is
+ * requests, and the mean collapses to Σ apiMs / Σ requests, which is the average
+ * API call actually made.
+ *
+ * Within a turn every request gets that turn's average, because for records
+ * written before per-request timing existed that is all there is. It spreads the
+ * distribution too thin, never wrong on the total — and the `request` records
+ * carry the real spread for anything recent.
+ */
+function metricValues(sample: LatencySample, metric: LatencyMetric): number[] {
+  if (metric === 'ttftMs') return single(finite(sample.ttftMs))
+  if (metric === 'wallMs') return single(finite(sample.wallMs))
   const apiMs = finite(sample.apiMs)
-  if (metric !== 'apiMsPerRequest') return apiMs
-  const divisor = requestDivisor(sample)
+  if (metric !== 'apiMsPerRequest') return single(apiMs)
   // A request record is already one request; dividing it again would report
   // the same number under a label that promises something else.
-  if (sample.kind === 'request') return apiMs
-  return apiMs === null || divisor === null ? null : apiMs / divisor
+  if (sample.kind === 'request') return single(apiMs)
+  const divisor = requestDivisor(sample)
+  if (apiMs === null || divisor === null) return []
+  return new Array(Math.min(divisor, MAX_REQUEST_EXPANSION)).fill(apiMs / divisor)
 }
 
 /**
@@ -211,11 +246,11 @@ export function filterSamples(samples: LatencySample[], filter: LatencyFilter): 
 export function hourBuckets(samples: LatencySample[], metric: LatencyMetric): HourBucket[] {
   const byHour: number[][] = Array.from({ length: 24 }, () => [])
   for (const sample of samples) {
-    const value = metricValue(sample, metric)
-    if (value === null) continue
+    const values = metricValues(sample, metric)
+    if (values.length === 0) continue
     // Local hour, from the machine's own offset — the whole question is about
     // the user's clock, not UTC.
-    byHour[new Date(sample.at).getHours()].push(value)
+    byHour[new Date(sample.at).getHours()].push(...values)
   }
   return byHour.map((values, hour) => ({ hour, ...summarise(values) }))
 }
@@ -238,12 +273,12 @@ export function localDayKey(at: number): string {
 export function dayBuckets(samples: LatencySample[], metric: LatencyMetric): DayBucket[] {
   const byDay = new Map<string, number[]>()
   for (const sample of samples) {
-    const value = metricValue(sample, metric)
-    if (value === null) continue
+    const values = metricValues(sample, metric)
+    if (values.length === 0) continue
     const key = localDayKey(sample.at)
     const bucket = byDay.get(key)
-    if (bucket) bucket.push(value)
-    else byDay.set(key, [value])
+    if (bucket) bucket.push(...values)
+    else byDay.set(key, values)
   }
   return [...byDay.entries()]
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
@@ -273,12 +308,12 @@ export function groupBuckets(
 ): GroupBucket[] {
   const byKey = new Map<string, number[]>()
   for (const sample of samples) {
-    const value = metricValue(sample, metric)
-    if (value === null) continue
+    const values = metricValues(sample, metric)
+    if (values.length === 0) continue
     const key = dimensionKey(sample, dimension)
     const bucket = byKey.get(key)
-    if (bucket) bucket.push(value)
-    else byKey.set(key, [value])
+    if (bucket) bucket.push(...values)
+    else byKey.set(key, values)
   }
   return [...byKey.entries()]
     .map(([key, values]) => ({ key, label: key, ...summarise(values) }))
@@ -310,8 +345,7 @@ export function availableDimensions(samples: LatencySample[]): {
 export function overallStat(samples: LatencySample[], metric: LatencyMetric): LatencyStat {
   const values: number[] = []
   for (const sample of samples) {
-    const value = metricValue(sample, metric)
-    if (value !== null) values.push(value)
+    values.push(...metricValues(sample, metric))
   }
   return summarise(values)
 }

@@ -65,8 +65,10 @@ const METRICS: Array<{
     label: 'Per request',
     summaryLabel: 'API time per request',
     title:
-      'API time divided by the turn\'s request count. One 40s call and twelve 3s calls have '
-      + 'nearly the same API time; this tells them apart.',
+      "The turn's API time spread across the requests it made, counted in requests rather "
+      + 'than turns. One 40s call and twelve 3s calls have nearly the same API time; this '
+      + 'tells them apart on records written before per-request timing existed. For anything '
+      + 'recent, Requests has the real spread.',
     kinds: ['turn'],
   },
   {
@@ -87,6 +89,20 @@ const METRICS: Array<{
     kinds: ['turn', 'request'],
   },
 ]
+
+/**
+ * What the sample count is counting.
+ *
+ * Not cosmetic: the per-request view spreads each turn across the requests it
+ * made, so its `n` really is a number of API calls, and calling those "turns"
+ * overstated how many turns the page had seen — by a factor of however many
+ * calls each one took.
+ */
+function countNoun(kind: LatencySample['kind'], metric: LatencyMetric): string {
+  if (kind === 'compact') return 'compactions'
+  if (kind === 'request' || metric === 'apiMsPerRequest') return 'API requests'
+  return 'turns'
+}
 
 const COL = { label: 110, count: 64, mean: 90, median: 90, p90: 90, max: 90 }
 const HEADER_STYLE: React.CSSProperties = {
@@ -282,7 +298,11 @@ export function LatencyStatsPanel(): React.ReactElement | null {
   const [rangeDays, setRangeDays] = useState<number>(30)
   const [metric, setMetric] = useState<LatencyMetric>('apiMs')
   const [view, setView] = useState<View>('hour')
-  const [kind, setKind] = useState<LatencySample['kind']>('turn')
+  // Requests, not turns. A turn is however many API calls the model happened to
+  // need, so its duration answers "how much work was there" far more than "how
+  // fast was the API" — the question this page exists for. One call is the unit
+  // that is actually comparable between two turns, two models, or two hours.
+  const [kind, setKind] = useState<LatencySample['kind']>('request')
   const [model, setModel] = useState<string | null>(null)
   const [effort, setEffort] = useState<string | null>(null)
   const [compactWindow, setCompactWindow] = useState<number | null>(null)
@@ -409,11 +429,13 @@ export function LatencyStatsPanel(): React.ReactElement | null {
         <div className="claude-plan-modal-body" style={{ padding: '12px 16px', fontFamily: 'inherit' }}>
           <div style={{ fontSize: 11, color: '#999', lineHeight: 1.6, marginBottom: 10 }}>
             Server-side response time only — how long the API took, not how long you took
-            to answer a permission prompt. Figures are approximate: they are averages over
-            however many turns happened to land in each bucket, and buckets under{' '}
-            {LOW_SAMPLE_THRESHOLD} samples are marked. Samples are kept for 60 days, and
-            only for turns run since this build. Use <em>Raw records</em> to check any
-            figure against the individual turns behind it.
+            to answer a permission prompt. One API request is the unit, because a turn is
+            however many requests the model happened to need and its duration says as much
+            about the size of the job as about the speed of the answer. Figures are
+            approximate: they are averages over whatever landed in each bucket, and buckets
+            under {LOW_SAMPLE_THRESHOLD} samples are marked. Samples are kept for 60 days,
+            and only for sessions run since this build. Use <em>Raw records</em> to check
+            any figure against the individual records behind it.
           </div>
 
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'center', marginBottom: 10, fontSize: 12 }}>
@@ -427,15 +449,19 @@ export function LatencyStatsPanel(): React.ReactElement | null {
             </div>
             <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
               <span style={{ color: '#888' }}>Show</span>
-              <button style={chip(kind === 'turn')} onClick={() => setKind('turn')}>
-                Turns
-              </button>
               <button
                 style={chip(kind === 'request')}
                 onClick={() => setKind('request')}
-                title="One record per API request inside a turn, timed here rather than reported by the SDK — so it carries this process's own overhead. Read it for shape, and Turns for absolute API time."
+                title="One record per API request, timed here rather than reported by the SDK — so it carries this process's own overhead. The comparable unit: a turn is however many calls the model happened to need."
               >
                 Requests
+              </button>
+              <button
+                style={chip(kind === 'turn')}
+                onClick={() => setKind('turn')}
+                title="One record per turn, using the SDK's own duration_api_ms. Authoritative on absolute API time, but a turn's length says as much about how much work it was as about how fast the API answered."
+              >
+                Turns
               </button>
               <button style={chip(kind === 'compact')} onClick={() => setKind('compact')}>
                 Compactions
@@ -520,7 +546,7 @@ export function LatencyStatsPanel(): React.ReactElement | null {
               <span style={{ color: '#e05252' }}>Could not read samples: {error}</span>
             ) : (
               <>
-                {summary.count.toLocaleString()} {kind === 'compact' ? 'compactions' : 'turns'} with{' '}
+                {summary.count.toLocaleString()} {countNoun(kind, effectiveMetric)} with{' '}
                 {metricLabel} in the last {rangeDays} days · mean{' '}
                 <span style={{ color: '#8be9fd' }}>{formatDuration(summary.meanMs)}</span> · median{' '}
                 {formatDuration(summary.medianMs)} · p90{' '}

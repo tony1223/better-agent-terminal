@@ -359,6 +359,60 @@ test('wall time aggregates separately from API time', () => {
   assert.equal(overallStat([turn('2026-03-02', 9, 12_000)], 'wallMs').count, 0)
 })
 
+// The whole point of a per-request figure is that it is per request. Counting
+// turns under that heading overstated the sample size by however many calls each
+// turn took — "12 samples" when the page had seen one turn.
+test('the per-request view counts requests, not turns', () => {
+  const stat = overallStat([turn('2026-03-02', 9, 36_000, { requestCount: 12 })], 'apiMsPerRequest')
+  assert.equal(stat.count, 12, 'one turn of twelve calls is twelve samples of a per-call metric')
+  assert.equal(stat.meanMs, 3_000)
+  // ...and the same turn read as a turn is still exactly one turn.
+  assert.equal(overallStat([turn('2026-03-02', 9, 36_000, { requestCount: 12 })], 'apiMs').count, 1)
+})
+
+// A mean of per-turn means weighs a turn that made one call the same as a turn
+// that made twenty, which is not the average API call by any reading. Here the
+// unweighted mean of the two turn averages is 10.5s; the real per-call average
+// is 63s over 21 calls = 3s.
+test('the per-request mean is weighted by how many requests each turn made', () => {
+  const stat = overallStat(
+    [
+      turn('2026-03-02', 9, 20_000, { requestCount: 1 }),
+      turn('2026-03-02', 9, 43_000, { requestCount: 20 }),
+    ],
+    'apiMsPerRequest',
+  )
+  assert.equal(stat.count, 21)
+  assert.equal(stat.meanMs, 3_000, 'Σ apiMs / Σ requests, not the mean of the two turn averages')
+  assert.notEqual(stat.meanMs, 10_500)
+})
+
+// The expansion multiplies by a number read off two-month-old JSONL. A corrupt
+// record should skew one bucket, not hang the page building its array.
+test('an absurd request count cannot blow up the aggregation', () => {
+  const stat = overallStat(
+    [turn('2026-03-02', 9, 1_000, { requestCount: 50_000_000 })],
+    'apiMsPerRequest',
+  )
+  assert.ok(stat.count > 0 && stat.count <= 4096, `expected a clamped count, got ${stat.count}`)
+})
+
+// A fractional count would make `new Array(n)` throw and take the page with it.
+test('a fractional request count is floored rather than fatal', () => {
+  const stat = overallStat([turn('2026-03-02', 9, 30_000, { requestCount: 3.7 })], 'apiMsPerRequest')
+  assert.equal(stat.count, 3)
+  assert.equal(stat.meanMs, 10_000)
+})
+
+// The counting change has to reach the tables too, not just the header line.
+test('the hour and day tables count requests under the per-request view', () => {
+  const samples = [turn('2026-07-01', 14, 36_000, { requestCount: 12 })]
+  assert.equal(hourBuckets(samples, 'apiMsPerRequest')[14].count, 12)
+  assert.equal(hourBuckets(samples, 'apiMs')[14].count, 1)
+  assert.equal(dayBuckets(samples, 'apiMsPerRequest')[0].count, 12)
+  assert.equal(groupBuckets(samples, 'apiMsPerRequest', 'model')[0].count, 12)
+})
+
 // A request record is already a single request. Dividing it again would report
 // the same number under a label promising something else.
 test('a request record is not divided again by the per-request view', () => {
