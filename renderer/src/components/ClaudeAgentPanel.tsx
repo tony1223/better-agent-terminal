@@ -26,6 +26,7 @@ import { autoCompactWindowForClaudeSelection, claudeModelValueForRow, displayNam
 import { shouldNavigateInputHistoryFromTextarea } from '../utils/input-history-navigation'
 import { buildSnippetContextPrompt, parseSnippetSlashCommand, type SnippetForContext } from '../utils/snippet-command'
 import { filterSlashCommands, flattenSlashGroups, groupSlashCommands, mergeSlashCommands, type SlashCommandInfo } from '../utils/slash-commands'
+import { PERMISSION_MODES, PERMISSION_MODE_LABELS, normalizePermissionMode } from '../utils/permission-modes'
 import { createToolRenderCache, getOrComputeToolRender, pruneToolRenderCache } from '../utils/tool-result-cache'
 import { useRafBatchedString } from '../utils/use-raf-batched-string'
 import { translateRuntimeMessage } from '../utils/runtime-status-message'
@@ -269,6 +270,24 @@ function includeCurrentOption(values: readonly string[], current: string): strin
   return current && !filtered.includes(current) ? [current, ...filtered] : filtered
 }
 
+// The mode a session should come back in. It used to live only in panel state,
+// so every resume silently restarted at bypassPermissions no matter what the
+// user had picked — a session parked in `plan` came back able to write (GH #124).
+function restoredPermissionMode(sessionId: string): string {
+  return normalizePermissionMode(
+    workspaceStore.getState().terminals.find(t => t.id === sessionId)?.permissionMode
+  )
+}
+
+// Mode changes arrive from three directions: the user cycling the button, the
+// sidecar echoing what Claude Code actually adopted, and ExitPlanMode
+// transitions. All three write through, or the persisted value drifts from the
+// live one and resume restores a mode the session was never in.
+function rememberPermissionMode(sessionId: string, mode: string): void {
+  if (typeof mode !== 'string' || !mode) return
+  workspaceStore.updateTerminalPermissionMode(sessionId, mode)
+}
+
 type ClaudeAgentPanelContentProps = Omit<ClaudeAgentPanelProps, 'isActive'> & {
   activation: PanelActivation
 }
@@ -336,7 +355,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
     const t = workspaceStore.getState().terminals.find(t => t.id === sessionId)
     return !!t?.sdkSessionId
   })
-  const [permissionMode, setPermissionMode] = useState<string>('bypassPermissions')
+  const [permissionMode, setPermissionMode] = useState<string>(() => restoredPermissionMode(sessionId))
   const [currentModel, setCurrentModel] = useState<string>(() => {
     const t = workspaceStore.getState().terminals.find(t => t.id === sessionId)
     return normalizeClaudeModelSelection(t?.model || settingsStore.getSettings().defaultClaudeModel) || ''
@@ -1573,6 +1592,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
         // Sync UI with backend's current permission mode
         if (m.permissionMode) {
           setPermissionMode(m.permissionMode)
+          rememberPermissionMode(sessionId, m.permissionMode)
         }
         // Persist SDK session ID per-terminal so /resume and auto-resume can find it
         if (m.sdkSessionId) {
@@ -1750,6 +1770,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
       api.onModeChange((sid: string, mode: string) => {
         if (sid !== sessionId) return
         setPermissionMode(mode)
+        rememberPermissionMode(sessionId, mode)
       }),
 
       // Claude Code's own command list, pushed when the CLI first knows it and
@@ -3144,16 +3165,8 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
   // vet each action and still escalates what it won't decide, and dontAsk denies
   // anything not pre-approved. Gating them behind the bypass opt-in would hide
   // the two modes a cautious user most wants.
-  const permissionModes = ['default', 'auto', 'acceptEdits', 'dontAsk', 'bypassPermissions', 'bypassPlan', 'plan'] as const
-  const permissionModeLabels: Record<string, string> = {
-    default: '\u270F Ask before edits',
-    auto: '\uD83E\uDD16 Auto (AI-reviewed)',
-    acceptEdits: '\u270F Auto-accept edits',
-    dontAsk: '\uD83D\uDEAB Never ask (deny)',
-    bypassPermissions: '\u26A0 Bypass permissions',
-    bypassPlan: '\uD83D\uDCCB Plan (auto-approve)',
-    plan: '\uD83D\uDCCB Plan mode',
-  }
+  const permissionModes = PERMISSION_MODES
+  const permissionModeLabels = PERMISSION_MODE_LABELS
 
   const handlePermissionModeCycle = useCallback(async () => {
     const allowBypass = settingsStore.getSettings().allowBypassPermissions
@@ -3163,6 +3176,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
     const idx = availableModes.indexOf(permissionMode as typeof permissionModes[number])
     const nextMode = availableModes[(idx + 1) % availableModes.length]
     setPermissionMode(nextMode)
+    rememberPermissionMode(sessionId, nextMode)
     await host.claude.setPermissionMode(sessionId, nextMode)
   }, [sessionId, permissionMode])
 

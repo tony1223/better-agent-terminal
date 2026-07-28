@@ -612,6 +612,21 @@ class WorkspaceStore {
     this.save()
   }
 
+  updateTerminalPermissionMode(id: string, permissionMode: string): void {
+    const terminal = this.state.terminals.find(t => t.id === id)
+    if (!terminal || terminal.permissionMode === permissionMode) return
+
+    this.state = {
+      ...this.state,
+      terminals: this.state.terminals.map(t =>
+        t.id === id ? { ...t, permissionMode } : t
+      )
+    }
+
+    this.notify()
+    this.save()
+  }
+
   updateTerminalAgentParams(id: string, params: Record<string, string | number | boolean>): void {
     this.state = {
       ...this.state,
@@ -971,6 +986,7 @@ class WorkspaceStore {
         claudeCliSessionId: t.claudeCliSessionId,
         claudeCliRestartToken: t.claudeCliRestartToken,
         model: t.model,
+        permissionMode: t.permissionMode,
         agentParams: t.agentParams,
         sessionMeta: t.sessionMeta,
         worktreePath: t.worktreePath,
@@ -1077,6 +1093,7 @@ class WorkspaceStore {
           claudeCliSessionId: t.claudeCliSessionId,
           claudeCliRestartToken: t.claudeCliRestartToken,
           model: t.model,
+          permissionMode: typeof t.permissionMode === 'string' ? t.permissionMode : undefined,
           agentParams: normalizeAgentParams(agentPreset, t.agentParams),
           sessionMeta: t.sessionMeta,
           worktreePath: t.worktreePath,

@@ -81,6 +81,10 @@ export interface TerminalInstance {
   agentCommandSent?: boolean;     // Prevents duplicate auto-run agent commands
   sdkSessionId?: string;         // Claude SDK session ID for auto-resume
   model?: string;                // Selected Claude model for this session
+  // Permission mode this session was last in. Persisted because it used to live
+  // only in panel state, so every resume silently restarted at bypassPermissions
+  // no matter what the user had picked (GH #124).
+  permissionMode?: string;
   agentParams?: Record<string, AgentParamValue>; // Normalized agent-specific persisted params
   pendingPrompt?: string;        // Prompt to auto-send after fork/resume
   pendingImages?: string[];      // Data URLs of images to send with pendingPrompt

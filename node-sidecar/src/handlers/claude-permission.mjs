@@ -4,7 +4,7 @@
 // claude.resolveAskUser.
 
 import { registerHandler, sendEvent } from '../lib/protocol.mjs'
-import { sessions } from '../lib/state.mjs'
+import { sessions, saveSessionConfig } from '../lib/state.mjs'
 
 // Tools that acceptEdits mode auto-approves without surfacing a UI prompt.
 // Mirror of electron/claude-agent-manager.ts:793.
@@ -38,6 +38,9 @@ export function buildCanUseTool(session, sessionId, toolName, input, opts) {
             resolve: (result) => {
               if (result?.behavior === 'allow') {
                 session.permissionMode = 'bypassPermissions'
+                // Snapshot alongside the event: an exit-plan transition is a real
+                // mode change and must survive a stop/resume like any other.
+                saveSessionConfig(sessionId, session)
                 sendEvent('claude:modeChange', { sessionId, mode: 'bypassPermissions' })
               }
               resolve(result)
@@ -90,6 +93,7 @@ export function buildCanUseTool(session, sessionId, toolName, input, opts) {
             // dontAskAgain → acceptEdits, otherwise default. Matches
             // Electron's exit-plan UX.
             session.permissionMode = result.dontAskAgain ? 'acceptEdits' : 'default'
+            saveSessionConfig(sessionId, session)
             sendEvent('claude:modeChange', { sessionId, mode: session.permissionMode })
           }
           resolve(result)

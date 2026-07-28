@@ -512,10 +512,20 @@ function processMessage(s, sessionId, msg) {
       // claude:status below carries the real mode back to the UI so the button
       // stops claiming something that isn't in force. Worth a log line — silently
       // running in a weaker mode than the one on screen is the bad outcome here.
-      if (s.permissionMode && msg.permissionMode !== s.permissionMode) {
-        logWarn(`claude.sendMessage(${shortSessionId(sessionId)}): requested permissionMode=${s.permissionMode} but the CLI reports ${msg.permissionMode}`)
+      //
+      // Compare against the mode we actually sent, not the one we hold:
+      // bypassPlan is sidecar-only and goes out as plain 'plan', so the CLI
+      // echoing 'plan' is agreement, not a downgrade. Adopting it verbatim
+      // demoted "Plan (auto-approve)" to "Plan mode" on the first turn, which
+      // persisting the mode would now make permanent rather than merely
+      // until the next restart.
+      const requestedAsSdkMode = s.permissionMode === 'bypassPlan' ? 'plan' : s.permissionMode
+      if (msg.permissionMode !== requestedAsSdkMode) {
+        if (s.permissionMode) {
+          logWarn(`claude.sendMessage(${shortSessionId(sessionId)}): requested permissionMode=${s.permissionMode} but the CLI reports ${msg.permissionMode}`)
+        }
+        s.permissionMode = msg.permissionMode
       }
-      s.permissionMode = msg.permissionMode
     }
     // Persist the freshly-issued sdkSessionId so ensureSession can rebuild
     // a resumable session even after stopSession / resetSession.

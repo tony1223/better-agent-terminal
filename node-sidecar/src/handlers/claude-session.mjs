@@ -9,6 +9,7 @@ import { existsSync } from 'node:fs'
 import { registerHandler, sendEvent } from '../lib/protocol.mjs'
 import {
   sessions,
+  sessionConfigs,
   ensureSession,
   buildSessionMeta,
   saveSessionConfig,
@@ -185,7 +186,15 @@ async function resumeClaudeSession(params, opts = {}) {
   s.active = true
   s.options = params?.options ?? null
   s.agentPreset = params?.options?.agentPreset ?? null
-  s.permissionMode = 'bypassPermissions'
+  // Prefer the mode this session was last in. ensureSession already rehydrates
+  // it from sessionConfigs, but its cold-start baseline is 'default', so "was
+  // anything actually remembered?" has to be asked of sessionConfigs rather than
+  // of the record we just built. Overwriting unconditionally is what made every
+  // resume forget the mode the user had chosen — a session parked in `plan` came
+  // back able to write (GH #124). With nothing remembered the historical
+  // bypassPermissions default still applies.
+  const rememberedMode = sessionConfigs.get(sessionId)?.permissionMode
+  s.permissionMode = (typeof rememberedMode === 'string' && rememberedMode) ? rememberedMode : 'bypassPermissions'
   if (s.options && typeof s.options === 'object') {
     if (typeof s.options.cwd === 'string') {
       // Keep cwd in options so sendMessage's queryOptions picks it up.
@@ -409,6 +418,10 @@ registerHandler('claude.setPermissionMode', async (params) => {
   if (typeof mode !== 'string') return false
   const s = ensureSession(sessionId)
   s.permissionMode = mode
+  // Snapshot immediately rather than waiting for the next sendMessage to do it.
+  // A session whose mode is changed and is then stopped before anyone speaks
+  // would otherwise come back in whatever mode it was in two changes ago.
+  saveSessionConfig(sessionId, s)
   // Mode change: forward to the open LiveQuery / active SDK query when
   // available. SDK's permissionMode
   // enum doesn't include 'bypassPlan' — that's a sidecar-only mode

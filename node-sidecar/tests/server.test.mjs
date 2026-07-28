@@ -2102,6 +2102,27 @@ async function inProcess() {
     assert.equal(mod.sessions.get('resume-cap2').autoCompactWindow, 250000,
       'explicit resume option must win over the preset suffix')
 
+    // GH #124: resume must come back in the mode the session was actually in.
+    // permissionMode used to be overwritten with bypassPermissions on every
+    // resume, so a session deliberately parked in `plan` silently came back
+    // able to write — the one transition a plan-mode user is guarding against.
+    await dispatch({ jsonrpc: '2.0', id: 29514, method: 'claude.setPermissionMode',
+      params: { sessionId: 'resume-mode', mode: 'plan' } })
+    await dispatch({ jsonrpc: '2.0', id: 29515, method: 'claude.resumeSession',
+      params: { sessionId: 'resume-mode', sdkSessionId: 'sdk-historic-xyz',
+        options: { cwd: resumeCwd } } })
+    assert.equal(mod.sessions.get('resume-mode').permissionMode, 'plan',
+      'resume must restore the remembered permission mode, not force bypassPermissions')
+
+    // An explicit mode in the resume options still wins: the renderer owns the
+    // durable copy and sends it, so its value must not be second-guessed by the
+    // sidecar's own memory of an older change.
+    await dispatch({ jsonrpc: '2.0', id: 29516, method: 'claude.resumeSession',
+      params: { sessionId: 'resume-mode', sdkSessionId: 'sdk-historic-xyz',
+        options: { cwd: resumeCwd, permissionMode: 'acceptEdits' } } })
+    assert.equal(mod.sessions.get('resume-mode').permissionMode, 'acceptEdits',
+      'explicit resume option must win over the remembered mode')
+
     // If the persisted terminal cwd no longer matches Claude's project dir,
     // do not globally borrow a transcript from a different cwd. The UI may
     // otherwise display history that Claude Code cannot resume from the
@@ -3112,6 +3133,74 @@ async function inProcess() {
       __setSdkOverrideForTests(undefined)
       restoreSend()
       mod.sessions.delete(sessionId)
+    }
+  }
+
+  // The CLI's init frame echoes the mode it adopted, and we take its word for
+  // it — that is how a mode the installed CLI does not support degrades
+  // gracefully instead of lying on the button. But bypassPlan is sidecar-only
+  // and goes out as plain 'plan', so the echo comes back different from what we
+  // hold every single time. Adopting it verbatim demoted "Plan (auto-approve)"
+  // to "Plan mode" on the first turn — and now that the mode is persisted, that
+  // demotion would outlive the session instead of dying with it.
+  {
+    const restoreSend = mod.__setSendEventForTests(() => {})
+    let planCanUse = null
+    let sentMode = null
+    __setSdkOverrideForTests({
+      query({ options }) {
+        planCanUse = options.canUseTool
+        sentMode = options.permissionMode
+        return (async function*() {
+          // The CLI knows nothing of bypassPlan; it reports the plan it was given.
+          yield { type: 'system', subtype: 'init', session_id: 'bpl-sdk', permissionMode: 'plan' }
+          yield { type: 'result', subtype: 'success', session_id: 'bpl-sdk', result: 'ok', stop_reason: 'end_turn', total_cost_usd: 0, num_turns: 1 }
+        })()
+      },
+    })
+    try {
+      await dispatch({ jsonrpc: '2.0', id: 277, method: 'claude.startSession',
+        params: { sessionId: 'bpl-1', options: { cwd: '/p', permissionMode: 'bypassPlan' } } })
+      await dispatch({ jsonrpc: '2.0', id: 278, method: 'claude.sendMessage',
+        params: { sessionId: 'bpl-1', prompt: 'go' } })
+      assert.equal(sentMode, 'plan', 'bypassPlan is sidecar-only and must reach the SDK as plain plan')
+      assert.equal(mod.sessions.get('bpl-1').permissionMode, 'bypassPlan',
+        'the CLI echoing back the mode we sent is agreement, not a downgrade')
+      // The behaviour, not just the label: bypassPlan auto-approves everything
+      // except ExitPlanMode. Under plain plan this would surface a prompt.
+      const decision = await Promise.resolve(planCanUse('Bash', { command: 'ls' }, { toolUseID: 'bpl-tool' }))
+      assert.equal(decision.behavior, 'allow', 'bypassPlan must still auto-approve after the init echo')
+    } finally {
+      __setSdkOverrideForTests(undefined)
+      restoreSend()
+      mod.sessions.delete('bpl-1')
+    }
+  }
+
+  // A real disagreement is still adopted — that is the whole point of listening
+  // to the echo. Here the CLI refuses dontAsk and runs the session as default.
+  {
+    const restoreSend = mod.__setSendEventForTests(() => {})
+    __setSdkOverrideForTests({
+      query() {
+        return (async function*() {
+          yield { type: 'system', subtype: 'init', session_id: 'dg-sdk', permissionMode: 'default' }
+          yield { type: 'result', subtype: 'success', session_id: 'dg-sdk', result: 'ok', stop_reason: 'end_turn', total_cost_usd: 0, num_turns: 1 }
+        })()
+      },
+    })
+    try {
+      await dispatch({ jsonrpc: '2.0', id: 279, method: 'claude.startSession',
+        params: { sessionId: 'dg-1', options: { cwd: '/p', permissionMode: 'dontAsk' } } })
+      await dispatch({ jsonrpc: '2.0', id: 280, method: 'claude.sendMessage',
+        params: { sessionId: 'dg-1', prompt: 'go' } })
+      assert.equal(mod.sessions.get('dg-1').permissionMode, 'default',
+        'a mode the CLI genuinely would not honour must be adopted, so the button stops '
+        + 'claiming something that is not in force')
+    } finally {
+      __setSdkOverrideForTests(undefined)
+      restoreSend()
+      mod.sessions.delete('dg-1')
     }
   }
 
