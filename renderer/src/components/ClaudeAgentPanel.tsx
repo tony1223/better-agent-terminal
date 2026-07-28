@@ -1207,6 +1207,19 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
               copy[existingMessageIndex] = finalMsg
               return copy
             }
+            // The host echoes a user message back under the client's own id
+            // (emitUserEcho reuses clientMessageId), so this branch — not the
+            // content match below — is what a remote send actually lands in.
+            // Returning early here left the optimistic message ghosted until
+            // claude.sendMessage resolved, and that resolves when the *turn*
+            // ends, not when the prompt is taken: the message the agent was
+            // visibly answering stayed greyed out for the whole turn.
+            const existing = nextPrev[existingMessageIndex]
+            if (!isToolCall(existing) && (existing as ClaudeMessage).status) {
+              const copy = [...nextPrev]
+              copy[existingMessageIndex] = { ...(existing as ClaudeMessage), status: undefined }
+              return copy
+            }
             return nextPrev
           }
           // Dedup user messages: a matching local user message within 5s is the
@@ -3005,7 +3018,11 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
         return
       }
       if (isRemoteConnected) {
-        // Host acked receipt (invoke-result) → solidify the ghosted message.
+        // Backstop, not the normal path: this resolves when the turn ends, not
+        // when the host takes the prompt (the sidecar awaits live.push()). The
+        // user echo clears the ghost long before this, and is the only thing
+        // that does so promptly — but keep this for a turn that produces no
+        // echo at all, so nothing can stay ghosted forever.
         setMessages(prev => prev.map(m => (!isToolCall(m) && m.id === userMsgId) ? { ...m, status: 'sent' as const } : m))
       }
     } catch (err) {

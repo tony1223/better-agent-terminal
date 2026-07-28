@@ -1191,6 +1191,19 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
               copy[existingMessageIndex] = finalMsg
               return copy
             }
+            // The host echoes a user message back under the client's own id
+            // (emitUserEcho reuses clientMessageId), so this branch — not the
+            // content match below — is what a remote send actually lands in.
+            // Returning early here left the optimistic message ghosted until
+            // the send RPC resolved, and that resolves when the *turn* ends,
+            // not when the prompt is taken: the message the agent was visibly
+            // answering stayed greyed out for the whole turn.
+            const existing = nextPrev[existingMessageIndex]
+            if (!isToolCall(existing) && (existing as ClaudeMessage).status) {
+              const copy = [...nextPrev]
+              copy[existingMessageIndex] = { ...(existing as ClaudeMessage), status: undefined }
+              return copy
+            }
             return nextPrev
           }
           // Dedup user messages: a matching local user message within 5s is the

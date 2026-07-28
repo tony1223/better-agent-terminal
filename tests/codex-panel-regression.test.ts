@@ -262,6 +262,20 @@ async function main() {
       /wasConnected && !isRemoteConnected[\s\S]*clearStartedSessionTracking\(sessionId\)/,
       `${name} panel should invalidate cached startup state when a remote connection drops`,
     )
+    // The host's user echo reuses the client's own message id (emitUserEcho
+    // falls back to clientMessageId), so a remote send lands in the id-match
+    // branch and never reaches the content-match dedupe below it. Returning
+    // early there leaves the message ghosted until the send RPC resolves — and
+    // that resolves when the turn ends, not when the prompt is taken, so the
+    // message the agent is visibly answering stays greyed out the whole time.
+    const idMatchBranch = panelSource.indexOf('const existingMessageIndex = nextPrev.findIndex(m => m.id === finalMsg.id)')
+    const clearsGhostOnIdMatch = panelSource.indexOf('const existing = nextPrev[existingMessageIndex]')
+    const contentDedupe = panelSource.indexOf('// Dedup user messages:')
+    assert.ok(idMatchBranch > 0, `${name} panel should still match an echo by id`)
+    assert.ok(
+      clearsGhostOnIdMatch > idMatchBranch && clearsGhostOnIdMatch < contentDedupe,
+      `${name} panel should clear the optimistic status inside the id-match branch, before the content dedupe it can never reach`,
+    )
   }
 
   console.log('Codex panel regression: passed')
