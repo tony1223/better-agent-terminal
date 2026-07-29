@@ -603,6 +603,17 @@ export default function App() {
           setActiveRemoteProfileId(remoteProfileId)
           setActiveRemoteOrigin(remoteOrigin)
           setProfileStartup({ phase: 'connecting', target: remoteStartupTarget })
+          // Remember how we're dialing BEFORE the dial, not after it succeeds.
+          // The status poll refuses to re-dial without these params, so setting
+          // them only on success meant a first dial that failed — the tunnel
+          // was down when the window opened — disabled auto-reconnect for the
+          // life of the window, and restoring the tunnel did nothing.
+          remoteConnParamsRef.current = {
+            host: active.remoteHost,
+            port: active.remotePort || 9876,
+            token: active.remoteToken,
+            fingerprint: active.remoteFingerprint,
+          }
           // Try connecting to remote
           const tRemote = performance.now()
           dlog(`[init] remote.connect start host=${remoteOrigin} profile=${remoteProfileId}`)
@@ -654,14 +665,6 @@ export default function App() {
             const cr = connectResult as { clientVersion?: string; serverVersion?: string | null }
             if (cr.clientVersion && cr.serverVersion && cr.clientVersion !== cr.serverVersion) {
               setAppNotification(t('app.remoteVersionMismatch', { clientVersion: cr.clientVersion, serverVersion: cr.serverVersion }))
-            }
-            // Remember how we connected so the status poll can silently
-            // re-dial after an idle drop without restarting the app.
-            remoteConnParamsRef.current = {
-              host: active.remoteHost,
-              port: active.remotePort || 9876,
-              token: active.remoteToken,
-              fingerprint: active.remoteFingerprint,
             }
             reconnectRef.current = { inFlight: false, backoff: RECONNECT_BACKOFF_MIN, nextAt: 0 }
           }

@@ -276,7 +276,39 @@ async function main() {
       clearsGhostOnIdMatch > idMatchBranch && clearsGhostOnIdMatch < contentDedupe,
       `${name} panel should clear the optimistic status inside the id-match branch, before the content dedupe it can never reach`,
     )
+
+    // A dropped remote used to append `err-disconnect-${Date.now()}`, so every
+    // retry while the link was down stacked another identical row, and nothing
+    // ever revised them once the app re-dialled — a recovered connection still
+    // read as broken, with the user's text sitting unsent in the input box.
+    assert.ok(
+      !/id: `err-disconnect-\$\{Date\.now\(\)\}`/.test(panelSource),
+      `${name} panel should not mint a fresh id per disconnect, which stacks duplicate notices`,
+    )
+    assert.match(
+      panelSource,
+      /const remoteDisconnectNoticeId = `sys-remote-disconnected-\$\{sessionId\}`/,
+      `${name} panel should keep one stable disconnect notice per session`,
+    )
+    assert.match(
+      panelSource,
+      /if \(!wasConnected && isRemoteConnected\) \{[\s\S]{0,400}?Remote connection restored/,
+      `${name} panel should revise the disconnect notice when the connection comes back`,
+    )
   }
+
+  // The status poll refuses to re-dial without these params, so recording them
+  // only after a successful dial meant a window opened while the tunnel was
+  // down could never reconnect on its own — restoring the tunnel did nothing
+  // and the app had to be restarted. They have to be set before the dial.
+  const appSource = await readFile('renderer/src/App.tsx', 'utf8')
+  const recordsParams = appSource.indexOf('remoteConnParamsRef.current = {')
+  const dials = appSource.indexOf('const connectResult = await host.remote.connect(')
+  assert.ok(recordsParams > 0 && dials > 0, 'App should still dial the remote and record its params')
+  assert.ok(
+    recordsParams < dials,
+    'App should record the dial params before dialing, so a failed dial can still be retried',
+  )
 
   // A generated image reaches the panel as a file on disk, not as bytes: the
   // app-server writes it under $CODEX_HOME and reports `savedPath`, so keeping

@@ -1807,6 +1807,9 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
     }
   }, [sessionId, archiveDlog])
 
+  // Stable per session so a retry replaces the notice rather than stacking one.
+  const remoteDisconnectNoticeId = `sys-remote-disconnected-${sessionId}`
+
   const previousRemoteConnectedRef = useRef(isRemoteConnected)
   useEffect(() => {
     const wasConnected = previousRemoteConnectedRef.current
@@ -1814,8 +1817,18 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
     if (wasConnected && !isRemoteConnected) {
       clearStartedSessionTracking(sessionId)
       host.debug.log(`[Claude:${sessionId.slice(0, 8)}] remote disconnected; cleared cached session startup state`)
+      return
     }
-  }, [isRemoteConnected, sessionId])
+    // The disconnect notice tells the user to resend once the connection is
+    // back, and then nothing ever told them it was — the app re-dials within
+    // half a minute while that row sits there unchanged, so a working link
+    // still reads as broken. Answer the notice in place.
+    if (!wasConnected && isRemoteConnected) {
+      setMessages(prev => prev.map(m => (!isToolCall(m) && m.id === remoteDisconnectNoticeId)
+        ? { ...m, content: 'Remote connection restored — your message is still in the input box, ready to resend.', timestamp: Date.now() }
+        : m))
+    }
+  }, [isRemoteConnected, sessionId, remoteDisconnectNoticeId])
 
   // Start session on mount (guarded against StrictMode double-mount)
   // If a saved sdkSessionId exists (from a previous /resume), auto-resume that session
@@ -3083,15 +3096,25 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
         // user's text so nothing is lost, drop the optimistic echo, and tell
         // them it's reconnecting — the app re-dials automatically in the
         // background, after which they can resend.
-        setMessages(prev => prev.filter(m => isToolCall(m) || m.id !== userMsgId))
+        setMessages(prev => {
+          const withoutEcho = prev.filter(m => isToolCall(m) || m.id !== userMsgId)
+          const notice = {
+            id: remoteDisconnectNoticeId,
+            sessionId,
+            role: 'system' as const,
+            content: 'Remote connection lost — your message was not sent and has been restored to the input box. Reconnecting automatically; please resend once the connection is back.',
+            timestamp: Date.now(),
+          }
+          // Reuse one row instead of appending. Every retry while the link is
+          // down otherwise stacks an identical notice, which reads as the
+          // failure getting worse when it is the same failure each time.
+          const existing = withoutEcho.findIndex(m => m.id === remoteDisconnectNoticeId)
+          if (existing < 0) return [...withoutEcho, notice]
+          const copy = [...withoutEcho]
+          copy[existing] = notice
+          return copy
+        })
         if (trimmed && !inputValueRef.current.trim()) setInputValue(trimmed)
-        setMessages(prev => [...prev, {
-          id: `err-disconnect-${Date.now()}`,
-          sessionId,
-          role: 'system' as const,
-          content: 'Remote connection lost — your message was not sent and has been restored to the input box. Reconnecting automatically; please resend once the connection is back.',
-          timestamp: Date.now(),
-        }])
         return
       }
       if (isRemoteConnected) {
