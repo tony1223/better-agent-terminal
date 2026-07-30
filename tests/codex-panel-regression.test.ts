@@ -420,6 +420,39 @@ async function main() {
     )
   }
 
+  // The archive is append-only, and the flush effect assumed `messages` only
+  // ever grows by new rows. Hydrating breaks that assumption — it replaces the
+  // list with the host's last 300, whose head is already archived — and the
+  // hydrate effect re-runs on every remote reconnect, so the same window was
+  // appended once per reconnect, permanently, and rendered as a repeated reply.
+  for (const panel of ['ClaudeAgentPanel', 'CodexAgentPanel']) {
+    const panelSource = await readFile(`renderer/src/components/${panel}.tsx`, 'utf8')
+    assert.match(
+      panelSource,
+      /messages\.slice\(0, excess\)\.filter\(m => !archivedIdsRef\.current\.has\(m\.id\)\)/,
+      `${panel} must not re-archive rows it has already flushed`,
+    )
+    assert.match(
+      panelSource,
+      /archivedCountRef\.current \+= toArchive\.length/,
+      `${panel}'s archived count should track what was written, not what was dropped`,
+    )
+    assert.match(
+      panelSource,
+      /dedupeMessagesById\(\[\.\.\.loadedArchive, \.\.\.messages\]\)/,
+      `${panel} should dedupe the archived+live merge`,
+    )
+    // The dep is what resyncs streaming state and metadata after a reconnect.
+    // Dropping it would leave a panel stuck on whatever it showed when the
+    // tunnel died — the fix for the duplicate archiving is the id filter above,
+    // not removing this.
+    assert.match(
+      panelSource,
+      /\[sessionId, cwd, isCodexSession, codexSandboxMode, codexApprovalPolicy, isRemoteConnected\]/,
+      `${panel} should still re-hydrate when the remote connection returns`,
+    )
+  }
+
   console.log('Codex panel regression: passed')
 }
 

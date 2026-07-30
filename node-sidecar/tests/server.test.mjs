@@ -4180,7 +4180,13 @@ async function endToEndInDataDir(isolatedDataDir) {
 
   // Poll until we see all 5 replies. Events go to a separate accumulator.
   const events = replies // alias for readability — we filter below
-  const deadline = Date.now() + 5000
+  // 5s was not enough and made this leg flaky. Measured across six runs, the
+  // last reply in is always claude.authStatus at 3.0-5.0s (it is the only one
+  // here that goes looking for credentials); ping/startSession/sendMessage all
+  // land inside 3.2s. So the budget was sitting right on top of the slowest
+  // reply's normal range, and any load at all pushed it over — failing with
+  // "got 4", which reads like sendMessage broke when nothing had.
+  const deadline = Date.now() + 20000
   while (replies.filter(r => r.id !== undefined).length < 5 && Date.now() < deadline) {
     await new Promise(r => setTimeout(r, 25))
   }

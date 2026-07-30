@@ -18,6 +18,7 @@ import { WorktreeMergedChip } from './WorktreeMergedChip'
 import { buildMessageStream } from './messageSkip'
 import { filenameForPastedImage, maybeResizeImageDataUrl, readFileAsDataUrl } from '../utils/file-data-url'
 import { extractInterruptedContinuation } from '../utils/interrupted-prompt'
+import { dedupeMessagesById } from '../utils/message-dedupe'
 import { isTauriNativeDropInside, listenTauriNativeDrop } from '../utils/tauri-native-drop'
 import { useRemoteDropUpload } from '../utils/remote-drop-upload'
 import { RemoteUploadConfirmDialog } from './RemoteUploadConfirmDialog'
@@ -616,6 +617,11 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
   const [isLoadingMore, setIsLoadingMore] = useState(false)
   const archivedCountRef = useRef(0)
   const loadedFromArchiveRef = useRef(0)
+  // Ids this panel has already flushed to the archive, so a re-hydrated window
+  // is not written a second time. Cleared wherever the archive file itself is
+  // cleared; the host dedupes too, so the worst case for a stale entry here is
+  // a redundant append, never a lost row.
+  const archivedIdsRef = useRef<Set<string>>(new Set())
   const archivingRef = useRef(false)
   const VISIBLE_LIMIT = 120
   const ARCHIVE_TRIGGER = 160 // archive when exceeding this
@@ -890,8 +896,13 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
     }
   }, [streamingThinking, showThinking])
 
-  // Combine archived + live messages for rendering and scanning
-  const allMessages = useMemo(() => [...loadedArchive, ...messages], [loadedArchive, messages])
+  // Combine archived + live messages for rendering and scanning. Deduped:
+  // the live window's head is usually already in the archive, and archives
+  // written before the append became idempotent hold repeated rows.
+  const allMessages = useMemo(
+    () => dedupeMessagesById([...loadedArchive, ...messages]),
+    [loadedArchive, messages],
+  )
   messageCountRef.current = allMessages.length
   // Mirror for event handlers (subscribed once per session) that need the
   // current message list without re-subscribing on every message.
@@ -932,6 +943,11 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
         )
         archivedCountRef.current = result.total || archived.length
         loadedFromArchiveRef.current = rawMessages.length
+        // Anything read back is on disk by definition. A fresh mount starts
+        // with no record of what it archived in a previous life, and this is
+        // the cheapest way to recover part of it — enough that re-hydrating
+        // does not re-flush the tail the panel just read.
+        for (const m of archived) archivedIdsRef.current.add(m.id)
         setLoadedArchive(archived)
         setHasMoreArchived(result.hasMore)
       })
@@ -1063,10 +1079,24 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
     if (archivingRef.current || messages.length <= ARCHIVE_TRIGGER) return
     archivingRef.current = true
     const excess = messages.length - VISIBLE_LIMIT
-    const toArchive = messages.slice(0, excess)
+    // This effect assumed `messages` only ever grows by new rows. It does not:
+    // hydrating (on mount, and again on every remote reconnect — isRemoteConnected
+    // is a dep of the hydrate effect) replaces it with the host's last 300, whose
+    // head is already archived. Flushing that window unfiltered appended a second
+    // copy per hydrate, permanently, and the duplicates then rendered as repeated
+    // replies. Archive only what has not been archived before.
+    const toArchive = messages.slice(0, excess).filter(m => !archivedIdsRef.current.has(m.id))
     setMessages(prev => prev.slice(excess))
-    archivedCountRef.current += excess
+    // Counts rows in the archive file, which is what the "load older" label
+    // reports — so it advances by what is actually written, not by what was
+    // dropped from the visible window.
+    archivedCountRef.current += toArchive.length
     setHasMoreArchived(true)
+    if (toArchive.length === 0) {
+      archivingRef.current = false
+      return
+    }
+    for (const m of toArchive) archivedIdsRef.current.add(m.id)
     host.claude.archiveMessages(sessionId, toArchive)
       .catch((err) => {
         host.debug.log?.('[ClaudeAgentPanel] archiveMessages failed:', String(err))
@@ -1101,6 +1131,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
       if (result.messages.length > 0) {
         const archived = result.messages.filter(isMessageItem)
         loadedFromArchiveRef.current += result.messages.length
+        for (const m of archived) archivedIdsRef.current.add(m.id)
         setLoadedArchive(prev => [...archived, ...prev])
         setHasMoreArchived(result.hasMore)
         // Preserve scroll position after prepending
@@ -1169,6 +1200,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
             setLoadedArchive([])
             archivedCountRef.current = 0
             loadedFromArchiveRef.current = 0
+            archivedIdsRef.current = new Set()
             setHasMoreArchived(false)
             host.claude.clearArchive(sessionId).catch(() => {})
           }
@@ -1712,6 +1744,9 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
           archivedCountRef.current = archiveHistoryItems.length
           loadedFromArchiveRef.current = 0
           setHasMoreArchived(false)
+          // The archive is about to be replaced wholesale, so what this panel
+          // believes it has written is void either way.
+          archivedIdsRef.current = new Set()
           window.setTimeout(() => {
             const resetArchive = host.claude.clearArchive(sessionId)
             if (archiveHistoryItems.length === 0) {
@@ -1722,6 +1757,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
               .then(() => host.claude.archiveMessages(sessionId, archiveHistoryItems))
               .then((ok) => {
                 if (ok) {
+                  for (const m of archiveHistoryItems) archivedIdsRef.current.add(m.id)
                   setHasMoreArchived(true)
                 } else {
                   archivedCountRef.current = 0
@@ -2540,6 +2576,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
     setLoadedArchive([])
     archivedCountRef.current = 0
     loadedFromArchiveRef.current = 0
+    archivedIdsRef.current = new Set()
     setHasMoreArchived(false)
     setStreamingText('')
     setStreamingThinking('')
@@ -2643,7 +2680,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
 
     // Trim local message state: keep messages BEFORE the Nth user prompt.
     // Splice allMessages (loadedArchive + messages) at the cutoff and redistribute.
-    const combined = [...loadedArchive, ...messages]
+    const combined = dedupeMessagesById([...loadedArchive, ...messages])
     let userPromptCount = 0
     let cutoffIdx = combined.length
     for (let i = 0; i < combined.length; i++) {
@@ -2805,6 +2842,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
       setLoadedArchive([])
       archivedCountRef.current = 0
       loadedFromArchiveRef.current = 0
+      archivedIdsRef.current = new Set()
       setHasMoreArchived(false)
       setStreamingText('')
       setStreamingThinking('')

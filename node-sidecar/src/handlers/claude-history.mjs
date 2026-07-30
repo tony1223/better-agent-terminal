@@ -516,6 +516,43 @@ registerHandler('claude.fetchSubagentMessages', async (params) => {
 // Pure fs ops — no SDK involvement. Path validation is per-session-id
 // only (alpha-numeric segment) so a malicious sessionId can't escape
 // the archive dir; sessionId is a UUID-or-similar string anyway.
+// Ids already on disk, per session. The archive is append-only, and the
+// renderer flushes whatever is currently off-screen — an assumption that holds
+// only while `messages` grows by new rows. It does not: hydrating a panel
+// replaces `messages` with the host's last 300, which already includes archived
+// rows, so every hydrate used to append a second copy of that window. A remote
+// reconnect re-hydrates, so the file grew by a window per reconnect, forever,
+// and the same message rendered N times.
+//
+// Deduping here rather than only in the renderer is deliberate: this is the one
+// place every client funnels through, so old clients are covered too, and the
+// guarantee survives a renderer that loses its own bookkeeping across remounts.
+// First write wins — a re-archived row is by definition already stored.
+const archivedIdsBySession = new Map()
+
+// Seeded once per session from the file, then maintained in memory. Returns a
+// promise (not a Set) so concurrent flushes share one read instead of racing to
+// seed and each concluding the file was empty.
+function archivedIds(sessionId) {
+  let pending = archivedIdsBySession.get(sessionId)
+  if (!pending) {
+    pending = readFile(archiveFilePath(sessionId), 'utf-8').then(raw => {
+      const ids = new Set()
+      for (const line of raw.split('\n')) {
+        if (!line.trim()) continue
+        try {
+          const id = JSON.parse(line)?.id
+          if (typeof id === 'string') ids.add(id)
+        } catch { /* malformed line — nothing to dedupe against */ }
+      }
+      return ids
+      // ENOENT simply means nothing has been archived yet.
+    }).catch(() => new Set())
+    archivedIdsBySession.set(sessionId, pending)
+  }
+  return pending
+}
+
 registerHandler('claude.archiveMessages', async (params) => {
   const sessionId = params?.sessionId
   const messages = params?.messages
@@ -524,8 +561,24 @@ registerHandler('claude.archiveMessages', async (params) => {
   const dir = join(resolveDataDir(), 'message-archives')
   try {
     await mkdir(dir, { recursive: true })
-    const lines = messages.map(m => JSON.stringify(m)).join('\n') + (messages.length > 0 ? '\n' : '')
-    if (lines) await appendFile(archiveFilePath(sessionId), lines, 'utf-8')
+    const seen = await archivedIds(sessionId)
+    // Ids staged separately and only committed once the write lands. Marking
+    // them seen up front would make a failed append permanent: the retry would
+    // filter out the very rows that never reached disk.
+    const staged = new Set()
+    // A row with no id cannot be deduped, so it is written through rather than
+    // dropped: losing history is worse than storing it twice.
+    const fresh = messages.filter(m => {
+      const id = m?.id
+      if (typeof id !== 'string') return true
+      if (seen.has(id) || staged.has(id)) return false
+      staged.add(id)
+      return true
+    })
+    if (fresh.length === 0) return true
+    const lines = fresh.map(m => JSON.stringify(m)).join('\n') + '\n'
+    await appendFile(archiveFilePath(sessionId), lines, 'utf-8')
+    for (const id of staged) seen.add(id)
     return true
   } catch (err) {
     logWarn(`claude.archiveMessages: ${err instanceof Error ? err.message : String(err)}`)
@@ -562,6 +615,10 @@ registerHandler('claude.loadArchived', async (params) => {
 registerHandler('claude.clearArchive', async (params) => {
   const sessionId = params?.sessionId
   if (typeof sessionId !== 'string' || !sessionId) return false
+  // Drop the id cache first. Leaving it behind would make the dedupe above
+  // reject the rows of the fresh archive that replaces this one — clearArchive
+  // is immediately followed by a re-archive on the history-reset path.
+  archivedIdsBySession.delete(sessionId)
   try {
     await unlink(archiveFilePath(sessionId))
   } catch {
