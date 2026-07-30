@@ -453,6 +453,45 @@ async function main() {
     )
   }
 
+  // The notification snapshot has no isStreaming/messages/pending-prompt
+  // fields, so answering a session-state probe from it reports a mid-turn
+  // session as idle (connect to a working host, watch the panel sit silent)
+  // and hides the prompt a blocked turn is waiting on. Both probes must reach
+  // the sidecar, which owns the live session.
+  const remoteServerSource = await readFile('src-tauri/src/remote_server.rs', 'utf8')
+  assert.doesNotMatch(
+    remoteServerSource,
+    /"claude:get-session-state" =>[\s\S]{0,900}?session_state_from_notification_snapshot/,
+    'the remote session-state probe must not answer from the notification snapshot',
+  )
+  const claudeCmdSource = await readFile('src-tauri/src/commands/claude.rs', 'utf8')
+  assert.match(
+    claudeCmdSource,
+    /let from_sidecar = self\s*\n\s*\.sidecar_call\(\s*\n\s*"claude\.getSessionState",/,
+    'the local session-state probe must ask the sidecar rather than stop at the snapshot',
+  )
+  assert.match(
+    claudeCmdSource,
+    /\(Ok\(Value::Null\), Some\(session\)\) \| \(Err\(_\), Some\(session\)\) =>/,
+    'the notification snapshot should remain a fallback for when the sidecar has nothing',
+  )
+  for (const panel of ['ClaudeAgentPanel', 'CodexAgentPanel']) {
+    const panelSource = await readFile(`renderer/src/components/${panel}.tsx`, 'utf8')
+    // Remote pairs versions independently, so a new client still meets hosts
+    // whose probe omits these. Coercing a missing isStreaming to false is what
+    // turns the indicator off on a host that is mid-turn.
+    assert.match(
+      panelSource,
+      /if \(typeof existingState\.isStreaming === 'boolean'\) \{\s*\n\s*setIsStreaming\(existingState\.isStreaming\)/,
+      `${panel} must not read a missing isStreaming as "not streaming"`,
+    )
+    assert.doesNotMatch(
+      panelSource,
+      /setIsStreaming\(!!existingState\.isStreaming\)/,
+      `${panel} should no longer coerce an absent isStreaming to false`,
+    )
+  }
+
   console.log('Codex panel regression: passed')
 }
 

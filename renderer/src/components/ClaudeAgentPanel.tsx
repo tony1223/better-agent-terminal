@@ -1934,9 +1934,17 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
         } else if (host.debug.isDebugMode === true) {
           dlog(`${stag} skip empty getSessionState messages; preserving rendered history count=${messageCountRef.current} remote=${isRemoteConnected}`)
         }
-        setIsStreaming(!!existingState.isStreaming)
-        setStreamingText(existingState.streamingText || '')
-        setStreamingThinking(existingState.streamingThinking || '')
+        // Only when the host actually reported it. These three describe one
+        // thing — the turn in flight — so a payload that does not know one does
+        // not know any, and coercing a missing isStreaming to false silences a
+        // host that is mid-turn. Remote pairs versions independently, so this
+        // also has to hold against an older host whose session-state probe
+        // answers from a snapshot that carries none of these fields.
+        if (typeof existingState.isStreaming === 'boolean') {
+          setIsStreaming(existingState.isStreaming)
+          setStreamingText(existingState.streamingText || '')
+          setStreamingThinking(existingState.streamingThinking || '')
+        }
         adoptHostPendingPrompts(existingState as unknown as ClaudeSessionState)
         const meta = await host.claude.getSessionMeta(sessionId).catch(() => null)
         if (cancelled || !meta) return

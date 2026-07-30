@@ -3037,16 +3037,27 @@ impl ClaudeRuntimeRouter {
         if is_codex_agent_preset_id(agent_preset.as_deref()) {
             return Ok(Value::Null);
         }
-        if let Some(session) = notification_cmd::get_agent_session_snapshot(&self.app, &session_id)
-        {
-            return Ok(session_state_from_notification_snapshot(&session));
+        // The snapshot is a fallback, never a substitute. It carries no
+        // isStreaming, streamingText, messages or pending-prompt fields at all
+        // (see AgentNotificationSession), and a caller reads a missing
+        // isStreaming as false — so preferring it reported a mid-turn session
+        // as idle, and hid the question a blocked turn is waiting on from the
+        // one probe that exists to recover it. Ask the sidecar, which owns
+        // every live Claude session, and fall back only when it has nothing.
+        let snapshot = notification_cmd::get_agent_session_snapshot(&self.app, &session_id);
+        let from_sidecar = self
+            .sidecar_call(
+                "claude.getSessionState",
+                json!({ "sessionId": session_id }),
+                DEFAULT_TIMEOUT,
+            )
+            .await;
+        match (from_sidecar, snapshot) {
+            (Ok(Value::Null), Some(session)) | (Err(_), Some(session)) => {
+                Ok(session_state_from_notification_snapshot(&session))
+            }
+            (result, _) => result,
         }
-        self.sidecar_call(
-            "claude.getSessionState",
-            json!({ "sessionId": session_id }),
-            DEFAULT_TIMEOUT,
-        )
-        .await
     }
 
     async fn session_meta(

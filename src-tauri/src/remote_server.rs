@@ -1976,17 +1976,22 @@ fn invoke_rust_for_remote(
             Some(route) => route.map(|(codex, session_id)| {
                 codex.get_session_state(&session_id).unwrap_or(Value::Null)
             }),
-            None => match string_param(params, "sessionId", channel) {
-                Ok(session_id) => {
-                    match notification_cmd::get_agent_session_snapshot(&ctx, &session_id) {
-                        Some(session) => {
-                            Ok(claude_cmd::session_state_from_notification_snapshot(&session))
-                        }
-                        None => return None,
-                    }
-                }
-                Err(err) => Err(err),
-            },
+            // Unlike the meta probe below, this one must NOT answer from the
+            // notification snapshot. That snapshot has no isStreaming,
+            // streamingText, messages or pending-prompt fields at all (see
+            // AgentNotificationSession), and a client reads a missing
+            // isStreaming as false. So answering from it actively told every
+            // remote client that a mid-turn session was idle -- connect to a
+            // host that is working and the panel sits silent -- and hid the
+            // question a blocked turn was waiting on, which is the whole point
+            // of returning pendingAskUser/pendingPermission here.
+            //
+            // Falling through to the sidecar is not a downgrade: the sidecar
+            // owns every live Claude session, so it either knows the session
+            // and answers with all of the above, or nothing on this host does
+            // and Null is the honest answer rather than a stub that claims the
+            // session exists but is doing nothing.
+            None => return None,
         },
         "claude:get-session-meta" => match codex_for_remote_session(ctx, channel, params) {
             Some(route) => route.map(|(codex, session_id)| {
