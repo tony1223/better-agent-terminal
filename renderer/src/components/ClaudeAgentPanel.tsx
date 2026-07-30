@@ -109,15 +109,15 @@ function isAgentSessionCollision(message: string): boolean {
   return message.includes('BAT_AGENT_SESSION_COLLISION')
 }
 
-// The host caps the claude.sendMessage RPC at SESSION_TIMEOUT (~5 min), but a
-// long agent turn (e.g. one that triggers a slow auto-compaction) legitimately
-// runs past that: it keeps streaming over claude:* events and completes on
-// claude:turn-end. A timeout on the send RPC therefore does NOT mean the turn
-// failed — it only means the turn's result frame has not arrived yet. Treat it
-// as non-fatal so we don't stop the UI mid-turn; the events drive completion.
-// The remote path surfaces the same situation as "Remote invoke timeout:
-// agent:send-message" (the remote client's per-invoke deadline), so treat that
-// the same way — the turn is still alive on the host and driven by events.
+// The host caps the claude.sendMessage RPC at SESSION_TIMEOUT (~5 min). Hosts
+// that ack on receipt no longer hit that for a long turn, but two cases still
+// can: a host older than that split (which replies only at turn end), and a
+// send sitting in the queue behind a turn that itself runs past the deadline.
+// Either way the timeout does NOT mean the send failed — the turn is alive on
+// the host and streaming over claude:* events, completing on claude:turn-end.
+// Treat it as non-fatal so we don't stop the UI mid-turn. The remote path
+// surfaces the same situation as "Remote invoke timeout: agent:send-message"
+// (the remote client's per-invoke deadline), so treat that the same way.
 function isSendMessageTimeout(message: string): boolean {
   return /timeout waiting for claude\.sendMessage/i.test(message)
     || /Remote invoke timeout:\s*(agent|claude):send-message/i.test(message)
@@ -1230,9 +1230,11 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
             // (emitUserEcho reuses clientMessageId), so this branch — not the
             // content match below — is what a remote send actually lands in.
             // Returning early here left the optimistic message ghosted until
-            // claude.sendMessage resolved, and that resolves when the *turn*
-            // ends, not when the prompt is taken: the message the agent was
-            // visibly answering stayed greyed out for the whole turn.
+            // claude.sendMessage resolved, which on hosts that reply at turn
+            // end rather than on receipt meant the message the agent was
+            // visibly answering stayed greyed out for the whole turn. The echo
+            // is emitted before the prompt is even queued, so it remains the
+            // earliest proof of receipt even against a host that acks promptly.
             const existing = nextPrev[existingMessageIndex]
             if (!isToolCall(existing) && (existing as ClaudeMessage).status) {
               const copy = [...nextPrev]
@@ -3052,11 +3054,9 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
         return
       }
       if (isRemoteConnected) {
-        // Backstop, not the normal path: this resolves when the turn ends, not
-        // when the host takes the prompt (the sidecar awaits live.push()). The
-        // user echo clears the ghost long before this, and is the only thing
-        // that does so promptly — but keep this for a turn that produces no
-        // echo at all, so nothing can stay ghosted forever.
+        // The host acks on receipt now, so this lands promptly and is a real
+        // de-ghosting path rather than a backstop. Hosts older than the split
+        // still reply at turn end; the user echo clears the ghost for those.
         setMessages(prev => prev.map(m => (!isToolCall(m) && m.id === userMsgId) ? { ...m, status: 'sent' as const } : m))
       }
     } catch (err) {

@@ -22,6 +22,17 @@ const here = dirname(fileURLToPath(import.meta.url))
 const serverPath = resolve(here, '..', 'src', 'server.mjs')
 const CLAUDE_NATIVE_VERSION = runtimeCatalog.claude.version
 
+// claude.sendMessage acks on receipt, so awaiting its reply no longer means the
+// turn finished. The tail that clears session.streaming runs behind a
+// setImmediate, which is queued *after* the caller's own — so yield repeatedly
+// rather than once. Callers still assert on the finished state afterwards, so a
+// turn that never lands fails there instead of being papered over here.
+async function settleTurn(session, attempts = 20) {
+  for (let i = 0; i < attempts && session?.streaming; i += 1) {
+    await new Promise(resolve => setImmediate(resolve))
+  }
+}
+
 async function inProcess() {
   const mod = await import('../src/server.mjs')
   const { dispatch, handlers, registerHandler } = mod
@@ -1190,6 +1201,7 @@ async function inProcess() {
     assert.equal(events[5].payload.message.role, 'assistant')
     assert.equal(events[5].payload.message.content, 'hello back')
     assert.ok(events[5].payload.message.id.startsWith('assistant-'))
+    await settleTurn(mod.sessions.get('send-1'))
     const sendState = await dispatch({ jsonrpc: '2.0', id: 2211, method: 'claude.getSessionState', params: { sessionId: 'send-1' } })
     assert.equal(sendState.result.messages[0].role, 'user')
     assert.equal(sendState.result.messages[0].content, 'hi')
@@ -1215,6 +1227,7 @@ async function inProcess() {
     const staleFlagSend = await dispatch({ jsonrpc: '2.0', id: 223, method: 'claude.sendMessage',
       params: { sessionId: 'send-1', prompt: 'parallel' } })
     assert.equal(staleFlagSend.result.ok, true)
+    await settleTurn(s)
     assert.equal(s.streaming, false)
   } finally {
     __setSdkOverrideForTests(undefined)
@@ -1253,6 +1266,7 @@ async function inProcess() {
     const multiReply = await dispatch({ jsonrpc: '2.0', id: 2241, method: 'claude.sendMessage',
       params: { sessionId: 'send-multi', prompt: 'hi' } })
     assert.equal(multiReply.result.ok, true)
+    await settleTurn(mod.sessions.get('send-multi'))
     const statusRuntime = multiCaptured
       .filter(c => c.name === 'claude:status' && c.payload?.sessionId === 'send-multi')
       .map(e => e.payload.meta.runtimeStatus)
@@ -1299,8 +1313,11 @@ async function inProcess() {
       params: { sessionId: 'send-error-1', options: { cwd: '/x' } } })
     const sendReply = await dispatch({ jsonrpc: '2.0', id: 2232, method: 'claude.sendMessage',
       params: { sessionId: 'send-error-1', prompt: 'hi' } })
-    assert.equal(sendReply.result.ok, false)
-    assert.match(sendReply.result.error, /No conversation found/)
+    // The reply is the receipt, so a turn that fails *after* the prompt was
+    // taken cannot report through it. claude:error is what the renderer listens
+    // on, and it has to carry the same useful text the reply used to.
+    assert.equal(sendReply.result.ok, true)
+    await settleTurn(mod.sessions.get('send-error-1'))
     const errorEvent = errorCaptured.find(e => e.name === 'claude:error')
     assert.ok(errorEvent, 'non-success result must emit claude:error')
     assert.match(errorEvent.payload.error, /No conversation found/)
@@ -1335,7 +1352,13 @@ async function inProcess() {
       params: { sessionId: 'send-effort-1', effort: 'max' } })
     const effortReply = await dispatch({ jsonrpc: '2.0', id: 2252, method: 'claude.sendMessage',
       params: { sessionId: 'send-effort-1', prompt: 'hi' } })
-    assert.match(effortReply.result.error, /switched to "high"/)
+    assert.equal(effortReply.result.ok, true, 'the prompt was taken before the SDK rejected the effort level')
+    await settleTurn(mod.sessions.get('send-effort-1'))
+    // Which level it fell back to is guidance the user needs to see, so it has
+    // to reach them on claude:error now that the reply is only a receipt.
+    const effortError = effortCaptured.find(e => e.name === 'claude:error')
+    assert.ok(effortError, 'a rejected effort level must emit claude:error')
+    assert.match(effortError.payload.error, /switched to "high"/)
     const effortState = await dispatch({ jsonrpc: '2.0', id: 2253, method: 'claude.getSessionState',
       params: { sessionId: 'send-effort-1' } })
     assert.equal(effortState.result.effort, 'high', 'session must downgrade off the rejected level')
@@ -1383,6 +1406,7 @@ async function inProcess() {
     const r2 = await dispatch({ jsonrpc: '2.0', id: 226, method: 'claude.sendMessage',
       params: { sessionId: 'stream-1', prompt: 'second' } })
     assert.equal(r2.result.ok, true)
+    await settleTurn(mod.sessions.get('stream-1'))
     assert.equal(fakeSdkStreaming.queryCalls, 1, 'second turn should reuse the live sdk.query')
     const queryArgs = persistentCaptured.filter(c => c.name === '__queryArgs')
     assert.equal(queryArgs[0].payload.resume, null)
@@ -3163,6 +3187,7 @@ async function inProcess() {
         params: { sessionId: 'bpl-1', options: { cwd: '/p', permissionMode: 'bypassPlan' } } })
       await dispatch({ jsonrpc: '2.0', id: 278, method: 'claude.sendMessage',
         params: { sessionId: 'bpl-1', prompt: 'go' } })
+      await settleTurn(mod.sessions.get('bpl-1'))
       assert.equal(sentMode, 'plan', 'bypassPlan is sidecar-only and must reach the SDK as plain plan')
       assert.equal(mod.sessions.get('bpl-1').permissionMode, 'bypassPlan',
         'the CLI echoing back the mode we sent is agreement, not a downgrade')
@@ -3194,6 +3219,7 @@ async function inProcess() {
         params: { sessionId: 'dg-1', options: { cwd: '/p', permissionMode: 'dontAsk' } } })
       await dispatch({ jsonrpc: '2.0', id: 280, method: 'claude.sendMessage',
         params: { sessionId: 'dg-1', prompt: 'go' } })
+      await settleTurn(mod.sessions.get('dg-1'))
       assert.equal(mod.sessions.get('dg-1').permissionMode, 'default',
         'a mode the CLI genuinely would not honour must be adopted, so the button stops '
         + 'claiming something that is not in force')
@@ -3499,6 +3525,7 @@ async function inProcess() {
     // otherwise reports millions of context tokens (statusline read "ctx 778%"
     // of a 300K window for a session actually sitting at ~77K).
     await dispatch({ jsonrpc: '2.0', id: 292, method: 'claude.sendMessage', params: { sessionId: 'cu-1', prompt: 'hi' } })
+    await settleTurn(mod.sessions.get('cu-1'))
     const postReply = await dispatch({ jsonrpc: '2.0', id: 293, method: 'claude.getContextUsage', params: { sessionId: 'cu-1' } })
     const cu = postReply.result
     assert.ok(cu, 'expected non-null context usage after turn')
@@ -3559,6 +3586,7 @@ async function inProcess() {
   try {
     await dispatch({ jsonrpc: '2.0', id: 280, method: 'claude.startSession', params: { sessionId: 'stream-1', options: { cwd: '/x' } } })
     await dispatch({ jsonrpc: '2.0', id: 281, method: 'claude.sendMessage', params: { sessionId: 'stream-1', prompt: 'hi' } })
+    await settleTurn(mod.sessions.get('stream-1'))
     const streamEvents = streamCaptured.filter(e => e.name === 'claude:stream')
     // 2 text deltas + 1 thinking delta = 3 stream events. message_start
     // and ping must NOT produce a stream event.
@@ -3605,7 +3633,11 @@ async function inProcess() {
     assert.equal(liveState.result.isStreaming, true)
     assert.equal(liveState.result.streamingText, 'partial')
     releaseLiveStream()
+    // liveSend was already answered when the prompt was taken, back before the
+    // first delta — so it is settleTurn, not this await, that gets us past the
+    // turn's end here.
     await liveSend
+    await settleTurn(mod.sessions.get('stream-state-1'))
     const doneState = await dispatch({ jsonrpc: '2.0', id: 285, method: 'claude.getSessionState', params: { sessionId: 'stream-state-1' } })
     assert.equal(doneState.result.isStreaming, false)
     assert.equal(doneState.result.streamingText, '')
@@ -3643,6 +3675,7 @@ async function inProcess() {
   try {
     await dispatch({ jsonrpc: '2.0', id: 290, method: 'claude.startSession', params: { sessionId: 'rl-1', options: { cwd: '/x' } } })
     await dispatch({ jsonrpc: '2.0', id: 291, method: 'claude.sendMessage', params: { sessionId: 'rl-1', prompt: 'hi' } })
+    await settleTurn(mod.sessions.get('rl-1'))
     const rl = rateLimitCaptured.filter(e => e.name === 'claude:rate-limit')
     assert.equal(rl.length, 2, `expected 2 rate-limit emits (one full, one no-utilization), got ${rl.length}`)
     // First emit — full info, resetsAt converted to ms.
@@ -3768,6 +3801,7 @@ async function inProcess() {
       params: { sessionId: 'tc-1', options: { cwd: '/x' } } })
     await dispatch({ jsonrpc: '2.0', id: 241, method: 'claude.sendMessage',
       params: { sessionId: 'tc-1', prompt: 'list files' } })
+    await settleTurn(mod.sessions.get('tc-1'))
     const toolUseEvents = tcCaptured.filter(e => e.name === 'claude:tool-use')
     const toolResultEvents = tcCaptured.filter(e => e.name === 'claude:tool-result')
     assert.equal(toolUseEvents.length, 2, `expected 2 tool-use events, got ${toolUseEvents.length}`)

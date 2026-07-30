@@ -19,6 +19,15 @@
 // SDK-unavailable fallback (releases without bundled node_modules)
 // preserves the old stub so the renderer doesn't hang on a never-
 // resolving promise.
+//
+// The RPC resolves on receipt, not on completion: {ok:true, accepted:true}
+// once the prompt reaches the SDK. The turn's outcome arrives on the events
+// above — claude:turn-end already distinguishes completed / error /
+// interrupted / aborted, so nothing needs the reply to carry it. What still
+// comes back as a real result is anything that settles before the push:
+// {ok:false, cancelled:true} for a queued send Esc killed, a stopped session,
+// the SDK stub, and an ensureLiveQuery failure (whose 'session has no cwd'
+// the renderer reads to retry after a runtime restart).
 
 import { registerHandler, sendEvent } from '../lib/protocol.mjs'
 import {
@@ -1048,7 +1057,10 @@ export function closeLiveQuery(s) {
   if (s.activeTasks) s.activeTasks.clear()
 }
 
-async function performSendMessage(params) {
+// `onAccepted` is called once the prompt has been handed to the SDK, which is
+// what answers the sendMessage RPC. Everything after that point — success,
+// error, interrupt — reaches the renderer as claude:* events instead.
+async function performSendMessage(params, onAccepted) {
   const sessionId = params?.sessionId
   if (typeof sessionId !== 'string' || !sessionId) {
     throw new Error('claude.sendMessage: missing sessionId')
@@ -1113,7 +1125,17 @@ async function performSendMessage(params) {
   // Fresh stderr tail per turn so an error is explained by THIS turn's output.
   s.claudeStderrTail = ''
   try {
-    const result = await live.push(userMessage)
+    // Acknowledge the request here, not after the turn. LiveQuery.push()
+    // enqueues synchronously — it appends to the prompt iterable and wakes it
+    // before returning — so once it has returned, the host demonstrably has
+    // the prompt, which is all the caller asked. Awaiting the turn first
+    // conflated "received" with "finished": a turn outliving the host's 300s
+    // request deadline looked like a lost send, and a remote client's message
+    // stayed ghosted for the whole turn. A push into an already-closed query
+    // enqueues nothing, so that one is left for the caller to see as an error.
+    const pushed = live.push(userMessage)
+    if (!live.isClosed) onAccepted?.()
+    const result = await pushed
     // Give SDK builds that end the generator immediately after a result a
     // chance to flip LiveQuery.isClosed before the next queued send starts.
     await new Promise(resolve => setImmediate(resolve))
@@ -1233,6 +1255,19 @@ registerHandler('claude.sendMessage', async (params) => {
   // token can't affect an already-queued one.
   const cancelToken = { cancelled: false }
   s.pendingSendCancel = cancelToken
+  // Two settle points, deliberately: `accepted` answers the RPC as soon as the
+  // prompt is in the SDK's hands, while `queued` stays the turn-long promise
+  // that the next send chains behind. Splitting them fixes the acknowledgement
+  // without touching the queueing — a send still waits its turn, Esc can still
+  // cancel one that is only queued, and that cancellation is still reported to
+  // the caller (it happens before the push, so the ack has not fired yet).
+  let markAccepted
+  let acked = false
+  const accepted = new Promise(resolve => { markAccepted = resolve })
+  const onAccepted = () => {
+    acked = true
+    markAccepted()
+  }
   const previous = s.sendQueue || Promise.resolve()
   const run = previous.catch(() => {}).then(async () => {
     if (sessions.get(sessionId) !== s) {
@@ -1242,7 +1277,7 @@ registerHandler('claude.sendMessage', async (params) => {
       logInfo(`claude.sendMessage(${sid}): cancelled before it became the active turn`)
       return { ok: false, cancelled: true }
     }
-    return performSendMessage(params)
+    return performSendMessage(params, onAccepted)
   })
   const queued = run.finally(() => {
     if (s.sendQueue === queued) s.sendQueue = null
@@ -1265,7 +1300,28 @@ registerHandler('claude.sendMessage', async (params) => {
       },
     )
   }
-  return queued
+  // Once the ack has won this race nobody is left awaiting `queued`, so a
+  // rejection from it would be an unhandled one — and invisible to the user.
+  // performSendMessage already converts every post-push failure into
+  // claude:error + claude:turn-end and returns normally, so reaching here
+  // means it threw somewhere it did not expect to; report it the same way
+  // rather than letting the UI stream forever.
+  queued.catch(err => {
+    if (!acked) return
+    const errMsg = err instanceof Error ? err.message : String(err)
+    logWarn(`claude.sendMessage(${sid}): failed after acknowledgement: ${errMsg}`)
+    sendEvent('claude:error', { sessionId, error: errMsg })
+    sendEvent('claude:turn-end', { sessionId, payload: { reason: 'error' } })
+  })
+  // Whichever comes first: the prompt being accepted (the normal path) or the
+  // work settling without a push ever happening — a cancelled queue entry, a
+  // stopped session, an SDK stub reply, or ensureLiveQuery failing. Those all
+  // still resolve to their real result, which is what keeps the renderer's
+  // no-cwd recovery retry working.
+  return Promise.race([
+    accepted.then(() => ({ ok: true, accepted: true, queued: wasQueued })),
+    queued,
+  ])
 })
 
 // claude.interruptTurn: soft interrupt (1× Esc). Ends the current turn via

@@ -65,7 +65,7 @@
     "test:bat-server-token-security": "node tests/bat-server-token-security.test.mjs",
     "check:tauri-rust": "cd src-tauri && cargo check --quiet",
     "test:tauri-rust": "cargo test --manifest-path src-tauri/Cargo.toml --lib",
-    "test:sidecar": "node node-sidecar/tests/server.test.mjs && node node-sidecar/tests/claude-auth-login.test.mjs && node node-sidecar/tests/claude-channel-runtime.test.mjs && node node-sidecar/tests/claude-cli.test.mjs && node node-sidecar/tests/claude-cli-runtime.test.mjs && node node-sidecar/tests/harness-noise.test.mjs && node node-sidecar/tests/latency-sample.test.mjs",
+    "test:sidecar": "node node-sidecar/tests/server.test.mjs && node node-sidecar/tests/claude-auth-login.test.mjs && node node-sidecar/tests/claude-channel-runtime.test.mjs && node node-sidecar/tests/claude-cli.test.mjs && node node-sidecar/tests/claude-cli-runtime.test.mjs && node node-sidecar/tests/harness-noise.test.mjs && node node-sidecar/tests/latency-sample.test.mjs && node node-sidecar/tests/claude-send-ack.test.mjs",
     "test:tauri-bundle-prune": "node tests/prune-node-sidecar-modules.test.mjs",
     "test:tauri-resources": "node tests/check-tauri-resources.test.mjs",
     "test:release-asset-names": "node tests/normalize-release-asset-names.test.mjs",
