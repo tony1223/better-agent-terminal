@@ -219,6 +219,13 @@ struct PendingApproval {
     request_id: Value,
     session_id: String,
     connection: Weak<CodexConnection>,
+    /// The `claude:permission-request` payload this approval was announced
+    /// with. That event fires once and is never repeated, so a panel that was
+    /// not subscribed at the time — not mounted yet on this launch, evicted by
+    /// the terminal mount LRU, or a remote client whose tunnel was down — would
+    /// otherwise have no way to learn the turn is waiting on it. Session state
+    /// replays it from here.
+    request_data: Value,
 }
 
 #[derive(Default)]
@@ -5541,6 +5548,7 @@ impl CodexAppServerState {
     }
 
     pub fn get_session_state(&self, session_id: &str) -> Option<Value> {
+        let pending_permission = self.pending_approval_data(session_id);
         self.inner
             .sessions
             .lock()
@@ -5553,8 +5561,22 @@ impl CodexAppServerState {
                     "isStreaming": session.is_running,
                     "streamingText": session.assistant_text,
                     "streamingThinking": session.thinking_text,
+                    "pendingPermission": pending_permission,
                 })
             })
+    }
+
+    /// The approval this session is blocked on, if any, in the same shape the
+    /// one-shot `claude:permission-request` carried. Taken before the sessions
+    /// lock, never while holding it, so the two locks are never nested.
+    fn pending_approval_data(&self, session_id: &str) -> Option<Value> {
+        self.inner
+            .pending_approvals
+            .lock()
+            .expect("codex approvals lock")
+            .values()
+            .find(|pending| pending.session_id == session_id)
+            .map(|pending| pending.request_data.clone())
     }
 
     pub fn get_session_meta(&self, session_id: &str) -> Option<Value> {
@@ -5818,6 +5840,13 @@ impl CodexAppServerState {
                     .and_then(Value::as_str)
                     .map(|host| format!("Needs network access to {host}"))
             });
+        let request_data = json!({
+            "toolUseId": tool_use_id,
+            "toolName": tool_name,
+            "input": input,
+            "suggestions": [],
+            "decisionReason": decision_reason,
+        });
         self.inner
             .pending_approvals
             .lock()
@@ -5828,6 +5857,7 @@ impl CodexAppServerState {
                     request_id,
                     session_id: session_id.clone(),
                     connection: connection.clone(),
+                    request_data: request_data.clone(),
                 },
             );
         log_codex(
@@ -5840,13 +5870,7 @@ impl CodexAppServerState {
             "claude:permission-request",
             &session_id,
             "data",
-            json!({
-                "toolUseId": tool_use_id,
-                "toolName": tool_name,
-                "input": input,
-                "suggestions": [],
-                "decisionReason": decision_reason,
-            }),
+            request_data,
         );
     }
 
@@ -8256,5 +8280,52 @@ mod tests {
         assert_eq!(found, exact_match);
 
         fs::remove_dir_all(root).ok();
+    }
+
+    // claude:permission-request is announced once and never repeated, so a
+    // panel that was not mounted at that instant could never learn the turn is
+    // blocked on it. Session state is the recovery path.
+    #[test]
+    fn codex_session_state_reports_the_approval_it_is_blocked_on() {
+        let state = CodexAppServerState::default();
+        state
+            .inner
+            .sessions
+            .lock()
+            .expect("codex sessions lock")
+            .insert("session-1".to_string(), test_codex_session());
+
+        assert_eq!(
+            state.get_session_state("session-1").expect("state")["pendingPermission"],
+            Value::Null,
+            "a session blocked on nothing must report no pending approval"
+        );
+
+        let request_data = json!({
+            "toolUseId": "call-1",
+            "toolName": "shell",
+            "input": { "command": "rm -rf build" },
+            "suggestions": [],
+            "decisionReason": "Deletes a directory",
+        });
+        state
+            .inner
+            .pending_approvals
+            .lock()
+            .expect("codex approvals lock")
+            .insert(
+                "call-1".to_string(),
+                PendingApproval {
+                    request_id: json!(7),
+                    session_id: "session-1".to_string(),
+                    connection: Weak::new(),
+                    request_data: request_data.clone(),
+                },
+            );
+
+        let recovered = state.get_session_state("session-1").expect("state");
+        assert_eq!(recovered["pendingPermission"], request_data);
+        // Another session's approval is not this session's problem.
+        assert!(state.get_session_state("session-2").is_none());
     }
 }

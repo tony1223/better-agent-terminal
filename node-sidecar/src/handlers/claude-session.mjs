@@ -579,8 +579,27 @@ registerHandler('claude.getSessionState', async (params) => {
     isStreaming: s.streaming === true,
     streamingText: s.streamingText || '',
     streamingThinking: s.streamingThinking || '',
+    // A prompt the agent is blocked on. claude:ask-user and
+    // claude:permission-request fire once and are never re-sent, so without
+    // these a panel that mounts after the fact shows the question in its
+    // timeline with no way to answer it, and the turn hangs forever. Oldest
+    // first: the agent is blocked on the first one it asked.
+    pendingAskUser: firstPendingData(s.pendingAskUser),
+    pendingPermission: firstPendingData(s.pendingPermissions),
   }
 })
+
+// Only ever one prompt is actually blocking a turn, so hand back the oldest
+// (Map iterates in insertion order) rather than a list the renderer would have
+// to choose from. Entries predating the payload being stored are skipped —
+// replaying a prompt without its questions/input is worse than none.
+function firstPendingData(pending) {
+  if (!(pending instanceof Map)) return null
+  for (const entry of pending.values()) {
+    if (entry?.data) return entry.data
+  }
+  return null
+}
 
 registerHandler('claude.getSessionMeta', async (params) => {
   if (isCodexSession(String(params?.sessionId ?? ''))) return getCodexSessionMeta(params)

@@ -46,6 +46,12 @@ export interface ClaudeSessionState {
   streamingThinking?: string
   totalCost?: number
   totalTokens?: number
+  // A prompt the agent is currently blocked on, echoing the payload of the
+  // claude:ask-user / claude:permission-request event that announced it. Those
+  // events fire once, so this is the only way a panel that was not listening at
+  // the time can find out it owes the agent an answer.
+  pendingAskUser?: unknown
+  pendingPermission?: unknown
 }
 
 // Discriminator helper

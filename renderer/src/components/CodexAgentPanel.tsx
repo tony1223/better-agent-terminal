@@ -3,7 +3,7 @@ import { useState, useEffect, useRef, useCallback, useMemo, Fragment, cloneEleme
 import { flushSync } from 'react-dom'
 import { useTranslation } from 'react-i18next'
 import type { TFunction } from 'i18next'
-import type { ClaudeMessage, ClaudeToolCall } from '../types/claude-agent'
+import type { ClaudeMessage, ClaudeSessionState, ClaudeToolCall } from '../types/claude-agent'
 import { isMessageItem, isToolCall } from '../types/claude-agent'
 import type { CodexApprovalPolicy, CodexEffortLevel, CodexSandboxMode } from '../types'
 import { CLAUDE_EFFORT_MODES, CODEX_APPROVAL_POLICIES, CODEX_EFFORT_LEVELS, CODEX_SANDBOX_MODES, effortLevelForClaudeMode, isUltracodeEffortMode } from '../types'
@@ -1795,6 +1795,26 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
   // Stable per session so a retry replaces the notice rather than stacking one.
   const remoteDisconnectNoticeId = `sys-remote-disconnected-${sessionId}`
 
+  // An approval request is announced once via claude:permission-request and
+  // never repeated, but the turn stays blocked until someone answers. A panel
+  // that was not subscribed at that instant — not mounted yet on this launch,
+  // evicted by the terminal mount LRU, or a remote client whose tunnel was
+  // down — therefore has no way to learn it owes the agent an answer.
+  //
+  // Adopt-only, never clear: an approval the host already resolved cannot be
+  // told apart here from one that just arrived, and a stale card heals itself
+  // on the first click (resolvePermission re-broadcasts the dismiss).
+  const adoptHostPendingPrompts = useCallback((state: ClaudeSessionState | null | undefined) => {
+    const permission = state?.pendingPermission as PendingPermission | null | undefined
+    if (!permission?.toolUseId) return
+    setPendingPermission(prev => {
+      if (prev?.toolUseId === permission.toolUseId) return prev
+      setPermissionFocus(0)
+      setPermissionCustomText('')
+      return permission
+    })
+  }, [])
+
   const previousRemoteConnectedRef = useRef(isRemoteConnected)
   useEffect(() => {
     const wasConnected = previousRemoteConnectedRef.current
@@ -1812,8 +1832,13 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
       setMessages(prev => prev.map(m => (!isToolCall(m) && m.id === remoteDisconnectNoticeId)
         ? { ...m, content: 'Remote connection restored — your message is still in the input box, ready to resend.', timestamp: Date.now() }
         : m))
+      // Anything the host asked while the link was down never reached us, and
+      // it will not be repeated. Ask what it is still blocked on.
+      void host.claude.getSessionState(sessionId)
+        .then(state => adoptHostPendingPrompts(state as unknown as ClaudeSessionState))
+        .catch(() => { /* the poll re-dials; a later reconnect tries again */ })
     }
-  }, [isRemoteConnected, sessionId, remoteDisconnectNoticeId])
+  }, [isRemoteConnected, sessionId, remoteDisconnectNoticeId, adoptHostPendingPrompts])
 
   // Start session on mount (guarded against StrictMode double-mount)
   // If a saved sdkSessionId exists (from a previous /resume), auto-resume that session
@@ -1847,6 +1872,7 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
         setIsStreaming(!!existingState.isStreaming)
         setStreamingText(existingState.streamingText || '')
         setStreamingThinking(existingState.streamingThinking || '')
+        adoptHostPendingPrompts(existingState as unknown as ClaudeSessionState)
         const meta = await host.claude.getSessionMeta(sessionId).catch(() => null)
         if (cancelled || !meta) return
         setSessionMeta(meta as unknown as SessionMeta)

@@ -3,7 +3,7 @@ import { useState, useEffect, useRef, useCallback, useMemo, Fragment, cloneEleme
 import { flushSync } from 'react-dom'
 import { useTranslation } from 'react-i18next'
 import type { TFunction } from 'i18next'
-import type { ClaudeMessage, ClaudeToolCall } from '../types/claude-agent'
+import type { ClaudeMessage, ClaudeSessionState, ClaudeToolCall } from '../types/claude-agent'
 import { isMessageItem, isToolCall } from '../types/claude-agent'
 import type { CodexApprovalPolicy, CodexSandboxMode } from '../types'
 import { CLAUDE_EFFORT_MODES, CODEX_APPROVAL_POLICIES, CODEX_SANDBOX_MODES, EFFORT_LEVELS, effortLevelForClaudeMode, isUltracodeEffortMode } from '../types'
@@ -1812,6 +1812,40 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
   // Stable per session so a retry replaces the notice rather than stacking one.
   const remoteDisconnectNoticeId = `sys-remote-disconnected-${sessionId}`
 
+  // claude:ask-user and claude:permission-request are announced once and never
+  // re-sent, but the agent stays blocked until someone answers. A panel that
+  // was not subscribed at that instant — not mounted yet on this launch,
+  // evicted by the terminal mount LRU, or a remote client whose tunnel was
+  // down — therefore renders the question in its timeline with no way to
+  // answer, and the turn hangs indefinitely. Adopt whatever the host says it
+  // is still waiting on.
+  //
+  // Adopt-only, never clear: a prompt the host has already resolved cannot be
+  // detected here without racing one that just arrived, and a stale card heals
+  // itself on the first click anyway (resolveAskUser re-broadcasts the dismiss
+  // when it finds no matching entry).
+  const adoptHostPendingPrompts = useCallback((state: ClaudeSessionState | null | undefined) => {
+    if (!state) return
+    const question = normalizePendingAskUser(state.pendingAskUser) as PendingAskUser
+    if (state.pendingAskUser && question.toolUseId) {
+      setPendingQuestion(prev => {
+        if (prev?.toolUseId === question.toolUseId) return prev
+        setAskAnswers({})
+        setAskOtherText({})
+        return question
+      })
+    }
+    const permission = state.pendingPermission as PendingPermission | null | undefined
+    if (permission?.toolUseId) {
+      setPendingPermission(prev => {
+        if (prev?.toolUseId === permission.toolUseId) return prev
+        setPermissionFocus(0)
+        setPermissionCustomText('')
+        return permission
+      })
+    }
+  }, [])
+
   const previousRemoteConnectedRef = useRef(isRemoteConnected)
   useEffect(() => {
     const wasConnected = previousRemoteConnectedRef.current
@@ -1829,8 +1863,13 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
       setMessages(prev => prev.map(m => (!isToolCall(m) && m.id === remoteDisconnectNoticeId)
         ? { ...m, content: 'Remote connection restored — your message is still in the input box, ready to resend.', timestamp: Date.now() }
         : m))
+      // Anything the host asked while the link was down never reached us, and
+      // it will not be repeated. Ask what it is still blocked on.
+      void host.claude.getSessionState(sessionId)
+        .then(state => adoptHostPendingPrompts(state as unknown as ClaudeSessionState))
+        .catch(() => { /* the poll re-dials; a later reconnect tries again */ })
     }
-  }, [isRemoteConnected, sessionId, remoteDisconnectNoticeId])
+  }, [isRemoteConnected, sessionId, remoteDisconnectNoticeId, adoptHostPendingPrompts])
 
   // Start session on mount (guarded against StrictMode double-mount)
   // If a saved sdkSessionId exists (from a previous /resume), auto-resume that session
@@ -1862,6 +1901,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
         setIsStreaming(!!existingState.isStreaming)
         setStreamingText(existingState.streamingText || '')
         setStreamingThinking(existingState.streamingThinking || '')
+        adoptHostPendingPrompts(existingState as unknown as ClaudeSessionState)
         const meta = await host.claude.getSessionMeta(sessionId).catch(() => null)
         if (cancelled || !meta) return
         setSessionMeta(meta as unknown as SessionMeta)

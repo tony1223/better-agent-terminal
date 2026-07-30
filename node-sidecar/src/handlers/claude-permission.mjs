@@ -21,11 +21,12 @@ export function buildCanUseTool(session, sessionId, toolName, input, opts) {
   // user follow-up questions during a turn. Always surface UI for it.
   if (toolName === 'AskUserQuestion') {
     return new Promise((resolve) => {
-      if (toolUseId) session.pendingAskUser.set(toolUseId, { resolve, input })
-      sendEvent('claude:ask-user', {
-        sessionId,
-        data: { toolUseId, questions: input?.questions },
-      })
+      const data = { toolUseId, questions: input?.questions }
+      // `input` is kept for resolveAskUser (the SDK needs the original
+      // questions back in updatedInput); `data` is kept so getSessionState can
+      // replay the prompt to a renderer that missed the one-shot event.
+      if (toolUseId) session.pendingAskUser.set(toolUseId, { resolve, input, data })
+      sendEvent('claude:ask-user', { sessionId, data })
     })
   }
   // bypassPlan: auto-approve everything except ExitPlanMode (which
@@ -99,15 +100,19 @@ export function buildCanUseTool(session, sessionId, toolName, input, opts) {
           resolve(result)
         }
       : resolve
-    if (toolUseId) session.pendingPermissions.set(toolUseId, { resolve: wrappedResolve })
-    sendEvent('claude:permission-request', {
-      sessionId,
-      data: {
-        toolUseId, toolName, input,
-        suggestions: opts?.suggestions,
-        decisionReason: opts?.decisionReason,
-      },
-    })
+    const data = {
+      toolUseId, toolName, input,
+      suggestions: opts?.suggestions,
+      decisionReason: opts?.decisionReason,
+    }
+    // Keep the payload, not just the resolve fn. claude:permission-request
+    // fires exactly once, and a renderer that was not mounted at that instant
+    // (a panel the workspace has not mounted yet, one the mount LRU evicted, a
+    // remote client mid-reconnect) would otherwise have no way to ever learn
+    // this prompt exists — the turn hangs on a promise nobody can answer.
+    // getSessionState replays it from here.
+    if (toolUseId) session.pendingPermissions.set(toolUseId, { resolve: wrappedResolve, data })
+    sendEvent('claude:permission-request', { sessionId, data })
   })
 }
 

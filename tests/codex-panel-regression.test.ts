@@ -383,6 +383,43 @@ async function main() {
     'the panel should name the missing file when a generated image cannot be read',
   )
 
+  // An approval request is announced once via claude:permission-request and
+  // never repeated, while the turn stays blocked until it is answered. Panels
+  // are mounted lazily (active terminal plus a two-entry LRU that starts empty
+  // every launch), so a request that arrives before its panel exists used to be
+  // unanswerable forever. The payload has to be kept, not just the resolve
+  // handle, and session state has to hand it back.
+  assert.match(
+    appServerSource,
+    /request_data: Value,/,
+    'a pending Codex approval should keep the payload it was announced with',
+  )
+  assert.match(
+    appServerSource,
+    /"pendingPermission": pending_permission,/,
+    'Codex session state should report the approval the turn is blocked on',
+  )
+  for (const panel of ['ClaudeAgentPanel', 'CodexAgentPanel']) {
+    const panelSource = await readFile(`renderer/src/components/${panel}.tsx`, 'utf8')
+    assert.match(
+      panelSource,
+      /const adoptHostPendingPrompts = useCallback/,
+      `${panel} should adopt a pending prompt the host is still blocked on`,
+    )
+    assert.match(
+      panelSource,
+      /adoptHostPendingPrompts\(existingState as unknown as ClaudeSessionState\)/,
+      `${panel} should recover a pending prompt when it hydrates`,
+    )
+    // A dropped tunnel loses every event emitted while it was down, and none of
+    // them are replayed — so reconnecting has to ask what is still outstanding.
+    assert.match(
+      panelSource,
+      /host\.claude\.getSessionState\(sessionId\)\s*\n\s*\.then\(state => adoptHostPendingPrompts/,
+      `${panel} should re-check pending prompts after a remote reconnect`,
+    )
+  }
+
   console.log('Codex panel regression: passed')
 }
 
