@@ -1220,6 +1220,75 @@ fn take_active_pty_session_for_generation(
     }
 }
 
+/// Accumulates PTY reader bytes across `read()` calls so a UTF-8 codepoint
+/// split across a chunk boundary decodes correctly instead of turning into
+/// U+FFFD. Bytes that are genuinely invalid UTF-8 (not just an incomplete
+/// trailing sequence) are still replaced with U+FFFD immediately, matching
+/// `String::from_utf8_lossy`'s behavior, so `pending` never grows past the
+/// handful of bytes a valid UTF-8 sequence can leave incomplete.
+struct Utf8ChunkDecoder {
+    pending: Vec<u8>,
+}
+
+impl Utf8ChunkDecoder {
+    fn new() -> Self {
+        Self {
+            pending: Vec::new(),
+        }
+    }
+
+    /// Decode a newly read chunk, prefixed with any bytes held back from the
+    /// previous call. Bytes that look like the start of a still-incomplete
+    /// UTF-8 sequence at the end of the combined buffer are kept in
+    /// `self.pending` for the next call instead of being lossy-replaced.
+    fn decode(&mut self, bytes: &[u8]) -> String {
+        let mut buf = std::mem::take(&mut self.pending);
+        buf.extend_from_slice(bytes);
+        let mut out = String::with_capacity(buf.len());
+        let mut remaining: &[u8] = &buf;
+        loop {
+            match std::str::from_utf8(remaining) {
+                Ok(valid) => {
+                    out.push_str(valid);
+                    break;
+                }
+                Err(err) => {
+                    let valid_up_to = err.valid_up_to();
+                    out.push_str(
+                        std::str::from_utf8(&remaining[..valid_up_to])
+                            .expect("valid_up_to always points at a valid UTF-8 boundary"),
+                    );
+                    match err.error_len() {
+                        Some(bad_len) => {
+                            // Genuinely invalid bytes: replace immediately so
+                            // pending never accumulates them.
+                            out.push('\u{FFFD}');
+                            remaining = &remaining[valid_up_to + bad_len..];
+                        }
+                        None => {
+                            // Trailing bytes look like the start of a valid
+                            // sequence that the next read will complete.
+                            self.pending = remaining[valid_up_to..].to_vec();
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Flush any bytes still held back once the reader hits EOF or an error,
+    /// so a truncated trailing sequence is surfaced (lossily) instead of
+    /// silently dropped.
+    fn flush(&mut self) -> Option<String> {
+        if self.pending.is_empty() {
+            return None;
+        }
+        Some(String::from_utf8_lossy(&std::mem::take(&mut self.pending)).into_owned())
+    }
+}
+
 pub(crate) fn start_pty_session(
     app: &HostContext,
     map_handle: Arc<Mutex<HashMap<String, PtyEntry>>>,
@@ -1281,8 +1350,9 @@ pub(crate) fn start_pty_session(
     })?;
 
     // Reader thread: pump bytes from PTY → coalesced pty:output events.
-    // Lossy UTF-8 because xterm.js consumes strings and PTYs can split
-    // codepoints across reads; renderer can stitch via terminal state.
+    // PTYs can split a UTF-8 codepoint across reads, so decode through
+    // Utf8ChunkDecoder to stitch valid split sequences back together;
+    // only genuinely invalid bytes become U+FFFD.
     let id_for_reader = options.id.clone();
     let app_for_reader = app.clone();
     let (output_tx, output_done) = spawn_output_coalescer(
@@ -1340,9 +1410,15 @@ pub(crate) fn start_pty_session(
     std::thread::spawn(move || {
         let _done = reader_thread_done;
         let mut buf = [0u8; 4096];
+        let mut decoder = Utf8ChunkDecoder::new();
         loop {
             match reader.read(&mut buf) {
-                Ok(0) => break,
+                Ok(0) => {
+                    if let Some(tail) = decoder.flush() {
+                        let _ = output_tx.send(tail);
+                    }
+                    break;
+                }
                 Ok(n) => {
                     if pty_output_debug_enabled() && pty_output_bytes_trace_required(&buf[..n]) {
                         pty_output_debug_log(
@@ -1353,12 +1429,17 @@ pub(crate) fn start_pty_session(
                             ),
                         );
                     }
-                    let chunk = String::from_utf8_lossy(&buf[..n]).into_owned();
-                    if output_tx.send(chunk).is_err() {
+                    let chunk = decoder.decode(&buf[..n]);
+                    if !chunk.is_empty() && output_tx.send(chunk).is_err() {
                         break;
                     }
                 }
-                Err(_) => break,
+                Err(_) => {
+                    if let Some(tail) = decoder.flush() {
+                        let _ = output_tx.send(tail);
+                    }
+                    break;
+                }
             }
         }
         drop(output_tx);
@@ -2513,5 +2594,68 @@ mod tests {
             cmd.get_env("COLORTERM").and_then(|value| value.to_str()),
             Some("false")
         );
+    }
+
+    #[test]
+    fn utf8_chunk_decoder_stitches_three_byte_codepoint_split_1_2() {
+        // "中" = E4 B8 AD, split after the first byte.
+        let mut decoder = Utf8ChunkDecoder::new();
+        let mut out = String::new();
+        out.push_str(&decoder.decode(b"\xE4"));
+        out.push_str(&decoder.decode(b"\xB8\xAD"));
+        assert_eq!(out, "中");
+        assert!(!out.contains('\u{FFFD}'), "unexpected replacement char in {out:?}");
+    }
+
+    #[test]
+    fn utf8_chunk_decoder_stitches_three_byte_codepoint_split_2_1() {
+        // "中" = E4 B8 AD, split after the second byte.
+        let mut decoder = Utf8ChunkDecoder::new();
+        let mut out = String::new();
+        out.push_str(&decoder.decode(b"\xE4\xB8"));
+        out.push_str(&decoder.decode(b"\xAD"));
+        assert_eq!(out, "中");
+        assert!(!out.contains('\u{FFFD}'), "unexpected replacement char in {out:?}");
+    }
+
+    #[test]
+    fn utf8_chunk_decoder_stitches_four_byte_emoji_split_2_2() {
+        // "😀" = F0 9F 98 80, split down the middle.
+        let mut decoder = Utf8ChunkDecoder::new();
+        let mut out = String::new();
+        out.push_str(&decoder.decode(b"\xF0\x9F"));
+        out.push_str(&decoder.decode(b"\x98\x80"));
+        assert_eq!(out, "😀");
+        assert!(!out.contains('\u{FFFD}'), "unexpected replacement char in {out:?}");
+    }
+
+    #[test]
+    fn utf8_chunk_decoder_stitches_mixed_ascii_and_split_codepoint() {
+        let mut decoder = Utf8ChunkDecoder::new();
+        let mut out = String::new();
+        out.push_str(&decoder.decode(b"abc\xE4"));
+        out.push_str(&decoder.decode(b"\xB8\xAD def"));
+        assert_eq!(out, "abc中 def");
+        assert!(!out.contains('\u{FFFD}'), "unexpected replacement char in {out:?}");
+    }
+
+    #[test]
+    fn utf8_chunk_decoder_replaces_genuinely_invalid_byte() {
+        // 0xFF is never a valid UTF-8 lead byte; it must still lossy-decode
+        // to U+FFFD instead of being held in `pending` forever.
+        let mut decoder = Utf8ChunkDecoder::new();
+        let out = decoder.decode(b"ab\xFFcd");
+        assert_eq!(out, "ab\u{FFFD}cd");
+        assert!(decoder.flush().is_none(), "invalid bytes must not linger in pending");
+    }
+
+    #[test]
+    fn utf8_chunk_decoder_flushes_pending_tail_on_eof() {
+        let mut decoder = Utf8ChunkDecoder::new();
+        let out = decoder.decode(b"abc\xE4");
+        assert_eq!(out, "abc");
+        let flushed = decoder.flush().expect("incomplete tail must be flushed");
+        assert_eq!(flushed, "\u{FFFD}");
+        assert!(decoder.flush().is_none(), "pending must be empty after flush");
     }
 }
