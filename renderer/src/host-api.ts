@@ -209,6 +209,33 @@ function refreshTauriPtyInputTraceMode(): void {
   }
 }
 
+// Cached OS version string (Windows: "MAJOR.MINOR.BUILD"), fetched once at
+// host creation. Consumers (e.g. TerminalPanel's xterm windowsPty option)
+// must treat the empty-string default as "unknown", not "old Windows" — see
+// parseWindowsBuildNumber.
+let tauriSystemVersion = ''
+function refreshTauriSystemVersion(): void {
+  try {
+    void getInvoke()<string>('app_get_system_version')
+      .then(value => { tauriSystemVersion = typeof value === 'string' ? value : '' })
+      .catch(() => {})
+  } catch {
+    // Best-effort instrumentation only.
+  }
+}
+
+// Windows build number parsed from a "MAJOR.MINOR.BUILD" version string.
+// Returns undefined (not 0) when the version is empty or unparsable, so
+// callers that gate on "build < N" heuristics do not mistake "unknown" for
+// "old Windows".
+export function parseWindowsBuildNumber(version: string): number | undefined {
+  if (!version) return undefined
+  const last = version.split('.').pop()
+  if (!last) return undefined
+  const build = Number(last)
+  return Number.isFinite(build) ? build : undefined
+}
+
 function readTauriDebugMode(): boolean {
   if (tauriProcessDebugMode === true) return true
   const env = (import.meta as unknown as { env?: Record<string, string | boolean | undefined> }).env
@@ -468,10 +495,11 @@ function createTauriHost(): BatAppAPI {
   // throw via a Proxy so missing coverage fails loudly.
   refreshTauriDebugMode()
   refreshTauriPtyInputTraceMode()
+  refreshTauriSystemVersion()
   const platform = detectPlatform()
   const ported: Record<string, unknown> = {
     platform,
-    systemVersion: '',
+    get systemVersion() { return tauriSystemVersion },
     settings: {
       load: () => getInvoke()<string | null>('settings_load'),
       save: (data: string) => getInvoke()<void>('settings_save', { data }),
@@ -1641,7 +1669,7 @@ export function installTauriShim(): void {
     get(_t, prop) {
       const key = String(prop)
       if (key === 'platform') return platform
-      if (key === 'systemVersion') return ''
+      if (key === 'systemVersion') return tauriSystemVersion
       if (PORTED_NAMESPACES.has(key)) return real[key]
       // Build a nested namespace proxy that returns permissive values.
       return new Proxy({}, {

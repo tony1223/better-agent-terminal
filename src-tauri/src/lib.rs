@@ -302,6 +302,7 @@ fn app_builder(headless: bool) -> tauri::Builder<tauri::Wry> {
             app_cmd::app_get_window_index,
             app_cmd::app_get_launch_profile,
             app_cmd::app_get_window_profile,
+            app_cmd::app_get_system_version,
             app_cmd::app_set_title,
             app_cmd::app_resolve_profile_window_close,
             app_cmd::app_new_window,

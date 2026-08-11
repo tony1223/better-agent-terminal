@@ -29,6 +29,7 @@ function stripBestEffortDebugModeCall<T extends { cmd: string }>(calls: T[]): T[
   return calls.filter(call => ![
     'debug_is_debug_mode',
     'debug_is_pty_input_trace',
+    'app_get_system_version',
   ].includes(call.cmd))
 }
 
@@ -51,6 +52,7 @@ async function run() {
       // Mirror Rust return shapes for the commands we care about.
       if (cmd === 'debug_is_debug_mode') return false as unknown as T
       if (cmd === 'debug_is_pty_input_trace') return false as unknown as T
+      if (cmd === 'app_get_system_version') return '10.0.26220' as unknown as T
       if (cmd === 'settings_load') return null as unknown as T
       if (cmd === 'settings_save') return undefined as unknown as T
       if (cmd === 'shell_open_external') return undefined as unknown as T
@@ -267,7 +269,11 @@ async function run() {
       ['win32', 'darwin', 'linux'].includes(mod.host.platform),
       `unexpected platform: ${mod.host.platform}`,
     )
-    assert.equal(mod.host.systemVersion, '')
+    // systemVersion resolves asynchronously (app_get_system_version) and is
+    // cached in the module; give the pending invoke a tick to settle before
+    // asserting the final value.
+    await new Promise(resolve => setTimeout(resolve, 0))
+    assert.equal(mod.host.systemVersion, '10.0.26220')
 
     const loaded = await mod.host.settings.load()
     assert.equal(loaded, null)
@@ -1101,6 +1107,17 @@ async function run() {
       ?.args?.options as { workspaceId?: string; workspaceName?: string } | undefined
     assert.equal(resumeOptions?.workspaceId, ws.id)
     assert.equal(resumeOptions?.workspaceName, 'Renamed workspace')
+  }
+
+  // 10) parseWindowsBuildNumber must never coerce an empty/unparsable
+  //     version into 0 (Number('') === 0 is exactly the bug this guards
+  //     against — it would otherwise wrongly enable xterm's old-ConPTY
+  //     line-wrapping heuristics on every unresolved systemVersion).
+  {
+    const mod = await loadFreshAdapter()
+    assert.equal(mod.parseWindowsBuildNumber(''), undefined)
+    assert.equal(mod.parseWindowsBuildNumber('10.0.26220'), 26220)
+    assert.equal(mod.parseWindowsBuildNumber('abc'), undefined)
   }
 
   console.log('host-api: passed')

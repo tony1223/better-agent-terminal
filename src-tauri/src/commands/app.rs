@@ -675,6 +675,42 @@ pub fn app_set_dock_badge(app: AppHandle, count: i64) {
     }
 }
 
+/// Real OS version string (Windows: `"MAJOR.MINOR.BUILD"`, e.g.
+/// `"10.0.26220"`). The renderer uses the build number to decide whether
+/// xterm's Windows ConPTY line-wrapping heuristics should apply — they only
+/// matter below build 21376, and a caller that cannot resolve a build number
+/// must treat that as "unknown", not "old ConPTY".
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub fn app_get_system_version() -> String {
+    os_version_string()
+}
+
+/// `GetVersionExW` is deliberately avoided: it is subject to application
+/// manifest compatibility shims and can silently report a stale Windows
+/// version. `RtlGetVersion` is unaffected by that shim.
+#[cfg(all(feature = "desktop", target_os = "windows"))]
+fn os_version_string() -> String {
+    use windows_sys::Wdk::System::SystemServices::RtlGetVersion;
+    use windows_sys::Win32::System::SystemInformation::OSVERSIONINFOW;
+
+    let mut info: OSVERSIONINFOW = unsafe { std::mem::zeroed() };
+    info.dwOSVersionInfoSize = std::mem::size_of::<OSVERSIONINFOW>() as u32;
+    let status = unsafe { RtlGetVersion(&mut info) };
+    if status != 0 {
+        return String::new();
+    }
+    format!(
+        "{}.{}.{}",
+        info.dwMajorVersion, info.dwMinorVersion, info.dwBuildNumber
+    )
+}
+
+#[cfg(all(feature = "desktop", not(target_os = "windows")))]
+fn os_version_string() -> String {
+    String::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -844,5 +880,35 @@ mod tests {
     fn tauri_log_line_has_tauri_prefix() {
         let line = tauri_log_line("hello");
         assert!(line.contains(" [tauri] hello\n"));
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn system_version_string_is_well_formed_on_windows() {
+        let version = os_version_string();
+        #[cfg(target_os = "windows")]
+        {
+            let parts: Vec<&str> = version.split('.').collect();
+            assert_eq!(
+                parts.len(),
+                3,
+                "expected MAJOR.MINOR.BUILD, got: {version:?}"
+            );
+            for part in &parts {
+                assert!(
+                    !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()),
+                    "non-numeric segment in {version:?}"
+                );
+            }
+            // A manifest-shimmed API (GetVersionExW style) reports builds like
+            // 9200/9600; any real Windows 10+ machine is >= 10240 (Win10 RTM).
+            let build: u32 = parts[2].parse().expect("numeric build segment");
+            assert!(build >= 10240, "expected Windows build >= 10240, got {build}");
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            // Non-Windows: an empty placeholder is an acceptable "unknown".
+            let _ = version;
+        }
     }
 }

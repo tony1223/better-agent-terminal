@@ -1,4 +1,4 @@
-import { host, type TerminalViewportState } from '../host-api'
+import { host, parseWindowsBuildNumber, type TerminalViewportState } from '../host-api'
 import { useEffect, useRef, useState, memo, type CSSProperties } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Terminal, type ILink } from '@xterm/xterm'
@@ -55,9 +55,7 @@ interface ContextMenu {
 
 function getWindowsBuildNumber(): number | undefined {
   if (host.platform !== 'win32') return undefined
-  const version = host.systemVersion
-  const build = Number(version.split('.').pop())
-  return Number.isFinite(build) ? build : undefined
+  return parseWindowsBuildNumber(host.systemVersion)
 }
 
 function isClaudeCliPreset(agentPreset?: AgentPresetId): boolean {
