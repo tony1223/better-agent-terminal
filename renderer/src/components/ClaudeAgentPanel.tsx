@@ -1359,13 +1359,30 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
         if (host.debug.isDebugMode === true && (updates as { description?: string }).description) {
           host.debug.log(`[renderer] onToolResult description update id=${id} desc=${(updates as { description?: string }).description}`)
         }
+        // Check if this is an Agent/Task status change (needs immediate render for active tasks bar)
+        const isAgentStatusChange = updates.status && updates.status !== 'running'
+        // A terminal tool result also ends the bound `claude:task` lifecycle
+        // entry — the SDK never emits task_updated for denied tool calls, and
+        // its terminal task_updated is best-effort for shell tools, either of
+        // which otherwise leaves a ghost running entry. Any tool name
+        // qualifies: the SDK emits task_started for plain shell tools too
+        // (Bash/PowerShell), bound via tool_use_id.
+        // Exception: a successful run_in_background result only means
+        // "launched"; the background task keeps running past it.
+        const endBoundLifecycle = (tool: ClaudeToolCall | undefined) => {
+          if (!isAgentStatusChange) return
+          if (tool?.input.run_in_background === true && updates.status !== 'error') return
+          const terminal = updates.status === 'error' ? 'failed' : 'completed'
+          setTaskLifecycle(lifePrev => terminateLifecycleEntries(
+            lifePrev, life => life.id === id || life.toolUseId === id, terminal))
+        }
         // Check if tool exists in any subagent bucket
-        let foundInSubagent = false
+        let foundInSubagent: ClaudeToolCall | undefined
         for (const [parentId, bucket] of subagentMessagesRef.current.entries()) {
           const idx = bucket.findIndex(m => 'toolName' in m && m.id === id)
           if (idx !== -1) {
             bucket[idx] = { ...bucket[idx], ...updates } as ClaudeToolCall
-            foundInSubagent = true
+            foundInSubagent = bucket[idx] as ClaudeToolCall
             // Buckets live in a ref, so the modal only redraws when told to:
             // for the parent whose transcript gained a row, and for the tool
             // itself when it is a nested agent whose own detail view is open
@@ -1374,9 +1391,15 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
             break
           }
         }
-        if (foundInSubagent) return
-        // Check if this is an Agent/Task status change (needs immediate render for active tasks bar)
-        const isAgentStatusChange = updates.status && updates.status !== 'running'
+        if (foundInSubagent) {
+          // Tools that ran inside a subagent used to return here without ever
+          // ending their bound lifecycle entry, so every shell command a
+          // subagent ran left a pill ticking forever, and nested agents never
+          // terminated either (GH #127). No flushSync: this only ever removes a
+          // pill, and subagent tool results are the hot path during fan-out.
+          endBoundLifecycle(foundInSubagent)
+          return
+        }
         const doResultUpdate = () => setMessages(prev => prev.map(m => {
           if ('toolName' in m && m.id === id) {
             // When a Task tool completes, clear its subagent streaming state
@@ -1384,19 +1407,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
               setSubagentStreamingText(p => { const n = new Map(p); n.delete(id); return n })
               setSubagentStreamingThinking(p => { const n = new Map(p); n.delete(id); return n })
             }
-            // A terminal tool result also ends the bound `claude:task`
-            // lifecycle entry — the SDK never emits task_updated for denied
-            // tool calls, which otherwise leaves a ghost running entry. Any
-            // tool name qualifies: the SDK emits task_started for plain shell
-            // tools too (Bash/PowerShell), bound via tool_use_id.
-            // Exception: a successful run_in_background result only means
-            // "launched"; the background task keeps running past it.
-            if (isAgentStatusChange
-              && !((m as ClaudeToolCall).input.run_in_background === true && updates.status !== 'error')) {
-              const terminal = updates.status === 'error' ? 'failed' : 'completed'
-              setTaskLifecycle(lifePrev => terminateLifecycleEntries(
-                lifePrev, life => life.id === id || life.toolUseId === id, terminal))
-            }
+            endBoundLifecycle(m as ClaudeToolCall)
             return { ...m, ...updates } as ClaudeToolCall
           }
           return m
@@ -2428,13 +2439,24 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
     [agentTree, taskModal?.taskId], // eslint-disable-line react-hooks/exhaustive-deps
   )
 
-  // Fetch subagent messages from SDK when task modal opens (for completed tasks with no streamed messages)
+  // taskIds whose transcript was read while the task was still running. Such a
+  // read stops at whatever the CLI had flushed, so it must not block the final
+  // read once the task finishes.
+  const partialTranscriptRef = useRef(new Set<string>())
+
+  // Backfill the open task modal's transcript. getSubagentMessages() reads the
+  // on-disk shard the CLI appends to during the parent run, so this works for a
+  // running subagent too — it used to bail out on `running`, which left a
+  // subagent whose stream events never arrived showing nothing but "thinking…"
+  // for its entire lifetime (GH #127).
   useEffect(() => {
     if (!taskModal) return
-    const existing = subagentMessagesRef.current.get(taskModal.taskId)
-    if (existing && existing.length > 0) return // already have streamed messages
-    if (taskModalNode?.status === 'running') return // still streaming, don't fetch
     const taskId = taskModal.taskId
+    const wasRunning = taskModalNode?.status === 'running'
+    const existing = subagentMessagesRef.current.get(taskId)
+    // Streamed messages win; only read when nothing arrived, or when all we
+    // have is a partial snapshot taken mid-run.
+    if (existing && existing.length > 0 && !partialTranscriptRef.current.has(taskId)) return
     // Tracked so the transcript area can say "loading" instead of claiming
     // nothing was captured while the read is still in flight.
     setTaskTranscriptLoading(taskId)
@@ -2443,11 +2465,14 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
         subagentMessagesRef.current.set(taskId, msgs as MessageItem[])
         setTaskModalTick(t => t + 1)
       }
+      if (wasRunning) partialTranscriptRef.current.add(taskId)
+      else partialTranscriptRef.current.delete(taskId)
     }).catch(() => {}).finally(() => {
       setTaskTranscriptLoading(prev => (prev === taskId ? null : prev))
     })
-    // Status is a dep so a task that finishes while its modal is open gets its
-    // transcript pulled once streaming can no longer deliver it.
+    // Status is a dep so a task that finishes while its modal is open gets read
+    // again — no polling, one read on open and one when it reaches a terminal
+    // status, which is when the transcript is complete.
   }, [taskModal?.taskId, taskModalNode?.status]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Cache alarm timer — update every 30s, only show after 1min idle

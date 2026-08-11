@@ -159,6 +159,37 @@ async function main() {
     false,
     'Claude mount hydration must not let an empty local snapshot erase replayed history',
   )
+  // A tool result for a tool that ran inside a subagent returns early — buckets
+  // live in a ref, not in `messages` — and that early return used to sit above
+  // the `claude:task` lifecycle termination. Every shell command a subagent ran
+  // then left a pill ticking forever in the activity bar (42 minutes in GH
+  // #127), and nested agents never terminated either. Both result paths have to
+  // end the bound lifecycle entry.
+  assert.match(
+    claudeSource,
+    /if \(foundInSubagent\) \{[\s\S]{0,700}?endBoundLifecycle\(foundInSubagent\)\s*return\s*\}/,
+    'A subagent-bucket tool result must end its bound claude:task lifecycle entry before returning',
+  )
+  assert.match(
+    claudeSource,
+    /const doResultUpdate = \(\) => setMessages\([\s\S]{0,800}?endBoundLifecycle\(m as ClaudeToolCall\)/,
+    'A main-list tool result must end its bound claude:task lifecycle entry',
+  )
+  // The task detail modal has to be able to read a running subagent's
+  // transcript: getSubagentMessages() reads the on-disk shard the CLI appends
+  // during the parent run, so bailing out while the node is running left a
+  // subagent whose stream events never arrived showing nothing but "thinking…"
+  // for its whole run.
+  assert.equal(
+    /taskModalNode\?\.status === 'running'\) return/.test(claudeSource),
+    false,
+    'Transcript backfill must not skip a running task',
+  )
+  assert.match(
+    claudeSource,
+    /partialTranscriptRef[\s\S]{0,1400}?fetchSubagentMessages\(sessionId, taskId\)/,
+    'A mid-run transcript read must be remembered as partial so the terminal read still happens',
+  )
   assert.equal(
     normalizeReasoningSummary('**Step A**\n\n<!-- -->\n\n**Step B**'),
     '**Step A**\n\n**Step B**',

@@ -903,6 +903,11 @@ function handleTaskMessage(s, sessionId, msg) {
       startedAt: prev?.startedAt ?? Date.now(),
       ...(typeof patch.error === 'string' ? { error: patch.error } : {}),
       ...(patch.is_backgrounded === true || prev?.isBackground === true ? { isBackground: true } : {}),
+      // skip_transcript only ever arrives on task_started, so it has to be
+      // carried forward here or it silently disappears on the first update —
+      // the renderer treats it as "not an agent" and would start trusting a
+      // task that lost the flag (GH #127).
+      ...(msg.skip_transcript === true || prev?.skipTranscript === true ? { skipTranscript: true } : {}),
     }
     if (TERMINAL_TASK_STATUSES.has(task.status)) {
       s.activeTasks.delete(taskId)

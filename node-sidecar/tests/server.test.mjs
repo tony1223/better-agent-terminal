@@ -1643,6 +1643,10 @@ async function inProcess() {
           if (next.done) return
           yield { type: 'system', subtype: 'init', session_id: 'sdk-int' }
           yield { type: 'system', subtype: 'task_started', task_id: 't1', tool_use_id: 'toolu-spec', task_type: 'local_workflow', workflow_name: 'spec', description: 'run spec', session_id: 'sdk-int' }
+          // A plain shell tool: the SDK reports these as tasks too, flagged
+          // skip_transcript, and only ever on task_started.
+          yield { type: 'system', subtype: 'task_started', task_id: 't-sh', tool_use_id: 'toolu-bash', description: 'git diff --name-only', skip_transcript: true, session_id: 'sdk-int' }
+          yield { type: 'system', subtype: 'task_updated', task_id: 't-sh', patch: { description: 'git diff --name-only (running)' }, session_id: 'sdk-int' }
           interruptTurnStartedResolve()
           await new Promise(resolve => { releaseInterruptResult = resolve })
           yield { type: 'result', subtype: 'error_during_execution', session_id: 'sdk-int', stop_reason: 'interrupted' }
@@ -1674,6 +1678,14 @@ async function inProcess() {
     assert.equal(taskEvent.payload.task.workflowName, 'spec')
     assert.equal(taskEvent.payload.task.status, 'running')
     assert.equal(taskEvent.payload.task.toolUseId, 'toolu-spec', 'tool_use_id must be forwarded for renderer binding')
+
+    // skip_transcript arrives only on task_started, so the task_updated merge
+    // has to carry it forward — otherwise the renderer stops recognising a
+    // shell task as a shell task after its first update (GH #127).
+    const shellTaskEvents = interruptEvents.filter(e => e.name === 'claude:task' && e.payload.task.id === 't-sh')
+    assert.equal(shellTaskEvents.length, 2, 'shell task_started + task_updated must both surface')
+    assert.equal(shellTaskEvents[0].payload.task.skipTranscript, true, 'task_started must forward skip_transcript')
+    assert.equal(shellTaskEvents[1].payload.task.skipTranscript, true, 'task_updated must carry skip_transcript forward')
 
     const intReply = await dispatch({ jsonrpc: '2.0', id: 274, method: 'claude.interruptTurn',
       params: { sessionId: 'int-1' } })

@@ -214,6 +214,49 @@ const msg = (overrides: Partial<ClaudeMessage> & { id: string }): ClaudeMessage 
   assert.equal(roots[0].isBackground, true)
 }
 
+// --- Shell-tool lifecycle entries must never become roots (GH #127) ---
+// The SDK emits task_started for plain Bash/PowerShell calls, bound via a
+// tool_use_id that can never match an agent tool node — Bash is not in
+// AGENT_TOOL_NAMES, so the tool_use path skips it and the binding always
+// misses. The tool_use path is gated by a whitelist; the lifecycle path needs
+// the symmetric gate, or every shell command becomes its own root labelled
+// with the command line and opening to an empty detail modal.
+{
+  const lifecycle = new Map<string, TaskLifecycle>([
+    ['task_sh', {
+      id: 'task_sh',
+      toolUseId: 'toolu_bash',
+      description: 'cd "C:/repo" && git --version && git diff --name-only',
+      status: 'running',
+      startedAt: 1000,
+    }],
+  ])
+  const withBash: MessageItem[] = [
+    tool({ id: 'toolu_bash', toolName: 'Bash', input: { command: 'git diff --name-only' } }),
+  ]
+  assert.deepEqual(buildAgentTaskTree(withBash, new Map(), lifecycle), [])
+  assert.deepEqual(buildAgentTaskTree([], new Map(), lifecycle), [])
+}
+
+// --- skip_transcript is decisive even when other agent fields are present ---
+{
+  const lifecycle = new Map<string, TaskLifecycle>([
+    ['task_sh', { id: 'task_sh', subagentType: 'Explore', skipTranscript: true, status: 'running' }],
+  ])
+  assert.equal(buildAgentTaskTree([], new Map(), lifecycle).length, 0)
+}
+
+// --- A real unbound subagent entry still shows: subagentType is the evidence ---
+{
+  const lifecycle = new Map<string, TaskLifecycle>([
+    ['task_ag', { id: 'task_ag', subagentType: 'Explore', description: 'map the sdk', status: 'running', startedAt: 7 }],
+  ])
+  const roots = buildAgentTaskTree([], new Map(), lifecycle)
+  assert.equal(roots.length, 1)
+  assert.equal(roots[0].id, 'task_ag')
+  assert.equal(roots[0].subagentType, 'Explore')
+}
+
 // --- terminateLifecycleEntries: flips matching non-terminal entries only ---
 {
   const entries = new Map<string, TaskLifecycle>([

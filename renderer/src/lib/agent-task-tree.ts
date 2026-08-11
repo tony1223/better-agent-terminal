@@ -36,6 +36,9 @@ export interface TaskLifecycle {
   startedAt?: number
   error?: string
   isBackground?: boolean
+  /** SDK `skip_transcript`: this task keeps no transcript of its own. The SDK
+   * sets it for the plain shell tools it also reports via task_started. */
+  skipTranscript?: boolean
 }
 
 export interface AgentTaskNode {
@@ -210,12 +213,29 @@ function nodeFromLifecycle(life: TaskLifecycle): AgentTaskNode {
   return node
 }
 
+// The tool_use path into the tree is gated by AGENT_TOOL_NAMES; the lifecycle
+// path needs the symmetric gate. The SDK emits `task_started` for plain shell
+// tools too (Bash/PowerShell) and those entries never match an agent tool
+// node, so without this every shell command became an orphan root labelled
+// with the command line (GH #127).
+//
+// Gate on positive agent evidence rather than blacklisting shells: nothing
+// guarantees the SDK sets `skip_transcript` on every non-agent task. An orphan
+// entry with no agent evidence is also precisely the node that cannot render —
+// its id is a task_id, so both the modal's tool_use-keyed transcript lookup and
+// getSubagentMessages() miss it, leaving a pill that opens empty forever.
+function isAgentLifecycle(life: TaskLifecycle): boolean {
+  if (life.skipTranscript === true) return false
+  return life.isWorkflow === true || Boolean(life.subagentType)
+}
+
 /**
  * Build the agent activity tree.
  *
  * Roots are top-level Task/Agent/Workflow tool calls (in message order) plus
- * any `claude:task` lifecycle entries that never matched a tool_use id —
- * e.g. background workflow runs the SDK reports only via task_started.
+ * any `claude:task` lifecycle entries that never matched a tool_use id and
+ * carry agent evidence — e.g. background workflow runs the SDK reports only
+ * via task_started. See isAgentLifecycle for why shell tasks are excluded.
  */
 export function buildAgentTaskTree(
   messages: readonly MessageItem[],
@@ -245,6 +265,7 @@ export function buildAgentTaskTree(
     // Entries bound to a rendered tool node (directly or via tool_use_id)
     // only decorate that node — never duplicate it as an orphan root.
     if (hasNode(life.id) || hasNode(life.toolUseId)) continue
+    if (!isAgentLifecycle(life)) continue
     roots.push(nodeFromLifecycle(life))
   }
   return roots
