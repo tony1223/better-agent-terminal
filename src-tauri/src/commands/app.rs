@@ -689,7 +689,7 @@ pub fn app_get_system_version() -> String {
 /// `GetVersionExW` is deliberately avoided: it is subject to application
 /// manifest compatibility shims and can silently report a stale Windows
 /// version. `RtlGetVersion` is unaffected by that shim.
-#[cfg(target_os = "windows")]
+#[cfg(all(feature = "desktop", target_os = "windows"))]
 fn os_version_string() -> String {
     use windows_sys::Wdk::System::SystemServices::RtlGetVersion;
     use windows_sys::Win32::System::SystemInformation::OSVERSIONINFOW;
@@ -706,7 +706,7 @@ fn os_version_string() -> String {
     )
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(feature = "desktop", not(target_os = "windows")))]
 fn os_version_string() -> String {
     String::new()
 }
@@ -882,6 +882,7 @@ mod tests {
         assert!(line.contains(" [tauri] hello\n"));
     }
 
+    #[cfg(feature = "desktop")]
     #[test]
     fn system_version_string_is_well_formed_on_windows() {
         let version = os_version_string();
