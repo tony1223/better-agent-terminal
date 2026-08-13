@@ -59,49 +59,49 @@
     }
   },
   "node": {
-    "version": "24.18.0",
+    "version": "24.19.0",
     "platforms": {
       "darwin-arm64": {
         "nodePlatform": "darwin",
         "nodeArch": "arm64",
         "archiveExt": "tar.gz",
         "exePath": "bin/node",
-        "sha256": "e1a97e14c99c803e96c7339403282ea05a499c32f8d83defe9ef5ec66f979ed1"
+        "sha256": "8294b7aa9b03997481c06babf1e8b270c859358f27da57a11509afe537ac381d"
       },
       "darwin-x64": {
         "nodePlatform": "darwin",
         "nodeArch": "x64",
         "archiveExt": "tar.gz",
         "exePath": "bin/node",
-        "sha256": "dfd0dbd3e721503434df7b7205e719f61b3a3a31b2bcf9729b8b91fea240f080"
+        "sha256": "d1b5e999db158c62fe8f7267a4476b035d8bd93b1a605bac24a3f0dd166e3316"
       },
       "linux-arm64": {
         "nodePlatform": "linux",
         "nodeArch": "arm64",
         "archiveExt": "tar.xz",
         "exePath": "bin/node",
-        "sha256": "58c9520501f6ae2b52d5b210444e24b9d0c029a58c5011b797bc1fe7105886f6"
+        "sha256": "01443c1e1a29e531ccad5a46fefa6df490d2189c49f7955904aecdbb0fe86fdc"
       },
       "linux-x64": {
         "nodePlatform": "linux",
         "nodeArch": "x64",
         "archiveExt": "tar.xz",
         "exePath": "bin/node",
-        "sha256": "55aa7153f9d88f28d765fcdad5ae6945b5c0f98a36881703817e4c450fa76742"
+        "sha256": "14b342e71204f811bde6153be8e04b62aef63c236fef92b55f9c83154b409647"
       },
       "win32-arm64": {
         "nodePlatform": "win",
         "nodeArch": "arm64",
         "archiveExt": "zip",
         "exePath": "node.exe",
-        "sha256": "f274669adb93b1fd0fbf8f21fd078609e9dcc84333d4f2718d2dde3f9a161a01"
+        "sha256": "8502f4a50b458d4cc38ed8f2001556c2cd239d464920f74017926ccb1e1c157f"
       },
       "win32-x64": {
         "nodePlatform": "win",
         "nodeArch": "x64",
         "archiveExt": "zip",
         "exePath": "node.exe",
-        "sha256": "0ae68406b42d7725661da979b1403ec9926da205c6770827f33aac9d8f26e821"
+        "sha256": "57f71ab3652e797d84acddc79c81cc9ff1c6ddb2a1974cdb83f00fee9bff4c73"
       }
     }
   }
