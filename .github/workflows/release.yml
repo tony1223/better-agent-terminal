@@ -51,16 +51,16 @@ jobs:
       #
       # Opt in by setting the repo variable WIN_RUNNER_LABELS to a JSON array of
       # the runner's labels — ["self-hosted","Windows","X64","bat-win"] is what
-      # scripts/setup-self-hosted-windows-runner.ps1 registers. Unset means
-      # windows-latest, so every self-hosted change below is inert until a runner
-      # actually exists and someone sets the variable.
+      # scripts/setup-self-hosted-windows-runner.ps1 registers. Unset means the
+      # pinned hosted image, so every self-hosted change below is inert until a
+      # runner actually exists and someone sets the variable.
       #
       # A job waiting on a self-hosted runner that never comes back queues for 24
       # hours before failing, which would be a terrible way to find out the VM is
       # off. So if RUNNER_STATUS_TOKEN is set (a fine-grained PAT with
       # Administration: Read — GITHUB_TOKEN cannot be granted that scope, it is
       # not in the permissions list at all) we confirm the runner is online first
-      # and quietly fall back to windows-latest when it is not. Without that PAT
+      # and quietly fall back to the hosted image when it is not. Without that PAT
       # the variable is taken on trust, which means turning the VM off requires
       # clearing the variable too.
       - name: Decide where the Windows legs run
@@ -74,9 +74,31 @@ jobs:
           # No `set -e` on purpose: every failure path below has to end in a
           # valid `labels` output, because runs-on calls fromJSON on it. A step
           # that dies here would take the whole release with it, and the honest
-          # answer to "we could not tell" is windows-latest, not a broken run.
+          # answer to "we could not tell" is the pinned hosted image, not a
+          # broken run.
           set -uo pipefail
-          hosted='["windows-latest"]'
+          # Pinned, NOT windows-latest. `windows-latest` has rolled onto the
+          # win25-vs2026 image line, which ships Visual Studio 2026 at
+          # C:\Program Files\Microsoft Visual Studio\18\Enterprise. The node-gyp
+          # that pnpm 10.33.2 bundles (11.5.0) cannot read that install — it
+          # reports `unknown version "undefined"` and gives up. `windows-2025`
+          # still ships VS Enterprise 2022 17.14 under ...\2022\Enterprise,
+          # which node-gyp does understand.
+          #
+          # This only matters when a native dep has to compile. Normally
+          # prebuild-install fetches a prebuilt binary and node-gyp never runs,
+          # which is why this stayed invisible until v3.2.2-pre.1: better-sqlite3's
+          # prebuild download hit a `socket hang up`, fell back to compiling, and
+          # took the whole win all-in-one leg down with it. Pinning turns that
+          # class of flake back into "compiles from source, ~1 min slower".
+          #
+          # Caveat for whoever revisits this: the compile fallback has never
+          # actually succeeded in CI here (prebuilds always worked), so VS 2022
+          # being present is a well-founded bet, not a verified green build.
+          # node-gyp also logged ERR_CHILD_PROCESS_STDIO_MAXBUFFER while probing,
+          # which may bite on any image. Revisit when windows-2025 retires or
+          # pnpm ships a node-gyp that knows VS 2026.
+          hosted='["windows-2025"]'
           emit() { echo "labels=$1" >> "$GITHUB_OUTPUT"; echo "Windows legs -> $1"; }
 
           if [ -z "${WANTED:-}" ]; then
@@ -110,7 +132,7 @@ jobs:
             echo "$count online runner(s) carry $WANTED."
             emit "$WANTED"
           else
-            echo "::warning::No online runner carries $WANTED; using windows-latest instead."
+            echo "::warning::No online runner carries $WANTED; using $hosted instead."
             emit "$hosted"
           fi
 
@@ -208,7 +230,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: windows-latest
+          # os is inert for the win legs (runs-on below takes verify's decision
+          # instead), but it is kept in sync with that decision's pinned default
+          # so removing the indirection can never silently reintroduce
+          # windows-latest. See "Decide where the Windows legs run" for why.
+          - os: windows-2025
             platform: win
             arch: x64
             artifact: release-win-all-in-one
@@ -217,7 +243,7 @@ jobs:
             bundle_mode: all-in-one
             asset_mode: all-in-one
             prerelease: true
-          - os: windows-latest
+          - os: windows-2025
             platform: win
             arch: x64
             artifact: release-win-lightweight
@@ -305,7 +331,7 @@ jobs:
             pre_only: false
 
     # Every non-Windows leg uses its matrix.os verbatim. The Windows legs take
-    # whatever `verify` decided — ["windows-latest"] unless a self-hosted runner
+    # whatever `verify` decided — ["windows-2025"] unless a self-hosted runner
     # is opted in and (when RUNNER_STATUS_TOKEN allows checking) actually online.
     # verify's step always runs and always writes valid JSON, so fromJSON here
     # never sees an empty or malformed value.
@@ -995,6 +1021,9 @@ jobs:
     # `always()` for the same reason as `release`: a failed Linux or macOS leg
     # says nothing about whether the Windows installer is publishable.
     if: ${{ always() && !contains(inputs.release_tag, '-pre') && needs.release.result == 'success' }}
+    # Deliberately still windows-latest: this job downloads a built artifact and
+    # checksums it, so it never runs node-gyp and the VS 2026 problem that pins
+    # the build legs to windows-2025 cannot reach it.
     runs-on: windows-latest
 
     steps:
