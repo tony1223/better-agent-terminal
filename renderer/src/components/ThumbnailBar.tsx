@@ -260,9 +260,9 @@ export function ThumbnailBar({
       <div
         className="collapsed-bar collapsed-bar-bottom"
         onClick={onCollapse}
-        title={t('terminal.expandThumbnails')}
+        title={t('terminal.expandSessions')}
       >
-        <div className="collapsed-bar-icon">🖼️</div>
+        <div className="collapsed-bar-icon">🤖</div>
         <span className="collapsed-bar-label">{label}</span>
       </div>
     )

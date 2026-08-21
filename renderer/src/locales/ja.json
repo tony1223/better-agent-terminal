@@ -384,7 +384,7 @@
     "mobileLayout": "モバイルレイアウト",
     "useDesktopLayout": "デスクトップレイアウトを使用",
     "useMobileLayout": "モバイルレイアウトを使用",
-    "expandThumbnails": "サムネイルを展開",
+    "expandSessions": "セッションを展開",
     "collapsePanel": "パネルを折りたたむ"
   },
   "dialogs": {

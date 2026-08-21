@@ -378,7 +378,7 @@
     "mobileLayout": "手机布局",
     "useDesktopLayout": "使用桌面布局",
     "useMobileLayout": "使用手机布局",
-    "expandThumbnails": "展开缩略图",
+    "expandSessions": "展开会话",
     "collapsePanel": "收起面板"
   },
   "dialogs": {
