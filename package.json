@@ -105,13 +105,14 @@
     "dev:renderer": "cross-env BAT_DEBUG=1 vite"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.229",
-    "@anthropic-ai/claude-code": "^2.1.229",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.245",
+    "@anthropic-ai/claude-code": "^2.1.245",
     "@anthropic-ai/sdk": "^0.115.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@openai/codex": "0.147.0",
+    "@openai/codex": "0.149.1",
     "@vscode/ripgrep": "^1.17.1",
     "better-sqlite3": "^12.5.0",
+    "papaparse": "^5.7.0",
     "selfsigned": "^5.5.0",
     "uuid": "^14.0.0",
     "ws": "^8.19.0"
@@ -134,6 +135,7 @@
     "@tauri-apps/cli": "^2.11.1",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^24.13.3",
+    "@types/papaparse": "^5.5.2",
     "@types/qrcode": "^1.5.6",
     "@types/react": "^18.2.0",
     "@types/react-dom": "^18.2.0",
