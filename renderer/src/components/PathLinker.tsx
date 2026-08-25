@@ -2,8 +2,15 @@ import { host } from '../host-api'
 import { useState, useEffect, useCallback, useRef, Fragment } from 'react'
 import { useTranslation } from 'react-i18next'
 import { RevealPathMenu, type RevealPathTarget } from './RevealPathMenu'
+import { MarkdownPreview } from './MarkdownPreview'
+import { CsvPreview } from './CsvPreview'
+import { HtmlPreview } from './HtmlPreview'
+import { CopyContentButton } from './CopyContentButton'
 import { formatErrorMessage } from '../utils/error-message'
 import { stripLineSuffix } from '../utils/file-path'
+import {
+  EXT_TO_LANG, IMAGE_EXTS, getFileExt as getExt, getRichPreviewKind, isScriptFile,
+} from '../utils/file-preview'
 import hljs from 'highlight.js/lib/core'
 import 'highlight.js/styles/vs2015.css'
 // Register only the languages we actually use (saves ~800KB vs full highlight.js)
@@ -67,40 +74,6 @@ hljs.registerLanguage('sql', sql)
 hljs.registerLanguage('graphql', graphql)
 hljs.registerLanguage('dockerfile', dockerfile)
 hljs.registerLanguage('makefile', makefile)
-
-const TEXT_EXTS = new Set([
-  'ts', 'tsx', 'js', 'jsx', 'json', 'jsonl', 'css', 'scss', 'less', 'html', 'htm',
-  'md', 'txt', 'yml', 'yaml', 'toml', 'xml', 'svg', 'sh', 'bash', 'zsh',
-  'py', 'rb', 'go', 'rs', 'java', 'c', 'cpp', 'h', 'hpp', 'cs', 'gs',
-  'pine', 'lua', 'r', 'pl', 'php', 'swift', 'kt', 'scala', 'sql', 'graphql',
-  'env', 'gitignore', 'editorconfig', 'prettierrc', 'eslintrc',
-  'dockerfile', 'makefile', 'cfg', 'ini', 'conf', 'log', 'output',
-])
-
-const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico'])
-
-const EXT_TO_LANG: Record<string, string> = {
-  ts: 'typescript', tsx: 'typescript', js: 'javascript', jsx: 'javascript',
-  json: 'json', css: 'css', scss: 'scss', less: 'less',
-  html: 'xml', htm: 'xml', xml: 'xml', svg: 'xml',
-  md: 'markdown', yml: 'yaml', yaml: 'yaml', toml: 'ini',
-  sh: 'bash', bash: 'bash', zsh: 'bash',
-  py: 'python', rb: 'ruby', go: 'go', rs: 'rust',
-  java: 'java', c: 'c', cpp: 'cpp', h: 'c', hpp: 'cpp', cs: 'csharp', gs: 'javascript',
-  pine: 'javascript', lua: 'lua', r: 'r', pl: 'perl', php: 'php',
-  swift: 'swift', kt: 'kotlin', scala: 'scala', sql: 'sql', graphql: 'graphql',
-  dockerfile: 'dockerfile', makefile: 'makefile',
-  ini: 'ini', conf: 'ini', cfg: 'ini',
-}
-
-function getExt(p: string): string {
-  return p.split('.').pop()?.toLowerCase() || ''
-}
-
-function canPreview(p: string): boolean {
-  const ext = getExt(p)
-  return TEXT_EXTS.has(ext) || IMAGE_EXTS.has(ext)
-}
 
 // Regex: absolute file paths — Windows (C:\...) and Unix (/Users/..., /home/..., /tmp/...)
 const PATH_RE = /(?:[A-Za-z]:[\\\/]|\/(?:Users|home|tmp|var|opt|etc|usr|mnt|srv|root)\/)[\w\-. \\\/]+\.\w{1,10}/g
@@ -214,6 +187,9 @@ export function FilePreviewModal({ filePath: rawFilePath, onClose }: FilePreview
   const [currentMatch, setCurrentMatch] = useState(0)
   const searchInputRef = useRef<HTMLInputElement>(null)
   const bodyRef = useRef<HTMLDivElement>(null)
+  const [viewMode, setViewMode] = useState<'source' | 'rendered'>('rendered')
+  const richKind = getRichPreviewKind(filePath)
+  const canCopyScript = isScriptFile(filePath)
 
   useEffect(() => {
     let cancelled = false
@@ -399,6 +375,18 @@ export function FilePreviewModal({ filePath: rawFilePath, onClose }: FilePreview
           >
             &#128269;
           </button>
+          {richKind && content !== null && (
+            <button
+              className="path-preview-btn"
+              onClick={() => setViewMode(m => (m === 'rendered' ? 'source' : 'rendered'))}
+              title={viewMode === 'rendered' ? 'Show source' : 'Show rendered preview'}
+            >
+              {viewMode === 'rendered' ? 'Source' : 'Preview'}
+            </button>
+          )}
+          {canCopyScript && content !== null && (
+            <CopyContentButton content={content} className="path-preview-btn" />
+          )}
           <button className="path-preview-close" onClick={onClose}>×</button>
         </div>
         {searchOpen && (
@@ -430,7 +418,13 @@ export function FilePreviewModal({ filePath: rawFilePath, onClose }: FilePreview
             </div>
           )}
           {content !== null && (
-            <HighlightedCode code={content} ext={getExt(filePath)} />
+            richKind && viewMode === 'rendered'
+              ? (
+                richKind === 'markdown' ? <MarkdownPreview content={content} />
+                : richKind === 'csv' ? <CsvPreview text={content} />
+                : <HtmlPreview html={content} title={fileName} />
+              )
+              : <HighlightedCode code={content} ext={getExt(filePath)} />
           )}
         </div>
       </div>

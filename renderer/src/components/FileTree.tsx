@@ -2,8 +2,12 @@ import { host } from '../host-api'
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { HighlightedCode } from './PathLinker'
 import { MarkdownPreview } from './MarkdownPreview'
+import { CsvPreview } from './CsvPreview'
+import { HtmlPreview } from './HtmlPreview'
+import { CopyContentButton } from './CopyContentButton'
 import { isProcfileName } from '../utils/procfile-parser'
 import { formatErrorMessage } from '../utils/error-message'
+import { canPreview, getFileExt, getRichPreviewKind, isScriptFile } from '../utils/file-preview'
 
 interface FileEntry {
   name: string
@@ -18,33 +22,10 @@ interface FileTreeProps {
   remoteMode?: boolean
 }
 
-const TEXT_EXTS = new Set([
-  'ts', 'tsx', 'js', 'jsx', 'json', 'css', 'scss', 'less', 'html', 'htm',
-  'md', 'txt', 'yml', 'yaml', 'toml', 'xml', 'svg', 'sh', 'bash', 'zsh',
-  'ps1', 'cmd', 'plist', 'nuspec',
-  'py', 'rb', 'go', 'rs', 'java', 'c', 'cpp', 'h', 'hpp', 'cs',
-  'env', 'gitignore', 'editorconfig', 'prettierrc', 'eslintrc',
-  'dockerfile', 'makefile', 'license', 'cfg', 'ini', 'conf', 'log',
-])
-
-const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico'])
-
-function getFileExt(name: string): string {
-  const lower = name.toLowerCase()
-  // Handle dotfiles like .gitignore, .env
-  if (lower.startsWith('.') && !lower.includes('.', 1)) {
-    return lower.substring(1)
-  }
-  return lower.split('.').pop() || ''
-}
-
-function canPreview(name: string): 'text' | 'image' | 'pdf' | null {
-  const ext = getFileExt(name)
-  if (isProcfileName(name)) return 'text'
-  if (TEXT_EXTS.has(ext)) return 'text'
-  if (IMAGE_EXTS.has(ext)) return 'image'
-  if (ext === 'pdf') return 'pdf'
-  return null
+/** Procfiles have no extension, so the shared table cannot classify them by
+ *  itself — every caller here passes that fact in. */
+function previewKindOf(name: string) {
+  return canPreview(name, isProcfileName(name))
 }
 
 function FileTreeNode({
@@ -230,7 +211,8 @@ function FilePreview({ filePath, fileName, refreshKey }: { filePath: string; fil
   const [previewSearchQuery, setPreviewSearchQuery] = useState('')
   const [previewMatchCount, setPreviewMatchCount] = useState(0)
   const [previewCurrentMatch, setPreviewCurrentMatch] = useState(0)
-  const isMarkdown = getFileExt(fileName) === 'md'
+  const richKind = getRichPreviewKind(fileName)
+  const canCopyScript = isScriptFile(fileName)
 
   useEffect(() => {
     let cancelled = false
@@ -239,7 +221,7 @@ function FilePreview({ filePath, fileName, refreshKey }: { filePath: string; fil
     setError(null)
     setLoading(true)
 
-    const type = canPreview(fileName)
+    const type = previewKindOf(fileName)
     if (type === 'text') {
       host.fs.readFile(filePath).then(result => {
         if (cancelled) return
@@ -344,7 +326,7 @@ function FilePreview({ filePath, fileName, refreshKey }: { filePath: string; fil
     )
   }
 
-  if (canPreview(fileName) === 'pdf') {
+  if (previewKindOf(fileName) === 'pdf') {
     return (
       <div className="file-preview-pdf">
         <iframe
@@ -359,10 +341,15 @@ function FilePreview({ filePath, fileName, refreshKey }: { filePath: string; fil
   if (content !== null) {
     return (
       <>
-        {isMarkdown && (
+        {(richKind || canCopyScript) && (
           <div className="file-preview-mode-bar">
-            <button className={`git-diff-mode-btn${viewMode === 'rendered' ? ' active' : ''}`} onClick={() => setViewMode('rendered')}>Preview</button>
-            <button className={`git-diff-mode-btn${viewMode === 'source' ? ' active' : ''}`} onClick={() => setViewMode('source')}>Source</button>
+            {richKind && (
+              <>
+                <button className={`git-diff-mode-btn${viewMode === 'rendered' ? ' active' : ''}`} onClick={() => setViewMode('rendered')}>Preview</button>
+                <button className={`git-diff-mode-btn${viewMode === 'source' ? ' active' : ''}`} onClick={() => setViewMode('source')}>Source</button>
+              </>
+            )}
+            {canCopyScript && <CopyContentButton content={content} className="git-diff-mode-btn" />}
           </div>
         )}
         {previewSearchOpen && (
@@ -396,8 +383,12 @@ function FilePreview({ filePath, fileName, refreshKey }: { filePath: string; fil
           </div>
         )}
         <div className="file-preview-scroll" ref={previewContentRef}>
-          {isMarkdown && viewMode === 'rendered'
-            ? <MarkdownPreview content={content} />
+          {richKind && viewMode === 'rendered'
+            ? (
+              richKind === 'markdown' ? <MarkdownPreview content={content} />
+              : richKind === 'csv' ? <CsvPreview text={content} />
+              : <HtmlPreview html={content} title={fileName} />
+            )
             : <HighlightedCode code={content} ext={getFileExt(fileName)} className="file-preview-text" />
           }
         </div>
