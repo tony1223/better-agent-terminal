@@ -250,6 +250,7 @@
     "connectedToRemote": "Connected to remote host",
     "clickToManageProfiles": "Click to manage profiles",
     "dragToReorder": "Drag to reorder",
+    "folderMissing": "Folder not found on this host: {{path}}",
     "groupNamePlaceholder": "Group name (empty to remove)",
     "openInExplorer": "Open in Explorer",
     "copyPath": "Copy Path",

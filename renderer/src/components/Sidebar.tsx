@@ -122,6 +122,37 @@ export function Sidebar({
   // listener can reorder without re-subscribing on every render.
   const workspacesRef = useRef(workspaces)
   workspacesRef.current = workspaces
+  // Workspaces whose folder does not exist on the host (e.g. a list carried
+  // over from another machine). fs.isDirectory is host-routed, so a remote
+  // window asks the host. Re-checked when the list changes and on focus.
+  const [missingFolderIds, setMissingFolderIds] = useState<Set<string>>(() => new Set())
+  const folderPathKey = workspaces.map(w => `${w.id}|${w.folderPath}`).join(';')
+  useEffect(() => {
+    let cancelled = false
+    const check = async () => {
+      const targets = workspacesRef.current.filter(w => !!w.folderPath)
+      const results = await Promise.all(targets.map(async w => {
+        try {
+          return [w.id, await host.fs.isDirectory(w.folderPath)] as const
+        } catch {
+          return [w.id, true] as const // unknown: do not flag
+        }
+      }))
+      if (cancelled) return
+      const missing = new Set(results.filter(([, ok]) => !ok).map(([id]) => id))
+      setMissingFolderIds(prev => {
+        if (prev.size === missing.size && [...prev].every(id => missing.has(id))) return prev
+        return missing
+      })
+    }
+    void check()
+    const onFocus = () => { void check() }
+    window.addEventListener('focus', onFocus)
+    return () => {
+      cancelled = true
+      window.removeEventListener('focus', onFocus)
+    }
+  }, [folderPathKey])
   const onReorderRef = useRef(onReorderWorkspaces)
   onReorderRef.current = onReorderWorkspaces
   // Windows WebView2 aborts in-page HTML5 drags immediately (dragstart→dragend
@@ -695,7 +726,7 @@ export function Sidebar({
           <div
             key={workspace.id}
             data-workspace-id={workspace.id}
-            className={`workspace-item ${workspace.id === activeWorkspaceId ? 'active' : ''} ${draggedId === workspace.id ? 'dragging' : ''} ${dragOverId === workspace.id ? `drag-over-${dragPosition}` : ''}`}
+            className={`workspace-item ${workspace.id === activeWorkspaceId ? 'active' : ''} ${draggedId === workspace.id ? 'dragging' : ''} ${dragOverId === workspace.id ? `drag-over-${dragPosition}` : ''} ${missingFolderIds.has(workspace.id) ? 'folder-missing' : ''}`}
             onClick={() => {
               if (didPointerDragRef.current) { didPointerDragRef.current = false; return }
               onSelectWorkspace(workspace.id)
@@ -743,7 +774,12 @@ export function Sidebar({
                   />
                 ) : (
                   <>
-                    <span className="workspace-alias">{workspace.alias || workspace.name}</span>
+                    <span className="workspace-alias">
+                      {missingFolderIds.has(workspace.id) && (
+                        <span className="workspace-missing-badge" title={t('sidebar.folderMissing', { path: workspace.folderPath })}>⚠</span>
+                      )}
+                      {workspace.alias || workspace.name}
+                    </span>
                     {groupEditTarget === workspace.id ? (
                       <input
                         ref={groupInputRef}

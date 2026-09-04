@@ -245,6 +245,7 @@
     "connectedToRemote": "リモートホストに接続済み",
     "clickToManageProfiles": "クリックしてプロファイルを管理",
     "dragToReorder": "ドラッグして並べ替え",
+    "folderMissing": "このホストにフォルダーがありません: {{path}}",
     "groupNamePlaceholder": "グループ名（空にすると削除）",
     "openInExplorer": "エクスプローラーで開く",
     "copyPath": "パスをコピー",

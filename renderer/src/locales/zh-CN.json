@@ -243,6 +243,7 @@
     "connectedToRemote": "已连接至远程主机",
     "clickToManageProfiles": "点击管理配置文件",
     "dragToReorder": "拖拽以重新排序",
+    "folderMissing": "这台主机上找不到文件夹：{{path}}",
     "groupNamePlaceholder": "分组名称（留空以移除）",
     "openInExplorer": "在文件管理器中打开",
     "copyPath": "复制路径",

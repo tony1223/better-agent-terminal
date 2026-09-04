@@ -250,6 +250,7 @@
     "connectedToRemote": "已連線至遠端主機",
     "clickToManageProfiles": "點擊管理設定檔",
     "dragToReorder": "拖曳以重新排序",
+    "folderMissing": "這台主機上找不到資料夾：{{path}}",
     "groupNamePlaceholder": "群組名稱（留空以移除）",
     "openInExplorer": "在檔案管理員中開啟",
     "copyPath": "複製路徑",

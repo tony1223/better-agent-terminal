@@ -73,6 +73,18 @@
   text-overflow: ellipsis;
 }
 
+/* Folder missing on the host: warn on the row so the user sees it before a
+   send fails with "workspace folder not found on this host". */
+.workspace-missing-badge {
+  color: var(--warning-color, #d29922);
+  margin-right: 4px;
+  font-size: 11px;
+}
+.workspace-item.folder-missing .workspace-folder {
+  color: var(--warning-color, #d29922);
+  opacity: 0.85;
+}
+
 .workspace-item.active .workspace-folder {
   color: rgba(255, 255, 255, 0.7);
 }
