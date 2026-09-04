@@ -36,6 +36,8 @@ export interface ClaudeToolCall {
   isDeferred?: boolean
   parentToolUseId?: string
   timestamp: number
+  // Set by the renderer when the terminal result lands; drives the elapsed chip.
+  completedAt?: number
 }
 
 export interface ClaudeSessionState {

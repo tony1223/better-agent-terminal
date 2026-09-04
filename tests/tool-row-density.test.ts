@@ -11,7 +11,7 @@
 // here silently doubles the height of every timeline in the app.
 
 import * as assert from 'assert'
-import { formatCompactCount, toolRowLayout } from '../renderer/src/components/CodexAgentPanel.helpers.ts'
+import { formatCompactCount, formatToolElapsed, toolRowLayout } from '../renderer/src/components/CodexAgentPanel.helpers.ts'
 
 const OUT = 'line one\nline two\nline three\nline four\nline five'
 
@@ -36,6 +36,27 @@ const failedCollapsed = toolRowLayout({ expanded: false, hasInContent: true, out
 assert.equal(failedCollapsed.showErrorRows, true, 'a failure must be visible without expanding')
 assert.equal(failedCollapsed.showInRow, false, 'an error does not bring the IN row back')
 assert.equal(failedCollapsed.showOutRow, false)
+
+// ---- failed (non-zero exit / is_error): the OUT row opens by itself ----
+
+const failedRun = toolRowLayout({ expanded: false, hasInContent: true, outText: OUT, errorCount: 0, failed: true })
+assert.equal(failedRun.showOutRow, true, 'a failed tool must show its output without a click')
+assert.equal(failedRun.showInRow, false, 'failure does not bring the IN row back')
+assert.equal(failedRun.outSize, formatCompactCount(OUT.length))
+const failedNoOut = toolRowLayout({ expanded: false, hasInContent: true, outText: '', errorCount: 0, failed: true })
+assert.equal(failedNoOut.showOutRow, false, 'nothing to open when there is no output')
+const okRun = toolRowLayout({ expanded: false, hasInContent: true, outText: OUT, errorCount: 0, failed: false })
+assert.equal(okRun.showOutRow, false, 'success stays one line')
+
+// ---- elapsed chip ----
+
+assert.equal(formatToolElapsed(undefined, 5000), null)
+assert.equal(formatToolElapsed(1000, undefined), null)
+assert.equal(formatToolElapsed(1000, 1900), null, 'sub-second durations are noise')
+assert.equal(formatToolElapsed(1000, 2000), '1.0s')
+assert.equal(formatToolElapsed(1000, 4240), '3.2s')
+assert.equal(formatToolElapsed(1000, 73_000), '1m12s')
+assert.equal(formatToolElapsed(1000, 3_726_000), '1h02m')
 
 // ---- running / empty output ----
 

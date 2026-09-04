@@ -1020,6 +1020,31 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* Elapsed chip: same weight as the size chip, only present from 1s up. */
+.claude-tool-elapsed {
+  font-size: calc(var(--claude-font-size) - 3px);
+  color: var(--text-secondary);
+  opacity: 0.55;
+  font-variant-numeric: tabular-nums;
+}
+
+/* A failed tool (non-zero exit / is_error) reads red on its one line and keeps
+   its OUT row open — see toolRowLayout's `failed`. */
+.claude-tool-header.failed .claude-tool-name,
+.claude-tool-header.failed .claude-tool-summary,
+.claude-tool-header.failed .claude-tool-desc {
+  color: var(--danger-color);
+}
+
+.claude-tool-header.failed .claude-tool-elapsed {
+  color: var(--danger-color);
+  opacity: 0.8;
+}
+
+.claude-tool-failed-row {
+  background: rgba(239, 68, 68, 0.06);
+}
+
 .claude-tool-chevron {
   font-size: calc(var(--claude-font-size) - 4px);
   transition: transform 0.15s ease;

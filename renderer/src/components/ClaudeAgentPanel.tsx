@@ -35,7 +35,7 @@ import { useRafBatchedString } from '../utils/use-raf-batched-string'
 import { translateRuntimeMessage } from '../utils/runtime-status-message'
 import { agentSendResultError, isMissingSessionCwdError } from '../utils/agent-send-recovery'
 import { dispatchWorkerCommand, parseWorkerSlashCommand } from '../utils/worker-command'
-import { buildCollapsedOutputPreview, formatContentSize, parseShellInvocation, stringifyToolResult, summarizeToolCommandInput, summarizeToolSearchResult, toolRowLayout, truncateMiddle } from './CodexAgentPanel.helpers'
+import { buildCollapsedOutputPreview, formatContentSize, formatToolElapsed, parseShellInvocation, stringifyToolResult, summarizeToolCommandInput, summarizeToolSearchResult, toolRowLayout, truncateMiddle } from './CodexAgentPanel.helpers'
 import { AgentToolRow } from './AgentToolRow'
 import { buildAskUserQnA, formatAskUserPrompt, normalizePendingAskUser, summarizeAskUserInput, wrapPreviewHtml } from './AskUserQuestion.helpers'
 import { AgentAskUserQnA } from './AgentAskUserQnA'
@@ -1375,7 +1375,9 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
         if (sid !== sessionId) return
         noteAgentEvent()
         workspaceStore.updateTerminalActivity(sessionId)
-        const { id, ...updates } = result as { id: string; status: string; result?: string; description?: string }
+        const { id, ...updates } = result as { id: string; status: string; result?: string; description?: string; completedAt?: number }
+        // Terminal status: stamp the finish time so the row can show elapsed.
+        if (updates.status && updates.status !== 'running') updates.completedAt = Date.now()
         if (host.debug.isDebugMode === true && (updates as { description?: string }).description) {
           host.debug.log(`[renderer] onToolResult description update id=${id} desc=${(updates as { description?: string }).description}`)
         }
@@ -4789,11 +4791,16 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
         ? summarizeToolSearchResult(toolRender.outText, t)
         : null
       const displayOutText = toolSearchSummary ?? toolRender?.outText ?? ''
+      // Denied tools already print their reason; "failed" is the tool itself
+      // reporting a non-zero exit or is_error result.
+      const toolFailed = item.status === 'error' && !item.denied
+      const elapsed = formatToolElapsed(item.timestamp, item.completedAt)
       const layout = toolRowLayout({
         expanded: rowExpanded,
         hasInContent,
         outText: displayOutText,
         errorCount: toolRender?.errors.length ?? 0,
+        failed: toolFailed,
       })
       const reminders = toolRender?.reminders ?? []
       return (
@@ -4809,6 +4816,8 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
               timestamp={item.timestamp}
               outSize={layout.outSize}
               outSizeTitle={displayOutText ? formatContentSize(displayOutText) : null}
+              elapsed={elapsed}
+              failed={toolFailed}
               expanded={rowExpanded}
               onToggle={() => toggleTool(item.id)}
             />
@@ -4858,7 +4867,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
                     ))}
                     {layout.showOutRow && outText && shouldCollapse && (
                       <div
-                        className="claude-tool-row"
+                        className={`claude-tool-row${toolFailed ? ' claude-tool-failed-row' : ''}`}
                         onClick={() => toggleTool(outBlockId)}
                       >
                         <span className="claude-tool-row-label">{t('claude.out')}</span>
@@ -4895,7 +4904,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
                     )}
                     {layout.showOutRow && displayOutText && !shouldCollapse && (
                       <div
-                        className="claude-tool-row"
+                        className={`claude-tool-row${toolFailed ? ' claude-tool-failed-row' : ''}`}
                         onClick={() => handleCopyBlock(displayOutText, outBlockId)}
                         title={t('claude.clickToCopy')}
                       >

@@ -195,6 +195,18 @@ export interface ToolRowLayout {
   showErrorRows: boolean
 }
 
+// Elapsed chip for a finished tool row. Null below one second: for the
+// Read/Edit/Grep crowd the figure is noise, and the row is denser without it.
+export function formatToolElapsed(startedAt?: number, completedAt?: number): string | null {
+  if (!startedAt || !completedAt) return null
+  const ms = completedAt - startedAt
+  if (!(ms >= 1000)) return null
+  const totalSec = Math.round(ms / 1000)
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`
+  if (totalSec < 3600) return `${Math.floor(totalSec / 60)}m${String(totalSec % 60).padStart(2, '0')}s`
+  return `${Math.floor(totalSec / 3600)}h${String(Math.floor((totalSec % 3600) / 60)).padStart(2, '0')}m`
+}
+
 // What a generic tool row shows while collapsed.
 //
 // A long session is mostly tool calls, so each collapsed one gets exactly one
@@ -206,17 +218,21 @@ export interface ToolRowLayout {
 // Errors are the deliberate exception: they stay visible while collapsed. A
 // failed tool that reads identically to a successful one is the one thing worth
 // spending a line on, and errors are rare enough not to cost density in practice.
+// `failed` (a non-zero exit / is_error result) opens the OUT row for the same
+// reason: the stderr is what the user needs to read next, so it should not sit
+// behind a click.
 export function toolRowLayout(opts: {
   expanded: boolean
   hasInContent: boolean
   outText: string
   errorCount: number
+  failed?: boolean
 }): ToolRowLayout {
-  const { expanded, hasInContent, outText, errorCount } = opts
+  const { expanded, hasInContent, outText, errorCount, failed = false } = opts
   return {
     outSize: outText ? formatCompactCount(outText.length) : null,
     showInRow: expanded && hasInContent,
-    showOutRow: expanded && !!outText,
+    showOutRow: (expanded || failed) && !!outText,
     showErrorRows: errorCount > 0,
   }
 }

@@ -33,6 +33,10 @@ export interface AgentToolRowProps {
   outSize?: string | null
   /** Full "N lines · M chars" figure, shown as the size chip's tooltip. */
   outSizeTitle?: string | null
+  /** Elapsed chip from formatElapsed, e.g. "3.2s"; omitted below one second. */
+  elapsed?: string | null
+  /** Non-zero exit / is_error result: header goes red, OUT row stays open. */
+  failed?: boolean
   expanded: boolean
   onToggle: () => void
 }
@@ -46,11 +50,13 @@ export function AgentToolRow({
   timestamp,
   outSize,
   outSizeTitle,
+  elapsed,
+  failed,
   expanded,
   onToggle,
 }: AgentToolRowProps) {
   return (
-    <div className="claude-tool-header" onClick={onToggle}>
+    <div className={`claude-tool-header${failed ? ' failed' : ''}`} onClick={onToggle}>
       <span className="claude-tool-name">{toolName}</span>
       {shell && <span className="claude-tool-shell">| {shell} |</span>}
       {isDeferred && <span className="claude-tool-badge claude-deferred-badge">deferred</span>}
@@ -61,6 +67,7 @@ export function AgentToolRow({
         {outSize && (
           <span className="claude-tool-outsize" title={outSizeTitle || undefined}>{outSize}</span>
         )}
+        {elapsed && <span className="claude-tool-elapsed">{elapsed}</span>}
         {timestamp !== undefined && timestamp > 0 && (
           <span className="claude-tool-time" title={formatFullTimestamp(timestamp)}>
             {formatTimestamp(timestamp)}
