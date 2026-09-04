@@ -214,32 +214,52 @@ function FilePreview({ filePath, fileName, refreshKey }: { filePath: string; fil
   const richKind = getRichPreviewKind(fileName)
   const canCopyScript = isScriptFile(fileName)
 
+  // Which file the current content belongs to. A refreshKey bump for the SAME
+  // file is a watch-triggered re-read: keep what is on screen and only swap
+  // when the bytes actually changed. Clearing to "Loading..." on every bump
+  // made the preview flash and lose its scroll position whenever anything in
+  // the watched tree was touched — on remote hosts, where agents write files
+  // constantly, that was every few hundred milliseconds even while reading an
+  // untouched file.
+  const loadedFileRef = useRef<string | null>(null)
   useEffect(() => {
     let cancelled = false
-    setContent(null)
-    setImageUrl(null)
-    setError(null)
-    setLoading(true)
+    const fileKey = `${filePath}
+${fileName}`
+    const silentRefresh = loadedFileRef.current === fileKey
+    loadedFileRef.current = fileKey
+    if (!silentRefresh) {
+      setContent(null)
+      setImageUrl(null)
+      setError(null)
+      setLoading(true)
+    }
 
     const type = previewKindOf(fileName)
     if (type === 'text') {
       host.fs.readFile(filePath).then(result => {
         if (cancelled) return
         if (result.error) {
-          setError(result.error === 'File too large' ? `File too large (${Math.round((result.size || 0) / 1024)}KB)` : result.error)
+          // A transient read failure mid-refresh should not blank a preview
+          // that was fine a moment ago.
+          if (!silentRefresh) {
+            setError(result.error === 'File too large' ? `File too large (${Math.round((result.size || 0) / 1024)}KB)` : result.error)
+          }
         } else {
-          setContent(result.content || '')
+          const next = result.content || ''
+          setContent(prev => (prev === next ? prev : next))
+          if (silentRefresh) setError(null)
         }
         setLoading(false)
       })
     } else if (type === 'image') {
       host.image.readAsDataUrl(filePath).then(url => {
         if (cancelled) return
-        setImageUrl(url)
+        setImageUrl(prev => (prev === url ? prev : url))
         setLoading(false)
       }).catch(() => {
         if (cancelled) return
-        setError('Failed to load image')
+        if (!silentRefresh) setError('Failed to load image')
         setLoading(false)
       })
     } else if (type === 'pdf') {
