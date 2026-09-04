@@ -44,6 +44,12 @@ export async function loadAnthropicSdk() {
 // Test-only setter — pass an object to swap in a fake SDK, null to
 // force the "SDK unavailable" path, undefined to clear the override
 // and let normal lazy loading resume.
+// True while a test has swapped the SDK: nothing will be spawned, so checks
+// that only guard the real CLI spawn (e.g. cwd existence) can stand down.
+export function hasSdkOverrideForTests() {
+  return _sdkOverrideSet
+}
+
 export function __setSdkOverrideForTests(value) {
   if (value === undefined) {
     _sdkOverrideSet = false

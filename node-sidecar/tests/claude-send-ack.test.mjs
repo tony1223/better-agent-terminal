@@ -175,6 +175,23 @@ try {
     }
   })
 
+  // 3b. A cwd that does not exist on this host must name the folder, not the
+  //     SDK's "native binary failed to launch" (a spawn ENOENT on the cwd).
+  //     Runs against the real SDK loader (no override) because the check only
+  //     guards a real spawn and stands down for test-injected SDKs.
+  await check('a session whose cwd is missing on this host reports the folder', async () => {
+    const sessionId = 'cwd-missing-on-host'
+    seedSession(sessionId, join(cwd, 'not-on-this-machine'))
+    try {
+      const reply = await send('claude.sendMessage', { sessionId, prompt: 'hello', suppressUserEcho: true })
+      const message = reply.error?.message || reply.result?.error || ''
+      assert.match(message, /workspace folder not found on this host/i)
+      assert.match(message, /not-on-this-machine/)
+    } finally {
+      sessions.delete(sessionId)
+    }
+  })
+
   // 4. Without a usable SDK the stub reply is produced before any push, so it
   //    stays on the reply rather than being replaced by an ack.
   await check('the SDK-unavailable stub still answers on the reply', async () => {

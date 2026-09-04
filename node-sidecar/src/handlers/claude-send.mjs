@@ -40,7 +40,7 @@ import {
   clearSessionStream,
   updateSessionToolResult,
 } from '../lib/state.mjs'
-import { loadAnthropicSdk } from '../lib/sdk-loader.mjs'
+import { hasSdkOverrideForTests, loadAnthropicSdk } from '../lib/sdk-loader.mjs'
 import { info as logInfo, warn as logWarn } from '../lib/logger.mjs'
 import { runtimeEffortForMode, isUltracodeMode, parseEffortRejection, fallbackEffortFrom } from '../lib/claude-effort.mjs'
 import {
@@ -49,6 +49,7 @@ import {
   compactLatencySample,
   latencySampleIsUseful,
 } from '../lib/latency-sample.mjs'
+import { existsSync, statSync } from 'node:fs'
 import { autoCompactWindowForClaudeSelection, sdkModelForClaudeSelection } from '../lib/models.mjs'
 import { loadInstalledPlugins, dataUrlToContentBlock } from '../lib/plugins.mjs'
 import { resolveClaudeCliBinaryWithInstall } from './claude-auth.mjs'
@@ -68,6 +69,23 @@ function sessionCwd(session) {
 
 function missingSessionCwdError(sessionId) {
   return `claude.sendMessage(${shortSessionId(sessionId)}): session has no cwd; startSession must be called with options.cwd`
+}
+
+// The SDK spawns the CLI with `cwd`; when that folder is missing Node fails
+// the spawn with ENOENT and the SDK blames the *binary* ("native binary at
+// ... exists but failed to launch"). Seen when a workspace list carried over
+// from another machine points at folders this host does not have. Check up
+// front so the user reads the real cause.
+function sessionCwdMissingOnHostError(sessionId, cwd) {
+  return `claude.sendMessage(${shortSessionId(sessionId)}): workspace folder not found on this host: ${cwd}. The session's cwd must exist on the machine running the agent.`
+}
+
+function isExistingDirectory(path) {
+  try {
+    return existsSync(path) && statSync(path).isDirectory()
+  } catch {
+    return false
+  }
 }
 
 function clientMessageId(params) {
@@ -923,6 +941,11 @@ async function buildQueryOptions(s, sessionId, prompt) {
   const cwd = sessionCwd(s)
   if (!cwd) {
     throw new Error(missingSessionCwdError(sessionId))
+  }
+  // Only meaningful for a real spawn; a test-injected SDK never spawns.
+  if (!hasSdkOverrideForTests() && !isExistingDirectory(cwd)) {
+    logWarn(sessionCwdMissingOnHostError(sessionId, cwd))
+    throw new Error(sessionCwdMissingOnHostError(sessionId, cwd))
   }
   const sdkMode = s.permissionMode === 'bypassPlan' ? 'plan' : s.permissionMode
   const sdkModel = sdkModelForClaudeSelection(s.model)
