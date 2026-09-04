@@ -1449,6 +1449,35 @@ fn text_from_value(value: &Value) -> String {
     }
 }
 
+/// Separator to append when the app-server announces a new reasoning summary
+/// part (`item/reasoning/summaryPartAdded`). The deltas that follow belong to a
+/// new paragraph; without this the parts run together while streaming, while
+/// the completed item (whose `summary` array joins with a blank line) does not.
+fn reasoning_part_separator(streamed_so_far: &str) -> Option<&'static str> {
+    if streamed_so_far.trim().is_empty() || streamed_so_far.ends_with("\n\n") {
+        None
+    } else {
+        Some("\n\n")
+    }
+}
+
+/// Notifications the app-server sends that BAT has nothing to do with. They
+/// used to be logged as "unhandled" on every arrival — thousands of lines per
+/// day for turn/diff/updated alone — which buried the log entries that matter.
+fn is_quiet_codex_notification(method: &str) -> bool {
+    matches!(
+        method,
+        "turn/diff/updated"
+            | "turn/plan/updated"
+            | "thread/status/changed"
+            | "thread/settings/updated"
+            | "thread/goal/cleared"
+            | "mcpServer/startupStatus/updated"
+            | "item/commandExecution/terminalInteraction"
+            | "serverRequest/resolved"
+    )
+}
+
 fn codex_context_transfer_item(context_markdown: &str) -> Result<Value, String> {
     let context = context_markdown.trim();
     if context.is_empty() {
@@ -6597,9 +6626,21 @@ fn handle_notification(
                 append_stream_delta(app, state, &session_id, "thinking", delta);
             }
         }
+        "item/reasoning/summaryPartAdded" => {
+            let separator = {
+                let sessions = state.inner.sessions.lock().expect("codex sessions lock");
+                sessions
+                    .get(&session_id)
+                    .and_then(|session| reasoning_part_separator(&session.thinking_text))
+            };
+            if let Some(separator) = separator {
+                append_stream_delta(app, state, &session_id, "thinking", separator.to_string());
+            }
+        }
         "item/commandExecution/outputDelta" => {
             handle_command_execution_output_delta(app, state, &session_id, &params);
         }
+        other if is_quiet_codex_notification(other) => {}
         other => log_codex(app, &session_id, format!("unhandled notification {other}")),
     }
 }
@@ -7064,6 +7105,29 @@ fn handle_item_started(
                 ),
             );
         }
+        Some("contextCompaction") => {
+            // Codex auto-compacts at 90% of the context window. Surface it the
+            // same way the Claude side does: a runtime status the panel renders
+            // in place of the bare "thinking" spinner, with elapsed time.
+            let meta = {
+                let mut sessions = state.inner.sessions.lock().expect("codex sessions lock");
+                sessions.get_mut(session_id).map(|session| {
+                    set_runtime_status(
+                        session,
+                        "compacting",
+                        "Codex is compacting the conversation context.",
+                    );
+                    session.metadata()
+                })
+            };
+            if let Some(meta) = meta {
+                emit(app, "claude:status", session_id, "meta", meta);
+            }
+        }
+        // Reasoning streams through summaryTextDelta and is committed on
+        // item/completed; user messages are our own echo. Neither needs a
+        // log line per turn.
+        Some("reasoning" | "userMessage") => {}
         other => log_codex(
             app,
             session_id,
@@ -7247,6 +7311,23 @@ fn handle_item_completed(
                 }),
             );
         }
+        Some("contextCompaction") => {
+            let meta = {
+                let mut sessions = state.inner.sessions.lock().expect("codex sessions lock");
+                sessions.get_mut(session_id).and_then(|session| {
+                    if clear_runtime_status_if_set(session) {
+                        Some(session.metadata())
+                    } else {
+                        None
+                    }
+                })
+            };
+            if let Some(meta) = meta {
+                emit(app, "claude:status", session_id, "meta", meta);
+            }
+            log_codex(app, session_id, "context compaction finished".to_string());
+        }
+        Some("userMessage") => {}
         other => log_codex(
             app,
             session_id,
@@ -7464,6 +7545,23 @@ fn handle_turn_completed(
 mod tests {
     use super::*;
     use std::env;
+
+    #[test]
+    fn reasoning_part_separator_only_between_parts() {
+        assert_eq!(reasoning_part_separator(""), None);
+        assert_eq!(reasoning_part_separator("   "), None);
+        assert_eq!(reasoning_part_separator("First part."), Some("\n\n"));
+        assert_eq!(reasoning_part_separator("First part.\n\n"), None);
+    }
+
+    #[test]
+    fn quiet_codex_notifications_skip_the_unhandled_log() {
+        assert!(is_quiet_codex_notification("turn/diff/updated"));
+        assert!(is_quiet_codex_notification("thread/status/changed"));
+        assert!(is_quiet_codex_notification("mcpServer/startupStatus/updated"));
+        assert!(!is_quiet_codex_notification("warning"));
+        assert!(!is_quiet_codex_notification("item/reasoning/summaryPartAdded"));
+    }
 
     fn test_codex_session() -> CodexSession {
         CodexSession {
