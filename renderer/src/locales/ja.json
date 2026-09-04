@@ -226,7 +226,15 @@
     "justNow": "たった今",
     "minutesAgo": "{{count}}分前",
     "hoursAgo": "{{count}}時間前",
-    "daysAgo": "{{count}}日前"
+    "daysAgo": "{{count}}日前",
+    "needsApproval": "承認待ち",
+    "needsAnswer": "回答待ち",
+    "approve": "承認",
+    "running": "実行中",
+    "runningCount": "{{count}} 件実行中",
+    "otherWindow": "{{name}} ウィンドウ",
+    "sectionNeedsYou": "対応が必要",
+    "sectionRunning": "実行中"
   },
   "sidebar": {
     "workspaces": "ワークスペース",

@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import { useWorkspace, workspaceStore } from '../stores/workspace-store'
+import { useNotifications } from '../stores/notification-store'
 import { shallowEqual } from '../stores/use-store'
+import { workspaceHasUnreadCompletion } from '../utils/attention'
 
 interface ActivityIndicatorProps {
   lastActivityTime?: number | null
@@ -38,6 +40,12 @@ export function ActivityIndicator({
     },
     shallowEqual,
   )
+  // "Finished, not yet looked at": an unread completion notification for this
+  // workspace. Read state flips when the workspace is viewed (NotificationBell
+  // owns that), so the dot drops back to the dim inactive green by itself.
+  const hasUnread = useNotifications(
+    entries => (workspaceId ? workspaceHasUnreadCompletion(entries, workspaceId) : false),
+  )
   const [isActive, setIsActive] = useState(false)
 
   // Single timeout for active→inactive transition (replaces 1s interval)
@@ -60,7 +68,9 @@ export function ActivityIndicator({
     return () => clearTimeout(timeout)
   }, [activityData.lastActivityTime])
 
-  const className = `activity-indicator ${size} ${isActive ? 'active' : 'inactive'}${activityData.hasPending ? ' pending' : ''}`
+  // Precedence: pending (red) > active (yellow) > unread (bright green) > inactive.
+  const stateClass = isActive ? 'active' : hasUnread ? 'unread' : 'inactive'
+  const className = `activity-indicator ${size} ${stateClass}${activityData.hasPending ? ' pending' : ''}`
 
   return (
     <div className={className}>

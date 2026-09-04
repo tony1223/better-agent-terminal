@@ -230,7 +230,15 @@
     "justNow": "just now",
     "minutesAgo": "{{count}}m ago",
     "hoursAgo": "{{count}}h ago",
-    "daysAgo": "{{count}}d ago"
+    "daysAgo": "{{count}}d ago",
+    "needsApproval": "waiting for approval",
+    "needsAnswer": "waiting for your answer",
+    "approve": "Approve",
+    "running": "running",
+    "runningCount": "{{count}} running",
+    "otherWindow": "{{name}} window",
+    "sectionNeedsYou": "Needs you",
+    "sectionRunning": "Running"
   },
 
   "sidebar": {

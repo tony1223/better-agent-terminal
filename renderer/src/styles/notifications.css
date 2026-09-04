@@ -44,6 +44,15 @@
   opacity: 0.65;
 }
 
+/* Finished work nobody has looked at yet: solid green with a glow, no
+   animation. Fades back to the dim inactive green once the workspace is
+   viewed (see NotificationBell's mark-read effect). */
+.activity-indicator.unread {
+  background-color: #10b981;
+  box-shadow: 0 0 7px rgba(16, 185, 129, 0.9);
+  opacity: 1;
+}
+
 .activity-indicator.pending {
   background-color: #ef4444;
   box-shadow: 0 0 6px rgba(239, 68, 68, 0.6);

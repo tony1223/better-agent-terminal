@@ -1,5 +1,6 @@
 import { host, isTauri } from '../host-api'
 import { useState, useEffect, useRef, useCallback, useMemo, Fragment, cloneElement, isValidElement, memo } from 'react'
+import { describePendingAction } from '../utils/attention'
 import { flushSync } from 'react-dom'
 import { useTranslation } from 'react-i18next'
 import type { TFunction } from 'i18next'
@@ -1191,7 +1192,10 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
   // Sync pending action state to workspace store for breathing light indicator
   useEffect(() => {
     const hasPending = !!(pendingPermission || pendingQuestion)
-    workspaceStore.setTerminalPendingAction(sessionId, hasPending)
+    workspaceStore.setTerminalPendingAction(sessionId, hasPending, {
+      label: describePendingAction(pendingPermission, pendingQuestion),
+      kind: pendingPermission ? 'permission' : pendingQuestion ? 'question' : null,
+    })
   }, [sessionId, pendingPermission, pendingQuestion])
 
   useEffect(() => {
@@ -3421,6 +3425,20 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
       setPermissionCustomText('')
     }
   }, [sessionId, pendingPermission, permissionFocus, permissionCustomText, showDontAskAgain])
+
+  // The sidebar bell can approve this session's pending permission without
+  // switching to the workspace first. Only plain "yes" — anything else still
+  // needs the card.
+  useEffect(() => {
+    if (!pendingPermission) return
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<{ sessionId?: string }>).detail
+      if (detail?.sessionId !== sessionId) return
+      handlePermissionSelect(0)
+    }
+    window.addEventListener('bat:approve-pending', handler)
+    return () => window.removeEventListener('bat:approve-pending', handler)
+  }, [sessionId, pendingPermission, handlePermissionSelect])
 
   // Read plan file content when ExitPlanMode permission appears
   useEffect(() => {

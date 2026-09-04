@@ -812,11 +812,24 @@ class WorkspaceStore {
     }
   }
 
-  setTerminalPendingAction(id: string, pending: boolean): void {
+  setTerminalPendingAction(
+    id: string,
+    pending: boolean,
+    detail?: { label?: string | null; kind?: 'permission' | 'question' | null },
+  ): void {
+    const label = pending ? detail?.label ?? undefined : undefined
+    const kind = pending ? detail?.kind ?? undefined : undefined
+    const terminal = this.state.terminals.find(t => t.id === id)
+    if (
+      terminal
+      && (terminal.hasPendingAction ?? false) === pending
+      && terminal.pendingActionLabel === label
+      && terminal.pendingActionKind === kind
+    ) return
     this.state = {
       ...this.state,
       terminals: this.state.terminals.map(t =>
-        t.id === id ? { ...t, hasPendingAction: pending } : t
+        t.id === id ? { ...t, hasPendingAction: pending, pendingActionLabel: label, pendingActionKind: kind } : t
       )
     }
     this.notify()

@@ -76,6 +76,8 @@ export interface TerminalInstance {
   scrollbackBuffer: string[];
   lastActivityTime?: number;
   hasPendingAction?: boolean;
+  pendingActionLabel?: string;     // Transient: what the agent is waiting on (for the bell list)
+  pendingActionKind?: 'permission' | 'question';
   isAgentRunning?: boolean;       // Transient: pins a live agent panel in renderer memory
   hasUserInput?: boolean;         // Tracks user input before auto-running agent command
   agentCommandSent?: boolean;     // Prevents duplicate auto-run agent commands

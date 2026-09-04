@@ -224,7 +224,15 @@
     "justNow": "刚才",
     "minutesAgo": "{{count}} 分钟前",
     "hoursAgo": "{{count}} 小时前",
-    "daysAgo": "{{count}} 天前"
+    "daysAgo": "{{count}} 天前",
+    "needsApproval": "等你批准",
+    "needsAnswer": "等你回答",
+    "approve": "批准",
+    "running": "运行中",
+    "runningCount": "{{count}} 个运行中",
+    "otherWindow": "{{name}} 窗口",
+    "sectionNeedsYou": "需要你",
+    "sectionRunning": "运行中"
   },
   "sidebar": {
     "workspaces": "工作区",

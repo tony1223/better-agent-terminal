@@ -44,6 +44,7 @@
     "test:ask-user-question": "tsx tests/ask-user-question.test.ts",
     "test:claude-message-guards": "tsx tests/claude-message-guards.test.ts",
     "test:claude-model-groups": "tsx tests/claude-model-groups.test.ts",
+    "test:attention-list": "tsx tests/attention-list.test.ts",
     "test:latency-stats": "tsx tests/latency-stats.test.ts",
     "test:slash-commands": "tsx tests/slash-commands.test.ts",
     "test:tool-row-density": "tsx tests/tool-row-density.test.ts",

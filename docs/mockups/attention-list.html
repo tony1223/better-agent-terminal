@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>BAT 示意圖：「需要我」清單（左側欄版）</title>
+<style>
+  body { margin:0; background:#151515; color:#ddd; font-family: "Segoe UI", "Microsoft JhengHei", sans-serif; }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 32px 24px 80px; }
+  h1 { font-size: 22px; margin: 0 0 6px; }
+  h2 { font-size: 16px; margin: 40px 0 10px; color:#9cdcfe; }
+  p.note { color:#aaa; font-size: 14px; line-height: 1.6; margin: 0 0 16px; }
+  .app { position:relative; border:1px solid #333; border-radius: 10px; background:#1e1e1e; overflow:hidden; box-shadow: 0 10px 40px rgba(0,0,0,.5); display:flex; height:400px; }
+  .sidebar { width:240px; background:#252526; border-right:1px solid #333; display:flex; flex-direction:column; font-size:13px; }
+  .sb-head { padding:10px 12px; font-size:11px; color:#888; letter-spacing:.5px; text-transform:uppercase; }
+  .ws-list { flex:1; padding:0 8px; overflow:hidden; }
+  .ws { position:relative; padding:8px 12px 8px 14px; border-radius:4px; margin-bottom:4px; display:flex; align-items:center; gap:8px; }
+  .ws.active { background:#094771; }
+  .ws .bar { position:absolute; left:0; top:0; bottom:0; width:4px; border-radius:2px; }
+  .ws .info { flex:1; min-width:0; display:flex; flex-direction:column; gap:2px; }
+  .ws .alias { font-weight:500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .ws .folder { font-size:11px; color:#8a8a8a; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .ws.active .folder { color:rgba(255,255,255,.7); }
+  .ws .dot { position:relative; width:8px; height:8px; border-radius:2px; flex-shrink:0; }
+  .dot.run { background:#fbbf24; box-shadow:0 0 8px rgba(251,191,36,.7); }
+  .dot.done { background:#10b981; box-shadow:0 0 6px rgba(16,185,129,.8); }
+  .dot.seen { background:#10b981; opacity:.35; box-shadow:none; }
+  .dot.need { background:#ef4444; box-shadow:0 0 6px rgba(239,68,68,.6); }
+  .dot.need::after { content:"?"; position:absolute; right:-9px; top:50%; transform:translateY(-50%); font-size:9px; color:#ef4444; font-weight:700; }
+  .sb-foot { border-top:1px solid #333; padding:10px 12px; display:flex; align-items:center; gap:10px; }
+  .bell { position:relative; width:22px; height:22px; display:flex; align-items:center; justify-content:center; color:#999; font-size:15px; }
+  .bell .badge { position:absolute; top:-4px; right:-6px; min-width:14px; height:14px; border-radius:7px; padding:0 4px; font-size:9px; line-height:14px; text-align:center; color:#fff; background:#10b981; }
+  .bell .badge.red { background:#ef4444; }
+  .bell .badge.gray { background:#555; }
+  .addws { flex:1; border:1px dashed #444; border-radius:4px; padding:5px; text-align:center; font-size:12px; color:#888; }
+  .main { flex:1; display:flex; flex-direction:column; }
+  .tabs { display:flex; gap:4px; background:#252526; padding:6px 8px; border-bottom:1px solid #333; font-size:12px; }
+  .tab { padding:4px 12px; border-radius:4px; color:#aaa; background:#2b2b2b; }
+  .tab.active { background:#3a3a3a; color:#eee; }
+  .chat { flex:1; padding:14px; color:#666; font-size:13px; }
+  .statusbar { display:flex; gap:14px; background:#252526; border-top:1px solid #333; padding:5px 12px; font-size:12px; color:#bbb; }
+  .gr { color:#666; } .g { color:#10b981; } .y { color:#fbbf24; } .r { color:#ef4444; }
+  .list { position:absolute; left:12px; bottom:52px; width:400px; background:#2b2b2b; border:1px solid #444; border-radius:8px; padding:8px; box-shadow:0 12px 30px rgba(0,0,0,.6); font-size:12px; z-index:2; }
+  .list .hd { display:flex; justify-content:space-between; padding:2px 8px 8px; color:#888; font-size:11px; border-bottom:1px solid #3a3a3a; margin-bottom:6px; }
+  .list .hd a { color:#9cdcfe; }
+  .row { display:flex; gap:10px; padding:7px 8px; border-radius:5px; align-items:flex-start; }
+  .row:hover { background:#353535; }
+  .row .s { width:12px; text-align:center; flex-shrink:0; }
+  .row b { color:#eee; }
+  .row .m { color:#999; font-size:11px; margin-top:2px; }
+  .row .k { margin-left:auto; color:#666; font-size:11px; white-space:nowrap; }
+  .row .btn { margin-left:auto; border:1px solid #3a5a3a; color:#7ee787; border-radius:4px; padding:1px 7px; font-size:11px; white-space:nowrap; }
+  .callout { position:absolute; background:#3b3b1e; color:#ffe58f; border:1px solid #7a6a2a; border-radius:6px; padding:6px 10px; font-size:12px; max-width:300px; line-height:1.5; z-index:3; }
+  .legend { display:flex; flex-wrap:wrap; gap:18px; font-size:13px; color:#bbb; margin-top:10px; }
+  .sq { display:inline-block; width:8px; height:8px; border-radius:2px; vertical-align:middle; margin-right:4px; }
+  table { border-collapse:collapse; font-size:13px; margin-top:8px; }
+  td, th { border:1px solid #333; padding:6px 12px; text-align:left; vertical-align:top; }
+  th { background:#252526; color:#ccc; }
+  .now { color:#888; font-size:12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>「需要我」清單：示意圖（左側欄版）</h1>
+  <p class="note">
+    前提：<b>左側欄的 workspace 列</b>右邊本來就有一顆 8px 的活動小點（ActivityIndicator），footer 本來就有一個鈴鐺（NotificationBell）。
+    這個提案<b>不新增任何元件</b>，只是讓這兩個既有的東西多回答一個問題：「哪些 session 在等我？」
+  </p>
+
+  <h2>現況：小點今天的意思</h2>
+  <p class="note now">
+    黃色呼吸 = 最近 10 秒有輸出（在跑）；綠色暗淡 = 曾經有活動但現在沒動；紅色呼吸加「?」= 有工具在等你核准。
+    問題：<b>「跑完了、你還沒看」和「早就看過了」都是同一顆暗綠點</b>，所以你得一個一個點進去看。鈴鐺有未讀數字，但只算本視窗，而且列表沒告訴你做了什麼。
+  </p>
+
+  <h2>狀態 A：沒事 / 只有東西在跑</h2>
+  <p class="note">和現在完全一樣。黃點在跑，看過的暗綠，沒活動的沒點。鈴鐺灰色數字只代表「有幾個在跑」，不會閃。</p>
+  <div class="app">
+    <div class="sidebar">
+      <div class="sb-head">Workspaces</div>
+      <div class="ws-list">
+        <div class="ws active"><span class="bar" style="background:#3b82f6"></span><div class="info"><span class="alias">tlcmid-opt</span><span class="folder">[ap01] tlcmid-opt</span></div><span class="dot run"></span></div>
+        <div class="ws"><span class="bar" style="background:#f59e0b"></span><div class="info"><span class="alias">ap01gcpsre</span><span class="folder">[ap01] ap01gcpsre</span></div><span class="dot run"></span></div>
+        <div class="ws"><span class="bar" style="background:#10b981"></span><div class="info"><span class="alias">ap01sre</span><span class="folder">[ap01] ap01sre</span></div><span class="dot seen"></span></div>
+        <div class="ws"><span class="bar" style="background:#8b5cf6"></span><div class="info"><span class="alias">it.sre.dashboard</span><span class="folder">[ap01] it.sre.dashboard</span></div></div>
+        <div class="ws"><span class="bar" style="background:#ec4899"></span><div class="info"><span class="alias">tlcmid-agent</span><span class="folder">[ap01] tlcmid-agent</span></div><span class="dot seen"></span></div>
+      </div>
+      <div class="sb-foot"><div class="bell">🔔<span class="badge gray">2</span></div><div class="addws">+ Add Workspace</div></div>
+    </div>
+    <div class="main">
+      <div class="tabs"><span class="tab active">Codex</span><span class="tab">Claude</span><span class="tab">Terminal</span></div>
+      <div class="chat">…聊天串（不變）…</div>
+      <div class="statusbar"><span>Sol · high</span><span class="gr">ctx 41%</span><span class="gr">5h 62%</span></div>
+    </div>
+  </div>
+  <div class="legend">
+    <span><span class="sq" style="background:#fbbf24"></span>黃 = 在跑（現有）</span>
+    <span><span class="sq" style="background:#10b981;opacity:.35"></span>暗綠 = 看過了（現有）</span>
+    <span><span class="sq" style="background:#10b981"></span>亮綠 = 做完了、你還沒看（<b>新</b>）</span>
+    <span><span class="sq" style="background:#ef4444"></span>紅 ? = 等你核准（現有）</span>
+  </div>
+
+  <h2>狀態 B：有東西做完了</h2>
+  <p class="note">
+    做完的 workspace 小點從黃變<b>亮綠</b>，你切過去看之後才退成暗綠。鈴鐺數字變綠色，代表「幾個做完沒看」；有等核准的話變紅色。
+    沒有任何面板跳出來、沒有動畫。
+  </p>
+  <div class="app">
+    <div class="sidebar">
+      <div class="sb-head">Workspaces</div>
+      <div class="ws-list">
+        <div class="ws active"><span class="bar" style="background:#3b82f6"></span><div class="info"><span class="alias">tlcmid-opt</span><span class="folder">[ap01] tlcmid-opt</span></div><span class="dot run"></span></div>
+        <div class="ws"><span class="bar" style="background:#f59e0b"></span><div class="info"><span class="alias">ap01gcpsre</span><span class="folder">[ap01] ap01gcpsre</span></div><span class="dot done"></span></div>
+        <div class="ws"><span class="bar" style="background:#10b981"></span><div class="info"><span class="alias">ap01sre</span><span class="folder">[ap01] ap01sre</span></div><span class="dot done"></span></div>
+        <div class="ws"><span class="bar" style="background:#8b5cf6"></span><div class="info"><span class="alias">it.sre.dashboard</span><span class="folder">[ap01] it.sre.dashboard</span></div><span class="dot need"></span></div>
+        <div class="ws"><span class="bar" style="background:#ec4899"></span><div class="info"><span class="alias">tlcmid-agent</span><span class="folder">[ap01] tlcmid-agent</span></div><span class="dot seen"></span></div>
+      </div>
+      <div class="sb-foot"><div class="bell">🔔<span class="badge red">3</span></div><div class="addws">+ Add Workspace</div></div>
+    </div>
+    <div class="main">
+      <div class="tabs"><span class="tab active">Codex</span><span class="tab">Claude</span><span class="tab">Terminal</span></div>
+      <div class="chat">…聊天串（不變）…</div>
+      <div class="statusbar"><span>Sol · high</span><span class="gr">ctx 41%</span><span class="gr">5h 62%</span></div>
+    </div>
+    <div class="callout" style="left:250px; top:60px;">ap01gcpsre、ap01sre 做完了（亮綠）<br>it.sre.dashboard 在等核准（紅 ?）<br>tlcmid-agent 之前看過了（暗綠）</div>
+    <div class="callout" style="left:250px; top:330px;">鈴鐺：3 = 2 個做完 + 1 個等核准<br>紅色因為有等核准的</div>
+  </div>
+
+  <h2>狀態 C：點鈴鐺</h2>
+  <p class="note">
+    就是現有的鈴鐺清單，加三件事：<b>(1) 跨視窗</b>，把 game、bat 視窗的也列進來；<b>(2) 每列多一行說明</b>，取那個 session 最後一段 assistant 回覆的前 40 字，零成本；
+    <b>(3) 等核准的列直接有「核准」按鈕</b>，不用先切過去。點列跳到那個視窗的那個 workspace。
+  </p>
+  <div class="app">
+    <div class="sidebar">
+      <div class="sb-head">Workspaces</div>
+      <div class="ws-list">
+        <div class="ws active"><span class="bar" style="background:#3b82f6"></span><div class="info"><span class="alias">tlcmid-opt</span><span class="folder">[ap01] tlcmid-opt</span></div><span class="dot run"></span></div>
+        <div class="ws"><span class="bar" style="background:#f59e0b"></span><div class="info"><span class="alias">ap01gcpsre</span><span class="folder">[ap01] ap01gcpsre</span></div><span class="dot done"></span></div>
+        <div class="ws"><span class="bar" style="background:#10b981"></span><div class="info"><span class="alias">ap01sre</span><span class="folder">[ap01] ap01sre</span></div><span class="dot done"></span></div>
+        <div class="ws"><span class="bar" style="background:#8b5cf6"></span><div class="info"><span class="alias">it.sre.dashboard</span><span class="folder">[ap01] it.sre.dashboard</span></div><span class="dot need"></span></div>
+        <div class="ws"><span class="bar" style="background:#ec4899"></span><div class="info"><span class="alias">tlcmid-agent</span><span class="folder">[ap01] tlcmid-agent</span></div><span class="dot seen"></span></div>
+      </div>
+      <div class="sb-foot"><div class="bell" style="color:#eee">🔔<span class="badge red">3</span></div><div class="addws">+ Add Workspace</div></div>
+    </div>
+    <div class="main">
+      <div class="tabs"><span class="tab active">Codex</span><span class="tab">Claude</span><span class="tab">Terminal</span></div>
+      <div class="chat">…聊天串…</div>
+      <div class="statusbar"><span>Sol · high</span><span class="gr">ctx 41%</span><span class="gr">5h 62%</span></div>
+    </div>
+    <div class="list">
+      <div class="hd"><span>需要我 · 所有視窗</span><a>全部標為已讀</a></div>
+      <div class="row"><span class="s r">●</span><div><b>it.sre.dashboard</b> · Claude <span class="gr">· ap01</span><div class="m">等核准：Bash <code>rm -rf dist</code></div></div><span class="btn">核准</span></div>
+      <div class="row"><span class="s g">●</span><div><b>ap01gcpsre</b> · Codex <span class="gr">· ap01</span><div class="m">已修好 3 個測試，要不要 push 請確認</div></div><span class="k">4m</span></div>
+      <div class="row"><span class="s g">●</span><div><b>ap01sre</b> · Codex <span class="gr">· ap01</span><div class="m">alert rule 已更新，附上 diff</div></div><span class="k">9m</span></div>
+      <div class="row"><span class="s g">●</span><div><b>CgStairFinder</b> · Claude <span class="gr">· game 視窗</span><div class="m">報告寫在 docs/plan.md</div></div><span class="k">11m</span></div>
+      <div class="row" style="opacity:.5"><span class="s y">●</span><div><b>tlcmid-opt</b> · Codex <span class="gr">· ap01</span><div class="m">跑中 6m：terraform plan</div></div><span class="k">running</span></div>
+      <div class="row" style="opacity:.5"><span class="s y">●</span><div><b>better-terminal</b> · Claude <span class="gr">· bat 視窗</span><div class="m">跑中 1m</div></div><span class="k">running</span></div>
+    </div>
+    <div class="callout" style="left:430px; top:120px;">第二行 = 該 session 最後一段 assistant 回覆前 40 字<br>等核准的列直接可以按「核准」<br>其他視窗的列標「game 視窗」「bat 視窗」，點了會切視窗</div>
+  </div>
+
+  <h2>規則整理</h2>
+  <table>
+    <tr><th>情境</th><th>workspace 列的小點</th><th>鈴鐺</th><th>會不會跳東西</th></tr>
+    <tr><td>沒 agent 在跑、也沒新東西</td><td>無或暗綠（現況）</td><td>沒數字</td><td>不會</td></tr>
+    <tr><td>有 agent 在跑</td><td>黃呼吸（現況）</td><td>灰數字 = 跑中的數量</td><td>不會</td></tr>
+    <tr><td>做完、你還沒看</td><td><b>亮綠</b>（新）</td><td>綠數字</td><td>不會（桌面通知是第 2 點另做）</td></tr>
+    <tr><td>等核准 / 失敗</td><td>紅 ?（現況）</td><td>紅數字</td><td>不會</td></tr>
+    <tr><td>你切到那個 workspace</td><td>亮綠退成暗綠</td><td>數字減一</td><td>—</td></tr>
+    <tr><td>點鈴鐺</td><td>—</td><td>—</td><td>現有的清單，多跨視窗、多一行說明、多核准鈕</td></tr>
+  </table>
+  <p class="note" style="margin-top:16px">
+    最小版本：只做「亮綠 vs 暗綠」這一件事，其他都不動。這樣光看左側欄就知道誰做完沒看，成本一天內。
+  </p>
+</div>
+</body>
+</html>
