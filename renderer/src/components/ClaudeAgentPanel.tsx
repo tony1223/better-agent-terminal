@@ -956,12 +956,32 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
   // "Continue" sends one short prompt. Cleared as soon as a new turn starts.
   const [interruptedTurn, setInterruptedTurn] = useState<{ at: number } | null>(null)
   const activeTurnRef = useRef(false)
+  const streamingRef = useRef(false)
+  // The card is armed with a short delay: a barge-in (typing while the agent
+  // runs) interrupts the turn and immediately starts the next one, and the
+  // card must not flash in between. Streaming again cancels the pending card.
+  const interruptedCardTimerRef = useRef<number | null>(null)
   useEffect(() => {
     activeTurnRef.current = isStreaming || isInterrupted
-    if (isStreaming) setInterruptedTurn(null)
+    streamingRef.current = isStreaming
+    if (isStreaming) {
+      if (interruptedCardTimerRef.current != null) {
+        window.clearTimeout(interruptedCardTimerRef.current)
+        interruptedCardTimerRef.current = null
+      }
+      setInterruptedTurn(null)
+    }
   }, [isStreaming, isInterrupted])
+  useEffect(() => () => {
+    if (interruptedCardTimerRef.current != null) window.clearTimeout(interruptedCardTimerRef.current)
+  }, [])
   const markInterruptedTurn = useCallback(() => {
-    if (activeTurnRef.current) setInterruptedTurn({ at: Date.now() })
+    if (!activeTurnRef.current) return
+    if (interruptedCardTimerRef.current != null) window.clearTimeout(interruptedCardTimerRef.current)
+    interruptedCardTimerRef.current = window.setTimeout(() => {
+      interruptedCardTimerRef.current = null
+      if (!streamingRef.current) setInterruptedTurn({ at: Date.now() })
+    }, 800)
   }, [])
   const interruptedSummary = useMemo(
     () => (interruptedTurn ? summarizeInterruptedTurn(allMessages) : null),
