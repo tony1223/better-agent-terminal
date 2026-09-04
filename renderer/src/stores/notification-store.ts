@@ -127,7 +127,7 @@ class NotificationStore {
     for (const entry of fresh) {
       const suffix = entry.reason === 'error' ? ' ✗' : entry.reason === 'aborted' ? ' ⏹' : ' ✓'
       const body = summarizeResult(entry.error || entry.result, 120)
-      host.system.notify(`${entry.workspaceName}${suffix}`, body).catch(() => {})
+      host.system.notify(`${entry.workspaceName}${suffix}`, body, entry.workspaceId).catch(() => {})
     }
     if (settings.notifySound) playNotifyBeep()
   }

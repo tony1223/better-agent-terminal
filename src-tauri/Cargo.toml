@@ -81,6 +81,9 @@ rustls = { version = "0.23.40", default-features = false, features = ["ring", "s
 rustls-pki-types = "1.14.1"
 
 [target.'cfg(windows)'.dependencies]
+# Direct WinRT toasts on Windows so a click can bring the BAT window back
+# (tauri-plugin-notification's desktop path has no activation callback).
+tauri-winrt-notification = "0.7"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Memory", "Win32_System_SystemInformation", "Wdk_System_SystemServices"] }
 
 [dev-dependencies]

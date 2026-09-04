@@ -489,6 +489,7 @@ dependencies = [
  "tauri-plugin-notification",
  "tauri-plugin-opener",
  "tauri-plugin-updater",
+ "tauri-winrt-notification",
  "thiserror 1.0.69",
  "tokio",
  "tungstenite",

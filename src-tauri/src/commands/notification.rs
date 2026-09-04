@@ -860,6 +860,14 @@ fn apply_worktree_payload(session: &mut AgentNotificationSession, worktree: &Val
     }
 }
 
+// Bring a window to the front and switch it to a workspace. Used by the
+// notification center's focus commands and by an OS toast click.
+#[cfg(feature = "desktop")]
+pub fn focus_window_and_workspace(app: &AppHandle, window_id: &str, workspace_id: Option<&str>) {
+    let _ = focus_notification_window(app, window_id);
+    activate_notification_workspace(app, window_id, workspace_id);
+}
+
 #[cfg(feature = "desktop")]
 fn focus_notification_window(app: &AppHandle, window_id: &str) -> Option<()> {
     let win = app.get_webview_window(window_id)?;

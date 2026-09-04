@@ -680,17 +680,91 @@ pub fn app_set_dock_badge(app: AppHandle, count: i64) {
 /// store and need `document.hasFocus()`); this only performs the delivery.
 /// Failures are logged, not surfaced: a missing notification backend must not
 /// break the completion flow that triggered it.
+///
+/// Windows goes through WinRT directly so a click on the toast can bring the
+/// window that fired it back to the front and switch it to `workspace_id`.
+/// The plugin path (other platforms) has no activation callback; macOS
+/// activates the app on its own when a notification is clicked.
 #[cfg(feature = "desktop")]
 #[tauri::command]
-pub fn app_notify(app: AppHandle, title: String, body: Option<String>) {
-    use tauri_plugin_notification::NotificationExt;
-    let mut builder = app.notification().builder().title(title);
-    if let Some(body) = body.filter(|b| !b.trim().is_empty()) {
-        builder = builder.body(body);
+pub fn app_notify(
+    app: AppHandle,
+    window: WebviewWindow,
+    title: String,
+    body: Option<String>,
+    workspace_id: Option<String>,
+) {
+    let body = body.filter(|b| !b.trim().is_empty());
+    #[cfg(windows)]
+    {
+        notify_windows_toast(app, window.label().to_string(), title, body, workspace_id);
     }
-    if let Err(err) = builder.show() {
-        log_tauri(&HostContext::from_app(app.clone()), &format!("[notify] OS notification failed: {err}"));
+    #[cfg(not(windows))]
+    {
+        let _ = (window, workspace_id);
+        use tauri_plugin_notification::NotificationExt;
+        let mut builder = app.notification().builder().title(title);
+        if let Some(body) = body {
+            builder = builder.body(body);
+        }
+        if let Err(err) = builder.show() {
+            log_tauri(&HostContext::from_app(app.clone()), &format!("[notify] OS notification failed: {err}"));
+        }
     }
+}
+
+#[cfg(all(feature = "desktop", windows))]
+fn notify_windows_toast(
+    app: AppHandle,
+    window_label: String,
+    title: String,
+    body: Option<String>,
+    workspace_id: Option<String>,
+) {
+    use tauri_winrt_notification::{Duration as ToastDuration, Toast};
+    // Same AppUserModelID rule as tauri-plugin-notification: the installed
+    // app's identifier (its Start Menu shortcut carries that AUMID, which is
+    // what lets the toast show at all); a dev build borrows PowerShell's.
+    let installed = tauri::utils::platform::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.display().to_string()))
+        .map(|dir| !(dir.ends_with(r"\target\debug") || dir.ends_with(r"\target\release")))
+        .unwrap_or(true);
+    let app_id = if installed {
+        app.config().identifier.clone()
+    } else {
+        Toast::POWERSHELL_APP_ID.to_string()
+    };
+    let icon = app
+        .path()
+        .resource_dir()
+        .ok()
+        .map(|dir| dir.join("icons").join("icon.png"))
+        .filter(|path| path.is_file());
+    // Toast holds WinRT handles and is not Send: build and show it on the
+    // thread that owns it. Only Send inputs cross into the thread.
+    std::thread::spawn(move || {
+        let click_app = app.clone();
+        let click_label = window_label.clone();
+        let mut toast = Toast::new(&app_id)
+            .title(&title)
+            .text1(body.as_deref().unwrap_or(""))
+            .duration(ToastDuration::Short)
+            .on_activated(move |_action| {
+                crate::commands::notification::focus_window_and_workspace(
+                    &click_app,
+                    &click_label,
+                    workspace_id.as_deref(),
+                );
+                Ok(())
+            });
+        if let Some(icon) = icon.as_deref() {
+            toast = toast.icon(icon, tauri_winrt_notification::IconCrop::Square, "");
+        }
+        if let Err(err) = toast.show() {
+            log_tauri(&HostContext::from_app(app), &format!("[notify] OS notification failed: {err}"));
+        }
+    });
 }
 
 /// Real OS version string (Windows: `"MAJOR.MINOR.BUILD"`, e.g.

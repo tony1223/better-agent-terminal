@@ -792,8 +792,9 @@ function createTauriHost(): BatAppAPI {
       },
       // OS toast via tauri-plugin-notification. The notification store
       // decides whether to fire (settings + window focus); this only delivers.
-      notify: (title: string, body?: string) =>
-        getInvoke()<void>('app_notify', { title, body: body ?? null }),
+      // workspaceId: where a click on the toast should land (Windows).
+      notify: (title: string, body?: string, workspaceId?: string) =>
+        getInvoke()<void>('app_notify', { title, body: body ?? null, workspaceId: workspaceId ?? null }),
     },
     app: {
       // Tauri window/profile shell: see src-tauri/src/commands/app.rs.
