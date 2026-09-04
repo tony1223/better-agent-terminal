@@ -24,7 +24,7 @@ import { useRemoteDropUpload } from '../utils/remote-drop-upload'
 import { RemoteUploadConfirmDialog } from './RemoteUploadConfirmDialog'
 import { getHostUsageSnapshot, rateLimitsFromHostUsage, subscribeHostUsage } from '../utils/claude-usage-cache'
 import { displayNameForClaudeSelection } from '../utils/claude-model-presets'
-import { CODEX_MODELS, DEFAULT_CODEX_MODEL } from '../utils/codex-models'
+import { CODEX_MODELS, DEFAULT_CODEX_MODEL, codexModelValueForRow, groupCodexModelRows, splitCodexModelSelection, type CodexModelPickerRow } from '../utils/codex-models'
 import { shouldNavigateInputHistoryFromTextarea } from '../utils/input-history-navigation'
 import { buildSnippetContextPrompt, parseSnippetSlashCommand, type SnippetForContext } from '../utils/snippet-command'
 import { createToolRenderCache, getOrComputeToolRender, pruneToolRenderCache } from '../utils/tool-result-cache'
@@ -5056,32 +5056,59 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
           ) : (
             <div className="claude-resume-list">
               {(() => {
-                const builtins = availableModels.filter(m => m.source !== 'sdk')
-                const sdkModels = availableModels.filter(m => m.source === 'sdk')
-                const renderItem = (m: ModelInfo) => (
-                  <div
-                    key={m.value}
-                    className={`claude-resume-item${m.value === currentModel ? ' active' : ''}`}
-                    onClick={() => handleModelSelect(m.value)}
-                  >
-                    <div className="claude-resume-item-header">
-                      <span className="claude-resume-item-id">{m.displayName}</span>
+                // One row per base model with its context-window variants as
+                // pills on the right — the same layout as the Claude picker.
+                const rows = groupCodexModelRows(availableModels)
+                const builtinRows = rows.filter(row => row.source !== 'sdk')
+                const sdkRows = rows.filter(row => row.source === 'sdk')
+                const carriedWindow = splitCodexModelSelection(currentModel).contextWindow
+                const renderRow = (row: CodexModelPickerRow) => {
+                  const active = row.key === currentModel || row.options.some(option => option.value === currentModel)
+                  return (
+                    <div
+                      key={row.key}
+                      className={`claude-model-row${active ? ' active' : ''}`}
+                      onClick={() => handleModelSelect(codexModelValueForRow(row, carriedWindow))}
+                    >
+                      <div className="claude-model-row-main">
+                        <span className="claude-model-row-label">{row.label}</span>
+                        <span className="claude-model-row-desc">{row.description}</span>
+                      </div>
+                      {row.options.length > 0 && (
+                        <div className="claude-model-row-windows">
+                          {row.options.map(option => (
+                            <button
+                              key={option.value}
+                              type="button"
+                              className={`claude-model-window${option.value === currentModel ? ' active' : ''}`}
+                              title={option.contextWindow === null
+                                ? `${row.key} · context window served by the backend`
+                                : `${row.key} · ${option.contextWindow.toLocaleString()} token context window`}
+                              onClick={event => {
+                                event.stopPropagation()
+                                void handleModelSelect(option.value)
+                              }}
+                            >
+                              {option.label}
+                            </button>
+                          ))}
+                        </div>
+                      )}
                     </div>
-                    <div className="claude-resume-item-preview">{m.description}</div>
-                  </div>
-                )
+                  )
+                }
                 return (
                   <>
-                    {builtins.length > 0 && (
+                    {builtinRows.length > 0 && (
                       <>
                         <div className="claude-model-group-label">Better Agent Terminal</div>
-                        {builtins.map(renderItem)}
+                        {builtinRows.map(renderRow)}
                       </>
                     )}
-                    {sdkModels.length > 0 && (
+                    {sdkRows.length > 0 && (
                       <>
                         <div className="claude-model-group-label">{isCodexSession ? 'Codex Agent' : 'Claude Agent'}</div>
-                        {sdkModels.map(renderItem)}
+                        {sdkRows.map(renderRow)}
                       </>
                     )}
                   </>
