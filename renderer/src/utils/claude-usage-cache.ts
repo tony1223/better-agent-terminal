@@ -28,7 +28,11 @@ export interface HostUsageSnapshot {
   planType: string | null
   accountEmail: string | null
   fetchedAt: number
+  /** Set when the host poller is backing off; the windows above are the last good read. */
+  stale: { reason: UsageStaleReason; retryAt: number | null } | null
 }
+
+export type UsageStaleReason = 'rate_limited' | 'unauthorized' | 'network'
 
 export interface HostRateLimitStateWindow {
   resetsAt: number
@@ -101,8 +105,17 @@ function ingest(payload: unknown): boolean {
     planType: typeof p.planType === 'string' ? p.planType : null,
     accountEmail: typeof p.accountEmail === 'string' ? p.accountEmail : null,
     fetchedAt: typeof p.fetchedAt === 'number' ? p.fetchedAt : Date.now(),
+    stale: normalizeStale(p.stale),
   }
   return true
+}
+
+function normalizeStale(value: unknown): HostUsageSnapshot['stale'] {
+  if (!value || typeof value !== 'object') return null
+  const s = value as Record<string, unknown>
+  const reason = s.reason === 'rate_limited' || s.reason === 'unauthorized' ? s.reason : 'network'
+  const retryAt = typeof s.retryAt === 'number' && Number.isFinite(s.retryAt) ? s.retryAt : null
+  return { reason, retryAt }
 }
 
 function ensureStarted(): void {

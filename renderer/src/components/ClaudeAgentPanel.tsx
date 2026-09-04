@@ -18,6 +18,8 @@ import { LinkedText, FilePreviewModal } from './PathLinker'
 import { ChatMarkdown } from './ChatMarkdown'
 import { WorktreeMergedChip } from './WorktreeMergedChip'
 import { buildMessageStream } from './messageSkip'
+import { InterruptedTurnCard } from './InterruptedTurnCard'
+import { summarizeInterruptedTurn } from '../utils/interrupted-turn'
 import { filenameForPastedImage, maybeResizeImageDataUrl, readFileAsDataUrl } from '../utils/file-data-url'
 import { extractInterruptedContinuation } from '../utils/interrupted-prompt'
 import { dedupeMessagesById } from '../utils/message-dedupe'
@@ -920,6 +922,51 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
   // current message list without re-subscribing on every message.
   const allMessagesRef = useRef<MessageItem[]>(allMessages)
   allMessagesRef.current = allMessages
+
+  // "New since you last looked": remember the last message this panel showed
+  // while it was active AND the window had focus. On the next activation (or
+  // window focus) with newer messages, a divider marks where to resume
+  // reading. Sending a message clears it — the user has caught up.
+  const seenUpToIdRef = useRef<string | null>(null)
+  const [unseenFromId, setUnseenFromId] = useState<string | null>(null)
+  const revealUnseen = useCallback(() => {
+    const list = allMessagesRef.current
+    const lastId = list.length > 0 ? list[list.length - 1].id : null
+    const seen = seenUpToIdRef.current
+    if (seen && lastId && seen !== lastId) {
+      const idx = list.findIndex(m => m.id === seen)
+      setUnseenFromId(idx >= 0 ? (list[idx + 1]?.id ?? null) : null)
+    }
+    seenUpToIdRef.current = lastId
+  }, [])
+  const watchUnseenBoundary = useCallback(() => {
+    revealUnseen()
+    window.addEventListener('focus', revealUnseen)
+    return () => window.removeEventListener('focus', revealUnseen)
+  }, [revealUnseen])
+  usePanelActiveEffect(activation, watchUnseenBoundary)
+  useEffect(() => {
+    if (activation.current && typeof document !== 'undefined' && document.hasFocus()) {
+      seenUpToIdRef.current = allMessages.length > 0 ? allMessages[allMessages.length - 1].id : null
+    }
+  }, [allMessages, activation])
+
+  // Interrupted-turn recap (Esc / stop / abort / error while a turn ran).
+  // Local only: the card is derived from the messages on screen, and
+  // "Continue" sends one short prompt. Cleared as soon as a new turn starts.
+  const [interruptedTurn, setInterruptedTurn] = useState<{ at: number } | null>(null)
+  const activeTurnRef = useRef(false)
+  useEffect(() => {
+    activeTurnRef.current = isStreaming || isInterrupted
+    if (isStreaming) setInterruptedTurn(null)
+  }, [isStreaming, isInterrupted])
+  const markInterruptedTurn = useCallback(() => {
+    if (activeTurnRef.current) setInterruptedTurn({ at: Date.now() })
+  }, [])
+  const interruptedSummary = useMemo(
+    () => (interruptedTurn ? summarizeInterruptedTurn(allMessages) : null),
+    [interruptedTurn, allMessages],
+  )
   const lastRenderDlogRef = useRef<{ at: number; summary: string }>({ at: 0, summary: '' })
   const archiveDlog = useCallback((message: string) => {
     if (host.debug.isDebugMode === true) host.debug.log(message)
@@ -1476,11 +1523,13 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
           // Soft interrupt: the turn ended but the subprocess + any
           // background workflow stay alive. Keep the interrupted state
           // (so the next Esc hard-stops) and leave running tools as-is.
+          markInterruptedTurn()
           setIsInterrupted(true)
           return
         }
         setIsInterrupted(false)
         if (reason === 'aborted' || reason === 'error') {
+          markInterruptedTurn()
           // Hard stop / failure: the subprocess is gone.
           setPendingPermission(null)
           setPendingQuestion(null)
@@ -2880,6 +2929,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
     const __sendT0 = performance.now()
     const trimmed = inputValueRef.current.trim()
     if (!trimmed && attachedImages.length === 0 && attachedFiles.length === 0) return
+    setUnseenFromId(null)
 
     // Save to input history
     if (trimmed) {
@@ -3380,6 +3430,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
     if (!isStreaming && !isInterrupted) return
     // Hard abort — immediately kill the query loop
     host.claude.abortSession(sessionId)
+    markInterruptedTurn()
     setIsStreaming(false)
     setIsInterrupted(false)
     setStreamingText('')
@@ -5178,7 +5229,12 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
                   <span>{formatTimestamp(item.timestamp || 0)}</span>
                 </div>
               ) : null
-              return <Fragment key={item.id || `msg-${i}`}>{divider}{renderMessage(item, i)}</Fragment>
+              const unseen = unseenFromId && item.id === unseenFromId ? (
+                <div key={`unseen-${i}`} className="claude-time-divider claude-unseen-divider">
+                  <span>{t('claude.unseenDivider')}</span>
+                </div>
+              ) : null
+              return <Fragment key={item.id || `msg-${i}`}>{divider}{unseen}{renderMessage(item, i)}</Fragment>
             },
           )}
           {isStreaming && !streamingText && (!streamingThinking || !showThinkingMsg) && (
@@ -5221,6 +5277,13 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
                 <div className="claude-markdown"><LinkedText text={streamingText} /><span className="claude-cursor">|</span></div>
               </div>
             </div>
+          )}
+          {interruptedSummary && !isStreaming && (
+            <InterruptedTurnCard
+              summary={interruptedSummary}
+              onContinue={() => { setInputValue(t('claude.interruptedContinuePrompt')); void handleSend() }}
+              onDismiss={() => setInterruptedTurn(null)}
+            />
           )}
           <div ref={messagesEndRef} />
         </div>

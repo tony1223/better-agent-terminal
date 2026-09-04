@@ -174,6 +174,7 @@ fn app_builder(headless: bool) -> tauri::Builder<tauri::Wry> {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_notification::init())
         .manage(pty_cmd::PtyState::default())
         .manage(notification_cmd::NotificationState::default())
         .manage(notification_cmd::AgentNotificationState::default())
@@ -304,6 +305,7 @@ fn app_builder(headless: bool) -> tauri::Builder<tauri::Wry> {
             app_cmd::app_get_window_profile,
             app_cmd::app_get_system_version,
             app_cmd::app_set_title,
+            app_cmd::app_notify,
             app_cmd::app_resolve_profile_window_close,
             app_cmd::app_new_window,
             app_cmd::app_take_fresh_window_flag,

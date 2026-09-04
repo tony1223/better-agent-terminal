@@ -6,6 +6,7 @@ import { workspaceStore } from './stores/workspace-store'
 import { settingsStore } from './stores/settings-store'
 import { Sidebar } from './components/Sidebar'
 import { UpdateBanner } from './components/UpdateBanner'
+import { RemoteConnectionBanner } from './components/RemoteConnectionBanner'
 import { startAutoUpdate } from './lib/auto-update'
 import { startRuntimeAutoInstall } from './lib/runtime-auto-install'
 import { WorkspaceView, clearInitializedWorkspaces } from './components/WorkspaceView'
@@ -149,6 +150,8 @@ export default function App() {
   const [activeProfileName, setActiveProfileName] = useState<string>('Default')
   const [activeProfileIsRemote, setActiveProfileIsRemote] = useState(false)
   const [remoteClientConnected, setRemoteClientConnected] = useState(false)
+  // Banner gate: only a *lost* connection is worth a banner, not the first one.
+  const [remoteEverConnected, setRemoteEverConnected] = useState(false)
   const [activeProfileId, setActiveProfileId] = useState<string | null>(null)
   const [activeRemoteProfileId, setActiveRemoteProfileId] = useState<string | null>(null)
   // "host:port" of the remote connection this window is viewing (null for
@@ -914,6 +917,7 @@ export default function App() {
         const status = await host.remote.clientStatus()
         if (disposed) return
         setRemoteClientConnected(status.connected)
+        if (status.connected) setRemoteEverConnected(true)
         if (!status.connected) {
           nextDelay = REMOTE_DISCONNECTED_POLL_MS
           await attemptReconnect()
@@ -1212,6 +1216,10 @@ export default function App() {
   return (
     <div className="app">
       <UpdateBanner />
+      <RemoteConnectionBanner
+        visible={activeProfileIsRemote && remoteEverConnected && !remoteClientConnected}
+        hostName={activeProfileName}
+      />
       <Sidebar
         width={panelSettings.sidebar.width}
         workspaces={visibleWorkspaces}

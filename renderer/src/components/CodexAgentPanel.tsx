@@ -18,6 +18,8 @@ import { LinkedText, FilePreviewModal } from './PathLinker'
 import { ChatMarkdown } from './ChatMarkdown'
 import { WorktreeMergedChip } from './WorktreeMergedChip'
 import { buildMessageStream } from './messageSkip'
+import { InterruptedTurnCard } from './InterruptedTurnCard'
+import { summarizeInterruptedTurn } from '../utils/interrupted-turn'
 import { filenameForPastedImage, readFileAsDataUrl } from '../utils/file-data-url'
 import { extractInterruptedContinuation } from '../utils/interrupted-prompt'
 import { isTauriNativeDropInside, listenTauriNativeDrop } from '../utils/tauri-native-drop'
@@ -962,6 +964,52 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
     [loadedArchive, messages],
   )
   messageCountRef.current = allMessages.length
+  const allMessagesRef = useRef<MessageItem[]>(allMessages)
+  allMessagesRef.current = allMessages
+  // "New since you last looked": remember the last message this panel showed
+  // while it was active AND the window had focus. On the next activation (or
+  // window focus) with newer messages, a divider marks where to resume
+  // reading. Sending a message clears it — the user has caught up.
+  const seenUpToIdRef = useRef<string | null>(null)
+  const [unseenFromId, setUnseenFromId] = useState<string | null>(null)
+  const revealUnseen = useCallback(() => {
+    const list = allMessagesRef.current
+    const lastId = list.length > 0 ? list[list.length - 1].id : null
+    const seen = seenUpToIdRef.current
+    if (seen && lastId && seen !== lastId) {
+      const idx = list.findIndex(m => m.id === seen)
+      setUnseenFromId(idx >= 0 ? (list[idx + 1]?.id ?? null) : null)
+    }
+    seenUpToIdRef.current = lastId
+  }, [])
+  const watchUnseenBoundary = useCallback(() => {
+    revealUnseen()
+    window.addEventListener('focus', revealUnseen)
+    return () => window.removeEventListener('focus', revealUnseen)
+  }, [revealUnseen])
+  usePanelActiveEffect(activation, watchUnseenBoundary)
+  useEffect(() => {
+    if (activation.current && typeof document !== 'undefined' && document.hasFocus()) {
+      seenUpToIdRef.current = allMessages.length > 0 ? allMessages[allMessages.length - 1].id : null
+    }
+  }, [allMessages, activation])
+
+  // Interrupted-turn recap (Esc / stop / abort / error while a turn ran).
+  // Local only: the card is derived from the messages on screen, and
+  // "Continue" sends one short prompt. Cleared as soon as a new turn starts.
+  const [interruptedTurn, setInterruptedTurn] = useState<{ at: number } | null>(null)
+  const activeTurnRef = useRef(false)
+  useEffect(() => {
+    activeTurnRef.current = isStreaming || isInterrupted
+    if (isStreaming) setInterruptedTurn(null)
+  }, [isStreaming, isInterrupted])
+  const markInterruptedTurn = useCallback(() => {
+    if (activeTurnRef.current) setInterruptedTurn({ at: Date.now() })
+  }, [])
+  const interruptedSummary = useMemo(
+    () => (interruptedTurn ? summarizeInterruptedTurn(allMessages) : null),
+    [interruptedTurn, allMessages],
+  )
   const lastRenderDlogRef = useRef<{ at: number; summary: string }>({ at: 0, summary: '' })
   const archiveDlog = useCallback((message: string) => {
     if (host.debug.isDebugMode === true) host.debug.log(message)
@@ -1442,6 +1490,7 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
       api.onTurnEnd((sid: string, payload) => {
         if (sid !== sessionId) return
         const reason = payload?.reason
+        if (reason === 'aborted' || reason === 'error' || reason === 'interrupted') markInterruptedTurn()
         setIsStreaming(false)
         setIsInterrupted(false)
         setSessionMeta(prev => clearRuntimeStatusMeta(prev))
@@ -2540,6 +2589,7 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
     const sendStart = performance.now()
     const trimmed = inputValueRef.current.trim()
     if (!trimmed && attachedImages.length === 0 && attachedFiles.length === 0) return
+    setUnseenFromId(null)
     const tag = `[Codex:${sessionId.slice(0, 8)}]`
     const debugSend = host.debug.isDebugMode === true
     if (debugSend) {
@@ -3046,6 +3096,7 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
         }])
         return
       }
+      markInterruptedTurn()
       setIsInterrupted(true)
       setStreamingText('')
       setStreamingThinking('')
@@ -3081,6 +3132,7 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
         }])
         return
       }
+      markInterruptedTurn()
       setIsStreaming(false)
       setIsInterrupted(false)
       setStreamingText('')
@@ -4805,7 +4857,12 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
                   <span>{formatTimestamp(item.timestamp || 0)}</span>
                 </div>
               ) : null
-              return <Fragment key={item.id || `msg-${i}`}>{divider}{renderMessage(item, i)}</Fragment>
+              const unseen = unseenFromId && item.id === unseenFromId ? (
+                <div key={`unseen-${i}`} className="claude-time-divider claude-unseen-divider">
+                  <span>{t('claude.unseenDivider')}</span>
+                </div>
+              ) : null
+              return <Fragment key={item.id || `msg-${i}`}>{divider}{unseen}{renderMessage(item, i)}</Fragment>
             },
           )}
           {isStreaming && !streamingText && (!streamingThinking || !showThinkingMsg) && (
@@ -4848,6 +4905,13 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
                 <div className="claude-markdown"><LinkedText text={streamingText} /><span className="claude-cursor">|</span></div>
               </div>
             </div>
+          )}
+          {interruptedSummary && !isStreaming && (
+            <InterruptedTurnCard
+              summary={interruptedSummary}
+              onContinue={() => { setInputValue(t('claude.interruptedContinuePrompt')); void handleSend() }}
+              onDismiss={() => setInterruptedTurn(null)}
+            />
           )}
           <div ref={messagesEndRef} />
         </div>

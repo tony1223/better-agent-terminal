@@ -471,6 +471,14 @@
     "github": "GitHub",
     "builtWith": "使用 Tauri、React 和 xterm.js 构建"
   },
+  "usage": {
+    "pausedRateLimited": "用量暂停更新：请求被限流",
+    "pausedUnauthorized": "用量无法获取：登录已过期",
+    "pausedNetwork": "用量暂停更新：网络错误"
+  },
+  "remoteBanner": {
+    "reconnecting": "与 {{host}} 的连接中断，正在重新连接…"
+  },
   "update": {
     "newVersionAvailable": "有新版本可用！",
     "currentVersion": "当前版本：v{{version}}",
@@ -629,6 +637,16 @@
     "permissionClickToCycle": "权限：{{mode}}（点击切换）",
     "modelClickToSelect": "模型：{{model}}（点击选择）",
     "clickToCopy": "点击复制",
+    "unseenDivider": "上次看到这里",
+    "interruptedTitle": "上次在这里中断",
+    "interruptedPrompt": "指令",
+    "interruptedTools": "共 {{count}} 次工具调用，最后：",
+    "interruptedUnfinished": "{{count}} 个未完成",
+    "interruptedLastReply": "最后回复",
+    "interruptedContinue": "继续",
+    "interruptedHint": "只发送一句接续提示，不会另外花 token 做摘要。",
+    "interruptedDismiss": "关闭",
+    "interruptedContinuePrompt": "接续刚才中断前的工作，从最后一步继续。",
     "runtimeStatus": {
       "compactingClaude": "正在压缩上下文；仍在等待 Claude API 响应。",
       "preparingClaude": "正在准备 Claude 请求。",

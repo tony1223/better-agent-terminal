@@ -492,6 +492,14 @@
     "builtWith": "Built with Tauri, React, and xterm.js"
   },
 
+  "usage": {
+    "pausedRateLimited": "Usage paused: rate limited",
+    "pausedUnauthorized": "Usage unavailable: login expired",
+    "pausedNetwork": "Usage paused: network error"
+  },
+  "remoteBanner": {
+    "reconnecting": "Connection to {{host}} lost, reconnecting…"
+  },
   "update": {
     "newVersionAvailable": "New Version Available!",
     "currentVersion": "Current: v{{version}}",
@@ -654,6 +662,16 @@
     "permissionClickToCycle": "Permission: {{mode}} (click to cycle)",
     "modelClickToSelect": "Model: {{model}} (click to select)",
     "clickToCopy": "Click to copy",
+    "unseenDivider": "New since you last looked",
+    "interruptedTitle": "Turn interrupted here",
+    "interruptedPrompt": "Prompt",
+    "interruptedTools": "{{count}} tool calls, last:",
+    "interruptedUnfinished": "{{count}} unfinished",
+    "interruptedLastReply": "Last reply",
+    "interruptedContinue": "Continue",
+    "interruptedHint": "Sends one short prompt; nothing is summarized by the model.",
+    "interruptedDismiss": "Dismiss",
+    "interruptedContinuePrompt": "Continue the work you were doing before the interruption, picking up from the last step.",
     "runtimeStatus": {
       "compactingClaude": "Compacting context; still waiting for Claude API response.",
       "preparingClaude": "Preparing Claude request.",

@@ -1,5 +1,7 @@
 import { host } from '../host-api'
 import { workspaceStore } from './workspace-store'
+import { settingsStore } from './settings-store'
+import { summarizeResult } from '../utils/attention'
 
 export interface NotificationEntry {
   id: string
@@ -29,6 +31,9 @@ class NotificationStore {
   private subscribed = false
   private unsubscribePush?: () => void
   private unsubscribeActivate?: () => void
+  // Ids already seen by this window. Null until the first list() so entries
+  // that existed before this window opened never produce a toast.
+  private knownIds: Set<string> | null = null
 
   getEntries(): NotificationEntry[] {
     return this.entries
@@ -52,9 +57,11 @@ class NotificationStore {
     this.subscribed = true
     try {
       this.entries = await host.notification.list()
+      this.knownIds = new Set(this.entries.map(e => e.id))
       this.emit()
     } catch { /* ignore */ }
     this.unsubscribePush = host.notification.onUpdate((entries) => {
+      this.announceNew(entries)
       this.entries = entries
       this.emit()
     })
@@ -90,7 +97,49 @@ class NotificationStore {
   }
 
   async focusEntry(id: string): Promise<void> {
+    // Remote windows show the host's list; the host cannot focus a window on
+    // this machine, so switch tabs locally and mark the entry read here.
+    if (workspaceStore.getViewedRemoteProfileId()) {
+      const entry = this.entries.find(e => e.id === id)
+      const workspaceId = entry?.workspaceId
+      if (workspaceId && workspaceStore.getState().workspaces.some(w => w.id === workspaceId)) {
+        workspaceStore.setActiveWorkspace(workspaceId)
+      }
+      await host.notification.markRead(id)
+      return
+    }
     await host.notification.focusEntry(id)
+  }
+
+  // OS toast for completions that arrived after this window last looked.
+  // Settings: notifyOnComplete (default on), notifyOnlyBackground (skip while
+  // this window has focus), notifySound (short beep alongside the toast).
+  private announceNew(entries: NotificationEntry[]): void {
+    const known = this.knownIds
+    this.knownIds = new Set(entries.map(e => e.id))
+    if (!known) return
+    const fresh = entries.filter(e => !known.has(e.id) && !e.read && e.kind !== 'remote-client' && this.isMine(e))
+    if (fresh.length === 0) return
+    const settings = settingsStore.getSettings()
+    if (settings.notifyOnComplete === false) return
+    const focused = typeof document !== 'undefined' && document.hasFocus()
+    if (settings.notifyOnlyBackground && focused) return
+    for (const entry of fresh) {
+      const suffix = entry.reason === 'error' ? ' ✗' : entry.reason === 'aborted' ? ' ⏹' : ' ✓'
+      const body = summarizeResult(entry.error || entry.result, 120)
+      host.system.notify(`${entry.workspaceName}${suffix}`, body).catch(() => {})
+    }
+    if (settings.notifySound) playNotifyBeep()
+  }
+
+  // Local windows own entries by window label. A remote window renders the
+  // host's list, whose labels name host windows, so it keys on the host
+  // profile it is viewing instead.
+  private isMine(entry: NotificationEntry): boolean {
+    const remoteProfileId = workspaceStore.getViewedRemoteProfileId()
+    if (remoteProfileId) return !entry.profileId || entry.profileId === remoteProfileId
+    const windowId = workspaceStore.getWindowId()
+    return !windowId || entry.windowId === windowId
   }
 
   async focusLatestUnread(): Promise<{ id: string; windowId: string } | null> {
@@ -99,6 +148,31 @@ class NotificationStore {
 }
 
 export const notificationStore = new NotificationStore()
+
+// Two short tones via WebAudio: no asset to ship, works in every webview.
+function playNotifyBeep(): void {
+  try {
+    const Ctor = (window as unknown as { AudioContext?: typeof AudioContext; webkitAudioContext?: typeof AudioContext })
+    const AudioCtx = Ctor.AudioContext || Ctor.webkitAudioContext
+    if (!AudioCtx) return
+    const ctx = new AudioCtx()
+    const play = (freq: number, at: number) => {
+      const osc = ctx.createOscillator()
+      const gain = ctx.createGain()
+      osc.type = 'sine'
+      osc.frequency.value = freq
+      gain.gain.setValueAtTime(0.0001, at)
+      gain.gain.exponentialRampToValueAtTime(0.18, at + 0.01)
+      gain.gain.exponentialRampToValueAtTime(0.0001, at + 0.16)
+      osc.connect(gain).connect(ctx.destination)
+      osc.start(at)
+      osc.stop(at + 0.18)
+    }
+    play(880, ctx.currentTime)
+    play(1175, ctx.currentTime + 0.17)
+    window.setTimeout(() => { void ctx.close() }, 600)
+  } catch { /* audio unavailable */ }
+}
 
 import { createSelectorHook } from './use-store'
 export const useNotifications = createSelectorHook<NotificationEntry[]>({

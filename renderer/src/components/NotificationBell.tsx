@@ -189,7 +189,13 @@ export function NotificationBell() {
     window.dispatchEvent(new CustomEvent('bat:approve-pending', { detail: { sessionId: row.terminalId } }))
   }, [])
 
+  const viewedRemoteProfileId = workspaceStore.getViewedRemoteProfileId()
   const windowLabel = (entry: NotificationEntry): string | null => {
+    if (viewedRemoteProfileId) {
+      // Host list in a remote window: "elsewhere" means another host profile.
+      if (!entry.profileId || entry.profileId === viewedRemoteProfileId) return null
+      return t('notifications.otherWindow', { name: profileNames[entry.profileId] || entry.profileId })
+    }
     if (!entry.windowId || !currentWindowId || entry.windowId === currentWindowId) return null
     const name = (entry.profileId && profileNames[entry.profileId]) || entry.windowId
     return t('notifications.otherWindow', { name })

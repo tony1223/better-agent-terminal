@@ -614,6 +614,103 @@
   opacity: 0.7;
 }
 
+/* "New since you last looked" boundary: same layout as the time divider,
+   tinted so it reads as a bookmark rather than a timestamp. */
+.claude-unseen-divider::before,
+.claude-unseen-divider::after {
+  background: #10b981;
+  opacity: 0.55;
+}
+.claude-unseen-divider span {
+  color: #10b981;
+  opacity: 0.95;
+}
+
+/* Interrupted-turn card: local recap + one-click continue. */
+.claude-interrupted-card {
+  margin: 10px 8px 6px;
+  padding: 8px 12px;
+  border: 1px solid rgba(210, 153, 34, 0.55);
+  border-left: 3px solid var(--warning-color, #d29922);
+  border-radius: 6px;
+  background: rgba(210, 153, 34, 0.06);
+  font-size: calc(var(--claude-font-size) - 1px);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.claude-interrupted-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.claude-interrupted-title {
+  color: var(--warning-color, #d29922);
+  font-weight: 600;
+}
+.claude-interrupted-dismiss {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+  padding: 0 4px;
+}
+.claude-interrupted-row {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  min-width: 0;
+}
+.claude-interrupted-label {
+  flex: 0 0 auto;
+  color: var(--text-secondary);
+  opacity: 0.8;
+  font-size: calc(var(--claude-font-size) - 2px);
+}
+.claude-interrupted-text {
+  min-width: 0;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.claude-interrupted-tool {
+  font-family: var(--font-mono, monospace);
+  font-size: calc(var(--claude-font-size) - 2px);
+  margin-right: 8px;
+  opacity: 0.9;
+}
+.claude-interrupted-unfinished {
+  color: var(--danger-color);
+  font-size: calc(var(--claude-font-size) - 2px);
+}
+.claude-interrupted-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 2px;
+}
+.claude-interrupted-continue {
+  background: var(--warning-color, #d29922);
+  color: #1a1a1a;
+  border: none;
+  border-radius: 4px;
+  padding: 3px 10px;
+  font-size: calc(var(--claude-font-size) - 1px);
+  font-weight: 600;
+  cursor: pointer;
+}
+.claude-interrupted-continue:hover {
+  filter: brightness(1.1);
+}
+.claude-interrupted-hint {
+  color: var(--text-secondary);
+  opacity: 0.7;
+  font-size: calc(var(--claude-font-size) - 3px);
+}
+
 /* Load more archived messages button */
 .claude-load-more {
   display: flex;

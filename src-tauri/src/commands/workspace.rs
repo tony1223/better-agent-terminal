@@ -125,7 +125,7 @@ fn workspace_load_impl(
     Ok(Some(text))
 }
 
-fn remote_profile_target_id(app: &tauri::AppHandle, window_label: &str) -> Option<String> {
+pub(crate) fn remote_profile_target_id(app: &tauri::AppHandle, window_label: &str) -> Option<String> {
     let profile_id = window_registry::profile_id_for_window(app, window_label)?;
     let profile = profile_cmd::profile_get(app.clone(), profile_id)?;
     if profile.kind != "remote" {

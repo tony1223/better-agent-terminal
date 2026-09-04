@@ -675,6 +675,24 @@ pub fn app_set_dock_badge(app: AppHandle, count: i64) {
     }
 }
 
+/// OS toast for an agent completion. The renderer decides *whether* to notify
+/// (notifyOnComplete / notifyOnlyBackground / notifySound live in its settings
+/// store and need `document.hasFocus()`); this only performs the delivery.
+/// Failures are logged, not surfaced: a missing notification backend must not
+/// break the completion flow that triggered it.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub fn app_notify(app: AppHandle, title: String, body: Option<String>) {
+    use tauri_plugin_notification::NotificationExt;
+    let mut builder = app.notification().builder().title(title);
+    if let Some(body) = body.filter(|b| !b.trim().is_empty()) {
+        builder = builder.body(body);
+    }
+    if let Err(err) = builder.show() {
+        log_tauri(&HostContext::from_app(app.clone()), &format!("[notify] OS notification failed: {err}"));
+    }
+}
+
 /// Real OS version string (Windows: `"MAJOR.MINOR.BUILD"`, e.g.
 /// `"10.0.26220"`). The renderer uses the build number to decide whether
 /// xterm's Windows ConPTY line-wrapping heuristics should apply — they only

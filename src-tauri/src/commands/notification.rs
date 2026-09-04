@@ -18,10 +18,19 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 #[cfg(feature = "desktop")]
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
+#[cfg(feature = "desktop")]
+use std::time::Duration;
 
 #[cfg(feature = "desktop")]
 use crate::commands::app::log_tauri;
+#[cfg(feature = "desktop")]
+use crate::commands::workspace::remote_profile_target_id;
+use crate::event_hub::publish_runtime_event;
+#[cfg(feature = "desktop")]
+use crate::event_hub::publish_runtime_event_to_windows;
 use crate::host_context::HostContext;
+#[cfg(feature = "desktop")]
+use crate::remote_client::RustRemoteClientState;
 #[cfg(feature = "desktop")]
 use crate::window_registry;
 
@@ -134,41 +143,114 @@ pub struct FocusResult {
     pub window_id: String,
 }
 
+// The list/mark/clear commands proxy to the host when this window views a
+// remote profile: the notification center is host-owned state, so a remote
+// window shows the host's entries and the host applies every mutation. The
+// focus/window-read commands stay local — they act on local OS windows.
 #[cfg(feature = "desktop")]
-#[tauri::command]
-pub fn notification_list(state: State<'_, NotificationState>) -> Vec<NotificationEntry> {
-    state.lock().clone()
+async fn remote_notification_invoke(
+    app: &AppHandle,
+    window_label: &str,
+    channel: &'static str,
+    args: Vec<Value>,
+) -> Option<Result<Value, String>> {
+    remote_profile_target_id(app, window_label)?;
+    let remote_client = app.state::<RustRemoteClientState>().inner().clone();
+    let routing_label = window_label.to_string();
+    let result = crate::async_rt::spawn_blocking(move || {
+        remote_client.invoke(&routing_label, channel, args, Duration::from_secs(15))
+    })
+    .await;
+    Some(match result {
+        Ok(value) => value,
+        Err(err) => Err(format!("remote.invoke {channel} worker failed: {err}")),
+    })
 }
 
 #[cfg(feature = "desktop")]
 #[tauri::command]
-pub fn notification_mark_read(
-    app: AppHandle,
-    state: State<'_, NotificationState>,
-    id: String,
-) -> bool {
+pub async fn notification_list(app: AppHandle, window: WebviewWindow) -> Vec<NotificationEntry> {
+    let label = window.label().to_string();
+    if let Some(result) = remote_notification_invoke(&app, &label, "notification:list", Vec::new()).await {
+        return match result {
+            Ok(value) => serde_json::from_value(value).unwrap_or_default(),
+            Err(err) => {
+                log_tauri(&HostContext::from_app(app.clone()), &format!("[notification] remote list failed: {err}"));
+                Vec::new()
+            }
+        };
+    }
+    notification_list_core(&HostContext::from_app(app))
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn notification_mark_read(app: AppHandle, window: WebviewWindow, id: String) -> bool {
+    let label = window.label().to_string();
+    if let Some(result) =
+        remote_notification_invoke(&app, &label, "notification:mark-read", vec![json!({ "id": id })]).await
+    {
+        return result.ok().and_then(|v| v.as_bool()).unwrap_or(false);
+    }
+    notification_mark_read_core(&HostContext::from_app(app), &id)
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn notification_mark_all_read(app: AppHandle, window: WebviewWindow) -> bool {
+    let label = window.label().to_string();
+    if let Some(result) =
+        remote_notification_invoke(&app, &label, "notification:mark-all-read", Vec::new()).await
+    {
+        return result.is_ok();
+    }
+    notification_mark_all_read_core(&HostContext::from_app(app));
+    true
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn notification_clear(app: AppHandle, window: WebviewWindow) -> bool {
+    let label = window.label().to_string();
+    if let Some(result) = remote_notification_invoke(&app, &label, "notification:clear", Vec::new()).await {
+        return result.is_ok();
+    }
+    notification_clear_core(&HostContext::from_app(app));
+    true
+}
+
+// Host-side implementations. Shared by the local commands above and the
+// remote server dispatch (`notification:*` arms in remote_server.rs).
+pub fn notification_list_core(app: &HostContext) -> Vec<NotificationEntry> {
+    app.try_state::<NotificationState>()
+        .map(|state| state.lock().clone())
+        .unwrap_or_default()
+}
+
+pub fn notification_mark_read_core(app: &HostContext, id: &str) -> bool {
+    let Some(state) = app.try_state::<NotificationState>() else {
+        return false;
+    };
     let updated = {
         let mut entries = state.lock();
-        if let Some(e) = entries.iter_mut().find(|e| e.id == id) {
-            if e.read {
-                false
-            } else {
+        match entries.iter_mut().find(|e| e.id == id) {
+            Some(e) if !e.read => {
                 e.read = true;
                 true
             }
-        } else {
-            false
+            _ => false,
         }
     };
     if updated {
-        emit_update(&app, &state);
+        publish_update(app, &state);
     }
     updated
 }
 
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub fn notification_mark_all_read(app: AppHandle, state: State<'_, NotificationState>) -> bool {
+pub fn notification_mark_all_read_core(app: &HostContext) -> bool {
+    let Some(state) = app.try_state::<NotificationState>() else {
+        return false;
+    };
     let mut changed = false;
     {
         let mut entries = state.lock();
@@ -180,9 +262,28 @@ pub fn notification_mark_all_read(app: AppHandle, state: State<'_, NotificationS
         }
     }
     if changed {
-        emit_update(&app, &state);
+        publish_update(app, &state);
     }
-    true
+    changed
+}
+
+pub fn notification_clear_core(app: &HostContext) -> bool {
+    let Some(state) = app.try_state::<NotificationState>() else {
+        return false;
+    };
+    let cleared = {
+        let mut entries = state.lock();
+        if entries.is_empty() {
+            false
+        } else {
+            entries.clear();
+            true
+        }
+    };
+    if cleared {
+        publish_update(app, &state);
+    }
+    cleared
 }
 
 #[cfg(feature = "desktop")]
@@ -204,25 +305,7 @@ pub fn notification_mark_window_read(
         }
     }
     if changed {
-        emit_update(&app, &state);
-    }
-    true
-}
-
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub fn notification_clear(app: AppHandle, state: State<'_, NotificationState>) -> bool {
-    let cleared = {
-        let mut entries = state.lock();
-        if entries.is_empty() {
-            false
-        } else {
-            entries.clear();
-            true
-        }
-    };
-    if cleared {
-        emit_update(&app, &state);
+        publish_update(&HostContext::from_app(app), &state);
     }
     true
 }
@@ -818,16 +901,38 @@ fn mark_entry_read_and_emit(app: &AppHandle, state: &State<'_, NotificationState
         }
     };
     if changed {
-        emit_update(app, state);
+        publish_update(&HostContext::from_app(app.clone()), state);
     }
 }
 
-// Internal helper — push the current entry list to all listeners.
-// Renderer subscribes via `listen("notification:update", ...)`.
-#[cfg(feature = "desktop")]
-fn emit_update(app: &AppHandle, state: &State<'_, NotificationState>) {
+// Push the current entry list to every listener. Goes through the event hub
+// so `notification:update` also reaches remote clients (it is on the
+// proxied-event allowlist). Locally it targets only windows that view a
+// local profile: a remote-profile window shows the *host's* list, and a
+// local update landing there would overwrite it with this machine's entries.
+fn publish_update(app: &HostContext, state: &NotificationState) {
     let entries = state.lock().clone();
-    let _ = app.emit("notification:update", entries);
+    let payload = serde_json::to_value(entries).unwrap_or_default();
+    #[cfg(feature = "desktop")]
+    {
+        let handle = app.app();
+        let local_windows: Vec<String> = handle
+            .webview_windows()
+            .keys()
+            .filter(|label| remote_profile_target_id(handle, label).is_none())
+            .cloned()
+            .collect();
+        publish_runtime_event_to_windows(
+            app,
+            &local_windows,
+            "notification:update",
+            payload,
+            "rust-notification",
+        );
+        return;
+    }
+    #[cfg(not(feature = "desktop"))]
+    publish_runtime_event(app, "notification:update", payload, "rust-notification");
 }
 
 // Helper used by the (future) agent sidecar to push a new entry.
@@ -848,11 +953,7 @@ pub fn add_entry(app: &HostContext, state: &NotificationState, entry: Notificati
             entries.truncate(MAX_ENTRIES);
         }
     }
-    let snapshot = state.lock().clone();
-    app.emit(
-        "notification:update",
-        serde_json::to_value(snapshot).unwrap_or_default(),
-    );
+    publish_update(app, state);
 }
 
 fn next_notification_id() -> String {

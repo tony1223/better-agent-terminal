@@ -294,8 +294,22 @@ export const WorkspaceView = memo(function WorkspaceView({ workspace, terminals,
     const fiveHour = usageWindowOf(snap, 'fiveHour')
     const sevenDay = usageWindowOf(snap, 'sevenDay')
     if (!fiveHour && !sevenDay) return null
+    // Host poller backing off (429 / expired login / network): keep the last
+    // read visible and say why it is not refreshing, instead of going silent.
+    const stale = (snap as Partial<HostUsageSnapshot>).stale ?? null
+    const staleKey = stale?.reason === 'rate_limited' ? 'usage.pausedRateLimited'
+      : stale?.reason === 'unauthorized' ? 'usage.pausedUnauthorized'
+      : 'usage.pausedNetwork'
     return (
       <span className="workspace-account-menu-usage-lines">
+        {stale && (
+          <span className="workspace-account-menu-usage-row workspace-account-menu-usage-stale">
+            <span>⏸ {t(staleKey)}</span>
+            {stale.retryAt != null && stale.retryAt > Date.now() && (
+              <span>↻ {formatUsageRemaining(stale.retryAt - Date.now())}</span>
+            )}
+          </span>
+        )}
         {fiveHour && (
           <span className="workspace-account-menu-usage-row" title={fiveHour.resetsAt ? new Date(fiveHour.resetsAt).toLocaleString() : undefined}>
             <span>5h</span>

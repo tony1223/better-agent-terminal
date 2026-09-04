@@ -51,6 +51,7 @@ tauri-plugin-opener = { version = "2", optional = true }
 tauri-plugin-dialog = { version = "2", optional = true }
 tauri-plugin-clipboard-manager = { version = "2", optional = true }
 tauri-plugin-updater = { version = "2", optional = true }
+tauri-plugin-notification = { version = "2", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"
@@ -107,6 +108,7 @@ desktop = [
     "dep:tauri-plugin-dialog",
     "dep:tauri-plugin-clipboard-manager",
     "dep:tauri-plugin-updater",
+    "dep:tauri-plugin-notification",
 ]
 headless = []
 

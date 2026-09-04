@@ -491,6 +491,14 @@
     "builtWith": "使用 Tauri、React 和 xterm.js 建置"
   },
 
+  "usage": {
+    "pausedRateLimited": "用量暫停更新：請求被限流",
+    "pausedUnauthorized": "用量無法取得：登入已過期",
+    "pausedNetwork": "用量暫停更新：網路錯誤"
+  },
+  "remoteBanner": {
+    "reconnecting": "與 {{host}} 的連線中斷，重新連線中…"
+  },
   "update": {
     "newVersionAvailable": "有新版本可用！",
     "currentVersion": "目前版本：v{{version}}",
@@ -652,6 +660,16 @@
     "permissionClickToCycle": "權限：{{mode}}（點擊切換）",
     "modelClickToSelect": "模型：{{model}}（點擊選擇）",
     "clickToCopy": "點擊複製",
+    "unseenDivider": "上次看到這裡",
+    "interruptedTitle": "上次在這裡中斷",
+    "interruptedPrompt": "指令",
+    "interruptedTools": "共 {{count}} 次工具呼叫，最後：",
+    "interruptedUnfinished": "{{count}} 個未完成",
+    "interruptedLastReply": "最後回覆",
+    "interruptedContinue": "繼續",
+    "interruptedHint": "只送出一句接續提示，不會另外花 token 做摘要。",
+    "interruptedDismiss": "關閉",
+    "interruptedContinuePrompt": "接續剛才中斷前的工作，從最後一步繼續。",
     "runtimeStatus": {
       "compactingClaude": "正在壓縮上下文；仍在等待 Claude API 回應。",
       "preparingClaude": "正在準備 Claude 請求。",

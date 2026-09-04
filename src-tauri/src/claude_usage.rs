@@ -184,13 +184,22 @@ fn poll_once(ctx: &HostContext, client: &reqwest::blocking::Client) -> Duration 
             // 401 self-heals: the CLI refreshes credentials and the next tick
             // re-reads the file. 429/5xx/network: back off.
             warn(ctx, &format!("poll failed: {err}"));
-            return BACKOFF_MAX.min(POLL_INTERVAL * 4);
+            let retry = BACKOFF_MAX.min(POLL_INTERVAL * 4);
+            let reason = match err.status().map(|s| s.as_u16()) {
+                Some(429) => "rate_limited",
+                Some(401) | Some(403) => "unauthorized",
+                _ => "network",
+            };
+            publish_stale(ctx, "claude", reason, retry);
+            return retry;
         }
     };
 
     let Some(mut snapshot) = normalize_usage_response(&data) else {
         warn(ctx, "response had no usable windows (schema drift?)");
-        return BACKOFF_MAX.min(POLL_INTERVAL * 4);
+        let retry = BACKOFF_MAX.min(POLL_INTERVAL * 4);
+        publish_stale(ctx, "claude", "network", retry);
+        return retry;
     };
 
     if let Some(obj) = snapshot.as_object_mut() {
@@ -234,6 +243,33 @@ fn store_and_publish(ctx: &HostContext, provider: &str, snapshot: Value) {
             .is_none()
     };
     publish_stored_snapshot(ctx, provider, snapshot, first);
+}
+
+// A failed poll should not leave the UI guessing: re-publish the last good
+// snapshot for this provider with a `stale` marker (why, and when the next
+// attempt is due). A successful poll publishes a fresh snapshot without the
+// marker, which clears it. No prior snapshot: nothing to annotate, stay quiet.
+fn publish_stale(ctx: &HostContext, provider: &str, reason: &str, retry: Duration) {
+    let snapshot = {
+        let Ok(mut store) = snapshot_store().lock() else {
+            return;
+        };
+        let Some(mut snapshot) = store.get(provider).cloned() else {
+            return;
+        };
+        if let Some(obj) = snapshot.as_object_mut() {
+            obj.insert(
+                "stale".into(),
+                json!({
+                    "reason": reason,
+                    "retryAt": now_ms() + retry.as_millis() as u64,
+                }),
+            );
+        }
+        store.insert(provider.to_string(), snapshot.clone());
+        snapshot
+    };
+    publish_stored_snapshot(ctx, provider, snapshot, false);
 }
 
 fn publish_stored_snapshot(ctx: &HostContext, provider: &str, snapshot: Value, first: bool) {

@@ -790,6 +790,10 @@ function createTauriHost(): BatAppAPI {
           win.removeEventListener('online', onOnline)
         }
       },
+      // OS toast via tauri-plugin-notification. The notification store
+      // decides whether to fire (settings + window focus); this only delivers.
+      notify: (title: string, body?: string) =>
+        getInvoke()<void>('app_notify', { title, body: body ?? null }),
     },
     app: {
       // Tauri window/profile shell: see src-tauri/src/commands/app.rs.

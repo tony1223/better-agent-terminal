@@ -3175,6 +3175,16 @@ fn invoke_rust_for_remote(
         "profile:list" => serde_json::to_value(profile_cmd::profile_list_core(&ctx))
             .map(|value| strip_profile_secrets(&value))
             .map_err(|err| format!("remote profile:list serialization failed: {err}")),
+        "notification:list" => serde_json::to_value(notification_cmd::notification_list_core(&ctx))
+            .map_err(|err| format!("remote notification:list serialization failed: {err}")),
+        "notification:mark-read" => match optional_string_param(params, "id") {
+            Some(id) => Ok(Value::Bool(notification_cmd::notification_mark_read_core(&ctx, &id))),
+            None => Err("remote notification:mark-read requires id".to_string()),
+        },
+        "notification:mark-all-read" => Ok(Value::Bool(
+            notification_cmd::notification_mark_all_read_core(&ctx),
+        )),
+        "notification:clear" => Ok(Value::Bool(notification_cmd::notification_clear_core(&ctx))),
         "profile:get-active-ids" => {
             serde_json::to_value(profile_cmd::profile_get_active_ids_core(&ctx))
                 .map_err(|err| format!("remote profile:get-active-ids serialization failed: {err}"))

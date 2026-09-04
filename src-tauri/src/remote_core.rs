@@ -777,6 +777,9 @@ pub fn is_proxied_remote_event(channel: &str) -> bool {
             // correct all along; what broke it was canonicalization rewriting
             // agent:usage into a claude:usage that nothing publishes.
             | "agent:usage"
+            // Host-owned notification center: remote windows render the host's
+            // list, so every change has to fan out to connected clients.
+            | "notification:update"
             | "fs:changed"
             | "profile:changed"
             | "workspace:detached"
@@ -790,6 +793,12 @@ pub fn is_proxied_remote_event(channel: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notification_updates_reach_remote_clients() {
+        assert!(is_proxied_remote_event("notification:update"));
+        assert!(!is_proxied_remote_event("notification:activate-workspace"));
+    }
 
     #[test]
     fn negotiates_protocols_with_legacy_default() {

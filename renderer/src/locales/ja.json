@@ -476,6 +476,14 @@
     "github": "GitHub",
     "builtWith": "Tauri、React、xterm.js で構築されています"
   },
+  "usage": {
+    "pausedRateLimited": "使用量の更新を一時停止：レート制限",
+    "pausedUnauthorized": "使用量を取得できません：ログイン期限切れ",
+    "pausedNetwork": "使用量の更新を一時停止：ネットワークエラー"
+  },
+  "remoteBanner": {
+    "reconnecting": "{{host}} との接続が切れました。再接続中…"
+  },
   "update": {
     "newVersionAvailable": "新しいバージョンがあります",
     "currentVersion": "現在: v{{version}}",
@@ -635,6 +643,16 @@
     "permissionClickToCycle": "許可: {{mode}}（クリックで切り替え）",
     "modelClickToSelect": "モデル: {{model}}（クリックで選択）",
     "clickToCopy": "クリックでコピー",
+    "unseenDivider": "前回ここまで確認",
+    "interruptedTitle": "前回ここで中断",
+    "interruptedPrompt": "指示",
+    "interruptedTools": "ツール呼び出し {{count}} 回、最後：",
+    "interruptedUnfinished": "未完了 {{count}} 件",
+    "interruptedLastReply": "最後の返答",
+    "interruptedContinue": "続ける",
+    "interruptedHint": "短い継続プロンプトを1つ送るだけで、モデルによる要約は行いません。",
+    "interruptedDismiss": "閉じる",
+    "interruptedContinuePrompt": "中断前に行っていた作業を、最後のステップから続けてください。",
     "runtimeStatus": {
       "compactingClaude": "コンテキストを圧縮中。Claude API の応答を待っています。",
       "preparingClaude": "Claude リクエストを準備中です。",
