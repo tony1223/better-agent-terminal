@@ -364,7 +364,9 @@ export const WorkerPanel = memo(function WorkerPanel({ terminalId, procfilePath,
       name: proc.name,
       command: proc.command,
       cwd: processCwd,
-      shell: shellRef.current,
+      // A remote window's shell setting describes this machine, not the
+      // host; leave it unset so the host resolves its own default shell.
+      shell: isRemoteClientRef.current ? undefined : shellRef.current,
       customEnv: getWorktreeProcessEnv(processCwd),
     })
     ptyIdsRef.current.add(ptyId)

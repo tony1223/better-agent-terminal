@@ -8,7 +8,8 @@ use crate::commands::{
     agent as agent_cmd, app as app_cmd, claude as claude_cmd, fs as fs_cmd, git as git_cmd,
     github as github_cmd, image as image_cmd, notification as notification_cmd,
     profile as profile_cmd, pty as pty_cmd, runtime as runtime_cmd, settings as settings_cmd,
-    snippet as snippet_cmd, worker_buffer::WorkerBufferState, worktree as worktree_cmd,
+    snippet as snippet_cmd, worker_buffer as worker_cmd, worker_buffer::WorkerBufferState,
+    worktree as worktree_cmd,
 };
 use crate::electron_safe_storage::{
     read_secret_json, read_secret_string, write_secret_json, write_secret_string, SecretJsonRead,
@@ -2801,6 +2802,69 @@ fn invoke_rust_for_remote(
             pty_cmd::get_pty_cwd(&state, &id)
                 .map(|cwd| cwd.map(Value::String).unwrap_or(Value::Null))
                 .map_err(|err| format!("{err:?}"))
+        }),
+        // Worker panels are host-owned: a remote window forwards Procfile
+        // reads, process spawns and the shared scrollback buffer here.
+        "worker:buffer-init" => string_param(params, "panelId", channel).map(|panel_id| {
+            worker_cmd::worker_buffer_init_core(&ctx.state::<WorkerBufferState>().handle(), &panel_id);
+            Value::Bool(true)
+        }),
+        "worker:buffer-append" => string_param(params, "panelId", channel).and_then(|panel_id| {
+            string_param(params, "lines", channel).map(|lines| {
+                worker_cmd::append_worker_log_lines(
+                    &ctx.state::<WorkerBufferState>().handle(),
+                    &panel_id,
+                    &lines,
+                );
+                Value::Bool(true)
+            })
+        }),
+        "worker:buffer-read-all" => string_param(params, "panelId", channel).map(|panel_id| {
+            Value::String(worker_cmd::worker_buffer_read_all_core(
+                &ctx.state::<WorkerBufferState>().handle(),
+                &panel_id,
+            ))
+        }),
+        "worker:buffer-clear" => string_param(params, "panelId", channel).map(|panel_id| {
+            worker_cmd::worker_buffer_clear_core(&ctx.state::<WorkerBufferState>().handle(), &panel_id);
+            Value::Bool(true)
+        }),
+        "worker:procfile-load" => string_param(params, "filePath", channel).and_then(|file_path| {
+            worker_cmd::worker_procfile_load_impl(&file_path)
+                .and_then(|entries| to_json_value(channel, entries))
+        }),
+        "worker:procfile-start" => {
+            let options_value = params
+                .get("options")
+                .cloned()
+                .unwrap_or_else(|| params.clone());
+            deserialize_param::<worker_cmd::WorkerProcessStartOptions>(options_value, channel, "options")
+                .and_then(|options| {
+                    let app_handle = ctx.clone();
+                    let pty_state = ctx.state::<pty_cmd::PtyState>().clone();
+                    let worker_handle = ctx.state::<WorkerBufferState>().handle();
+                    let id = crate::async_rt::block_on(async move {
+                        crate::async_rt::spawn_blocking(move || {
+                            worker_cmd::worker_procfile_start_core(
+                                &app_handle,
+                                pty_state,
+                                worker_handle,
+                                options,
+                                None,
+                            )
+                        })
+                        .await
+                        .map_err(|err| format!("worker.procfileStart worker failed: {err}"))?
+                    })?;
+                    Ok(Value::String(id))
+                })
+        }
+        "worker:procfile-stop" => string_param(params, "panelId", channel).and_then(|panel_id| {
+            string_param(params, "name", channel).and_then(|name| {
+                let state = ctx.state::<pty_cmd::PtyState>();
+                worker_cmd::worker_procfile_stop_core(&ctx, &state, &panel_id, &name)
+                    .map(|_| Value::Bool(true))
+            })
         }),
         "fs:home" => to_json_value(channel, fs_cmd::fs_home_native(&ctx)),
         "fs:readdir" => string_param_any(params, &["dirPath", "path"], channel)

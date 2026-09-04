@@ -329,6 +329,13 @@ fn legacy_v1_param_keys(channel: &str) -> Option<&'static [&'static str]> {
         "pty:set-viewport-mode" => Some(&["id", "mode", "options"]),
         "pty:set-viewport-size" => Some(&["id", "cols", "rows", "source"]),
         "pty:kill" | "pty:get-cwd" => Some(&["id"]),
+        "worker:buffer-init" | "worker:buffer-read-all" | "worker:buffer-clear" => {
+            Some(&["panelId"])
+        }
+        "worker:buffer-append" => Some(&["panelId", "lines"]),
+        "worker:procfile-load" => Some(&["filePath"]),
+        "worker:procfile-start" => Some(&["options"]),
+        "worker:procfile-stop" => Some(&["panelId", "name"]),
         "pty:restart" => Some(&["id", "cwd", "shell"]),
         "claude:auth-status"
         | "claude:account-list"
@@ -1379,6 +1386,24 @@ mod tests {
         assert_eq!(
             legacy_v1_args_to_params("app:new-window", &[json!("hyper")]),
             json!({ "profileId": "hyper" })
+        );
+    }
+
+    #[test]
+    fn maps_legacy_worker_args_to_named_params() {
+        assert_eq!(
+            legacy_v1_args_to_params("worker:procfile-stop", &[json!("panel-1"), json!("web")]),
+            json!({ "panelId": "panel-1", "name": "web" })
+        );
+        assert_eq!(
+            legacy_v1_args_to_params("worker:buffer-append", &[json!("panel-1"), json!("x
+")]),
+            json!({ "panelId": "panel-1", "lines": "x
+" })
+        );
+        assert_eq!(
+            legacy_v1_args_to_params("worker:procfile-load", &[json!("/repo/Procfile")]),
+            json!({ "filePath": "/repo/Procfile" })
         );
     }
 

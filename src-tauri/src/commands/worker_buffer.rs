@@ -9,14 +9,14 @@
 
 // The renderer-facing command wrappers are desktop-only; the headless dispatch
 // uses WorkerBufferState directly (the scrollback store), which is tauri-free.
-#[cfg(feature = "desktop")]
 use crate::commands::pty::{start_pty_session, write_pty_session, CreatePtyOptions, PtyState};
+use crate::host_context::HostContext;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 #[cfg(feature = "desktop")]
+use serde_json::json;
+use std::collections::HashMap;
 use std::fs;
 use std::sync::{Arc, Mutex};
-#[cfg(feature = "desktop")]
 use std::time::Duration;
 #[cfg(feature = "desktop")]
 use tauri::{AppHandle, State, WebviewWindow};
@@ -62,7 +62,7 @@ pub struct ProcfileEntry {
     command: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkerProcessStartOptions {
     panel_id: String,
@@ -171,9 +171,146 @@ pub fn append_worker_log_lines(
     append_lines_to_map(&mut map, panel_id, lines);
 }
 
+pub fn worker_buffer_init_core(handle: &Arc<Mutex<HashMap<String, String>>>, panel_id: &str) {
+    if let Ok(mut map) = handle.lock() {
+        map.entry(panel_id.to_string()).or_default();
+    }
+}
+
+pub fn worker_buffer_read_all_core(
+    handle: &Arc<Mutex<HashMap<String, String>>>,
+    panel_id: &str,
+) -> String {
+    handle
+        .lock()
+        .ok()
+        .and_then(|map| map.get(panel_id).cloned())
+        .unwrap_or_default()
+}
+
+pub fn worker_buffer_clear_core(handle: &Arc<Mutex<HashMap<String, String>>>, panel_id: &str) {
+    if let Ok(mut map) = handle.lock() {
+        map.remove(panel_id);
+    }
+}
+
+pub fn worker_procfile_load_impl(file_path: &str) -> Result<Vec<ProcfileEntry>, String> {
+    let content = fs::read_to_string(file_path)
+        .map_err(|err| format!("Procfile not found on this host: {file_path} ({err})"))?;
+    Ok(parse_procfile_content(&content))
+}
+
+// A remote window does not know which shell the host uses, so it omits
+// `shell`; resolve it from the host's own settings (custom path when set,
+// otherwise the configured shell type, falling back to auto-detect).
+fn host_default_shell(ctx: &HostContext) -> Option<String> {
+    let data_dir = ctx.data_dir_opt()?;
+    let raw = crate::commands::settings::settings_load_impl(&data_dir)
+        .ok()
+        .flatten()?;
+    let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let shell_type = parsed
+        .get("shell")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("auto");
+    if shell_type == "custom" {
+        if let Some(custom) = parsed
+            .get("customShellPath")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+        {
+            return Some(custom.to_string());
+        }
+        return Some(crate::commands::settings::settings_get_shell_path("auto".into()));
+    }
+    Some(crate::commands::settings::settings_get_shell_path(
+        shell_type.to_string(),
+    ))
+}
+
+/// Spawn one Procfile process on this machine. Used by the desktop command
+/// for local windows and by the remote server on behalf of remote windows.
+pub fn worker_procfile_start_core(
+    ctx: &HostContext,
+    pty_state: PtyState,
+    worker_handle: Arc<Mutex<HashMap<String, String>>>,
+    mut options: WorkerProcessStartOptions,
+    owner_window: Option<String>,
+) -> Result<String, String> {
+    if options
+        .shell
+        .as_deref()
+        .map(|value| value.trim().is_empty())
+        .unwrap_or(true)
+    {
+        options.shell = host_default_shell(ctx);
+    }
+    let pty_id = worker_pty_id(&options.panel_id, &options.name);
+    let launch = build_worker_launch_command(options.shell.as_deref(), &options.command);
+    let create_options = CreatePtyOptions {
+        id: pty_id,
+        cwd: options.cwd,
+        r#type: "terminal".to_string(),
+        shell: options.shell,
+        command: None,
+        args: None,
+        cols: None,
+        rows: None,
+        agent_preset: None,
+        custom_env: options.custom_env,
+        per_terminal_history: None,
+        history_key: None,
+    };
+    let started_id = start_pty_session(
+        ctx,
+        pty_state.handle(),
+        Some(worker_handle),
+        create_options,
+        owner_window,
+    )
+    .map_err(|err| format!("{err:?}"))?;
+
+    let started_id_for_write = started_id.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        let _ = write_pty_session(&pty_state, &started_id_for_write, &launch);
+    });
+    Ok(started_id)
+}
+
+pub fn worker_procfile_stop_core(
+    ctx: &HostContext,
+    pty_state: &PtyState,
+    panel_id: &str,
+    name: &str,
+) -> Result<(), String> {
+    let pty_id = worker_pty_id(panel_id, name);
+    crate::commands::pty::kill_pty_session_with_exit(ctx, pty_state, &pty_id)
+        .map_err(|err| format!("{err:?}"))
+}
+
+// Remote windows own no worker state: every command below is forwarded to
+// the host, which reads the Procfile, spawns the processes and keeps the
+// scrollback. The host's answer is returned as-is.
+#[cfg(feature = "desktop")]
+async fn remote_worker_invoke<T: serde::de::DeserializeOwned>(
+    app: &AppHandle,
+    window: &WebviewWindow,
+    channel: &'static str,
+    params: serde_json::Value,
+) -> Option<Result<T, CommandError>> {
+    let result =
+        crate::commands::fs::remote_invoke_for_window(app, window, channel, vec![params]).await?;
+    Some(result.and_then(|value| serde_json::from_value(value).map_err(|err| err.to_string())).map_err(
+        |message| CommandError { message },
+    ))
+}
+
 #[cfg(feature = "desktop")]
 #[tauri::command]
-pub fn worker_buffer_init(
+pub async fn worker_buffer_init(
+    app: AppHandle,
+    window: WebviewWindow,
     state: State<'_, WorkerBufferState>,
     panel_id: String,
 ) -> Result<bool, CommandError> {
@@ -182,14 +319,20 @@ pub fn worker_buffer_init(
             message: "panel_id required".into(),
         });
     }
-    let mut map = state.inner.lock().expect("worker_buffer lock");
-    map.entry(panel_id).or_default();
+    if let Some(result) =
+        remote_worker_invoke::<bool>(&app, &window, "worker:buffer-init", json!({ "panelId": panel_id })).await
+    {
+        return result;
+    }
+    worker_buffer_init_core(&state.inner, &panel_id);
     Ok(true)
 }
 
 #[cfg(feature = "desktop")]
 #[tauri::command]
-pub fn worker_buffer_append(
+pub async fn worker_buffer_append(
+    app: AppHandle,
+    window: WebviewWindow,
     state: State<'_, WorkerBufferState>,
     panel_id: String,
     lines: String,
@@ -199,38 +342,77 @@ pub fn worker_buffer_append(
             message: "panel_id required".into(),
         });
     }
-    let mut map = state.inner.lock().expect("worker_buffer lock");
-    append_lines_to_map(&mut map, &panel_id, &lines);
+    if let Some(result) = remote_worker_invoke::<bool>(
+        &app,
+        &window,
+        "worker:buffer-append",
+        json!({ "panelId": panel_id, "lines": lines }),
+    )
+    .await
+    {
+        return result;
+    }
+    append_worker_log_lines(&state.inner, &panel_id, &lines);
     Ok(true)
 }
 
 #[cfg(feature = "desktop")]
 #[tauri::command]
-pub fn worker_buffer_read_all(
+pub async fn worker_buffer_read_all(
+    app: AppHandle,
+    window: WebviewWindow,
     state: State<'_, WorkerBufferState>,
     panel_id: String,
 ) -> Result<String, CommandError> {
-    let map = state.inner.lock().expect("worker_buffer lock");
-    Ok(map.get(&panel_id).cloned().unwrap_or_default())
+    if let Some(result) = remote_worker_invoke::<String>(
+        &app,
+        &window,
+        "worker:buffer-read-all",
+        json!({ "panelId": panel_id }),
+    )
+    .await
+    {
+        return result;
+    }
+    Ok(worker_buffer_read_all_core(&state.inner, &panel_id))
 }
 
 #[cfg(feature = "desktop")]
 #[tauri::command]
-pub fn worker_buffer_clear(
+pub async fn worker_buffer_clear(
+    app: AppHandle,
+    window: WebviewWindow,
     state: State<'_, WorkerBufferState>,
     panel_id: String,
 ) -> Result<bool, CommandError> {
-    let mut map = state.inner.lock().expect("worker_buffer lock");
-    map.remove(&panel_id);
+    if let Some(result) =
+        remote_worker_invoke::<bool>(&app, &window, "worker:buffer-clear", json!({ "panelId": panel_id })).await
+    {
+        return result;
+    }
+    worker_buffer_clear_core(&state.inner, &panel_id);
     Ok(true)
 }
 
 #[cfg(feature = "desktop")]
 #[tauri::command]
-pub async fn worker_procfile_load(file_path: String) -> Result<Vec<ProcfileEntry>, CommandError> {
+pub async fn worker_procfile_load(
+    app: AppHandle,
+    window: WebviewWindow,
+    file_path: String,
+) -> Result<Vec<ProcfileEntry>, CommandError> {
+    if let Some(result) = remote_worker_invoke::<Vec<ProcfileEntry>>(
+        &app,
+        &window,
+        "worker:procfile-load",
+        json!({ "filePath": file_path }),
+    )
+    .await
+    {
+        return result;
+    }
     crate::async_rt::spawn_blocking(move || {
-        let content = fs::read_to_string(file_path)?;
-        Ok(parse_procfile_content(&content))
+        worker_procfile_load_impl(&file_path).map_err(|message| CommandError { message })
     })
     .await
     .map_err(|err| CommandError {
@@ -247,68 +429,59 @@ pub async fn worker_procfile_start(
     worker_state: State<'_, WorkerBufferState>,
     options: WorkerProcessStartOptions,
 ) -> Result<String, CommandError> {
-    let pty_id = worker_pty_id(&options.panel_id, &options.name);
-    let launch = build_worker_launch_command(options.shell.as_deref(), &options.command);
-    let pty_handle = pty_state.handle();
+    if crate::commands::fs::is_remote_profile_window(&app, &window) {
+        let params = json!({ "options": serde_json::to_value(&options).map_err(CommandError::from)? });
+        if let Some(result) =
+            remote_worker_invoke::<String>(&app, &window, "worker:procfile-start", params).await
+        {
+            return result;
+        }
+    }
+    let pty_state = (*pty_state).clone();
     let worker_handle = worker_state.handle();
     let owner_window = Some(window.label().to_string());
-    let create_options = CreatePtyOptions {
-        id: pty_id.clone(),
-        cwd: options.cwd,
-        r#type: "terminal".to_string(),
-        shell: options.shell,
-        command: None,
-        args: None,
-        cols: None,
-        rows: None,
-        agent_preset: None,
-        custom_env: options.custom_env,
-        per_terminal_history: None,
-        history_key: None,
-    };
-    let started_id = crate::async_rt::spawn_blocking(move || {
-        start_pty_session(
-            &crate::host_context::HostContext::from_app(app.clone()),
-            pty_handle,
-            Some(worker_handle),
-            create_options,
+    crate::async_rt::spawn_blocking(move || {
+        worker_procfile_start_core(
+            &HostContext::from_app(app.clone()),
+            pty_state,
+            worker_handle,
+            options,
             owner_window,
         )
+        .map_err(|message| CommandError { message })
     })
     .await
     .map_err(|err| CommandError {
         message: format!("worker.procfileStart worker failed: {err}"),
     })?
-    .map_err(|err| CommandError {
-        message: format!("{err:?}"),
-    })?;
-
-    let pty_state = (*pty_state).clone();
-    let started_id_for_write = started_id.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(300));
-        let _ = write_pty_session(&pty_state, &started_id_for_write, &launch);
-    });
-    Ok(started_id)
 }
 
 #[cfg(feature = "desktop")]
 #[tauri::command]
-pub fn worker_procfile_stop(
+pub async fn worker_procfile_stop(
     app: AppHandle,
+    window: WebviewWindow,
     pty_state: State<'_, PtyState>,
     panel_id: String,
     name: String,
 ) -> Result<bool, CommandError> {
-    let pty_id = worker_pty_id(&panel_id, &name);
-    crate::commands::pty::kill_pty_session_with_exit(
-        &crate::host_context::HostContext::from_app(app.clone()),
-        &pty_state,
-        &pty_id,
+    if let Some(result) = remote_worker_invoke::<bool>(
+        &app,
+        &window,
+        "worker:procfile-stop",
+        json!({ "panelId": panel_id, "name": name }),
     )
-    .map_err(|err| CommandError {
-        message: format!("{err:?}"),
-    })?;
+    .await
+    {
+        return result;
+    }
+    worker_procfile_stop_core(
+        &HostContext::from_app(app.clone()),
+        &pty_state,
+        &panel_id,
+        &name,
+    )
+    .map_err(|message| CommandError { message })?;
     Ok(true)
 }
 
