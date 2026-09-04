@@ -2,6 +2,7 @@ import * as assert from 'assert'
 import { readFileSync } from 'fs'
 import {
   CLAUDE_BUILTIN_MODELS,
+  claudeSelectionForModelAndWindow,
   contextWindowForClaudeSelection,
   groupClaudeModelRows,
   sdkModelForClaudeSelection,
@@ -138,6 +139,17 @@ function main() {
 
   // Entries without a value are skipped rather than creating an empty row.
   assert.deepEqual(groupClaudeModelRows([{ value: '', displayName: 'x', description: '' }]), [])
+
+  // Host meta reports the SDK id and the auto-compact window separately; the
+  // pair must fold back into the preset the user picked, not the `:1m` one.
+  assert.equal(claudeSelectionForModelAndWindow('claude-opus-5[1m]', 300_000), 'claude-opus-5:auto-compact-300k')
+  assert.equal(claudeSelectionForModelAndWindow('claude-opus-5', 200_000), 'claude-opus-5:auto-compact-200k')
+  assert.equal(claudeSelectionForModelAndWindow('claude-opus-5[1m]', null), 'claude-opus-5:1m')
+  assert.equal(claudeSelectionForModelAndWindow('claude-opus-5[1m]', undefined), 'claude-opus-5:1m')
+  assert.equal(claudeSelectionForModelAndWindow('claude-opus-5[1m]', 350_000), 'claude-opus-5:auto-compact-350k')
+  assert.equal(claudeSelectionForModelAndWindow('claude-opus-5:auto-compact-300k', 300_000), 'claude-opus-5:auto-compact-300k')
+  assert.equal(claudeSelectionForModelAndWindow('claude-haiku-4-5-20251001', 100_000), 'claude-haiku-4-5-20251001')
+  assert.equal(claudeSelectionForModelAndWindow(undefined, 300_000), undefined)
 
   console.log(`claude-model-groups: OK (${CLAUDE_BUILTIN_MODELS.length} presets → ${rows.length} rows)`)
 }

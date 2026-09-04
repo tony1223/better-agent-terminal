@@ -153,6 +153,29 @@ export function normalizeClaudeModelSelection(model?: string): string | undefine
 }
 
 /**
+ * Reassemble the picker selection from what the host reports about a live
+ * session: the SDK model id (`claude-opus-5[1m]`) and the auto-compact window
+ * it runs with. The two travel separately in session meta, so folding the id
+ * alone into a preset always lands on `:1m` and a 300K session reads "1M".
+ */
+export function claudeSelectionForModelAndWindow(
+  model?: string,
+  autoCompactWindow?: number | null,
+): string | undefined {
+  if (!model) return model
+  if (model.includes(':')) return normalizeClaudeModelSelection(model)
+  if (typeof autoCompactWindow === 'number' && autoCompactWindow > 0) {
+    const base = model.endsWith('[1m]') ? model.slice(0, -4) : model
+    const def = CLAUDE_MODEL_TABLE.find(d => d.id === base)
+    if (def && def.windows.includes(autoCompactWindow)) return compactPresetId(def, autoCompactWindow)
+    if (def && def.windows.length > 0 && autoCompactWindow % 1000 === 0) {
+      return `${base}:auto-compact-${autoCompactWindow / 1000}k`
+    }
+  }
+  return normalizeClaudeModelSelection(model)
+}
+
+/**
  * Claude Code takes the 1M window from a `[1m]` suffix on the model id and
  * strips it again before the request reaches the provider, so a bare id runs
  * at 200K however large the model's physical window is. `impliedWindow` is

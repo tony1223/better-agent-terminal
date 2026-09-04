@@ -27,7 +27,7 @@ import { isTauriNativeDropInside, listenTauriNativeDrop } from '../utils/tauri-n
 import { useRemoteDropUpload } from '../utils/remote-drop-upload'
 import { RemoteUploadConfirmDialog } from './RemoteUploadConfirmDialog'
 import { getHostUsageSnapshot, rateLimitsFromHostUsage, subscribeHostUsage } from '../utils/claude-usage-cache'
-import { autoCompactWindowForClaudeSelection, claudeModelValueForRow, displayNameForClaudeSelection, groupClaudeModelRows, normalizeClaudeModelSelection, pickClaudeModelOption, sdkModelForClaudeSelection, type ClaudeCompactWindow } from '../utils/claude-model-presets'
+import { autoCompactWindowForClaudeSelection, claudeModelValueForRow, claudeSelectionForModelAndWindow, displayNameForClaudeSelection, groupClaudeModelRows, normalizeClaudeModelSelection, pickClaudeModelOption, sdkModelForClaudeSelection, type ClaudeCompactWindow } from '../utils/claude-model-presets'
 import { shouldNavigateInputHistoryFromTextarea } from '../utils/input-history-navigation'
 import { buildSnippetContextPrompt, parseSnippetSlashCommand, type SnippetForContext } from '../utils/snippet-command'
 import { filterSlashCommands, flattenSlashGroups, groupSlashCommands, mergeSlashCommands, type SlashCommandInfo } from '../utils/slash-commands'
@@ -1686,7 +1686,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
             }
           }
         }
-        if (m.model) setCurrentModel(prev => prev || m.model!)
+        if (m.model) setCurrentModel(prev => prev || claudeSelectionForModelAndWindow(m.model, m.autoCompactWindow) || m.model!)
         // The sidecar downgrades effort server-side when the CLI rejects the
         // current level for the account's plan (e.g. 'max' needs API billing).
         // Reflect that here so the dropdown does not keep showing a level the
@@ -2033,7 +2033,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
         setSessionMeta(meta as unknown as SessionMeta)
         const mountHostModel = (meta as unknown as SessionMeta).model
         if (mountHostModel) {
-          const normalizedMountModel = normalizeClaudeModelSelection(mountHostModel) || mountHostModel
+          const normalizedMountModel = claudeSelectionForModelAndWindow(mountHostModel, (meta as unknown as SessionMeta).autoCompactWindow) || mountHostModel
           // Remote mode is host-owned: the picker chip must mirror the host
           // session's live model. Adopt it even when our local value is already
           // set, otherwise a stale cached terminal.model (e.g. clobbered by a
@@ -2071,7 +2071,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
         setSessionMeta(previous => JSON.stringify(previous) === JSON.stringify(nextMeta) ? previous : nextMeta)
         const hostModel = nextMeta.model
         if (hostModel) {
-          const normalizedHostModel = normalizeClaudeModelSelection(hostModel) || hostModel
+          const normalizedHostModel = claudeSelectionForModelAndWindow(hostModel, nextMeta.autoCompactWindow) || hostModel
           // Remote mode is host-owned: on a window switch the chip must reflect
           // the host session's live model, overwriting any stale local value.
           // Locally we keep our own value to avoid racing an in-flight change
@@ -6659,7 +6659,11 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
             <span key="gitBranch" className="claude-statusline-item">[{gitBranch}]</span>
           ),
           model: () => {
-            const model = sessionMeta?.model || currentModel
+            // Host meta carries the SDK id and the compact window separately;
+            // recombine so the status line agrees with the picker chip.
+            const model = sessionMeta?.model
+              ? claudeSelectionForModelAndWindow(sessionMeta.model, sessionMeta.autoCompactWindow) || sessionMeta.model
+              : currentModel
             if (!model) return null
             return (
               <span key="model" className="claude-statusline-item" title={`model: ${model}`}>
