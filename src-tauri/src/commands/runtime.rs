@@ -52,6 +52,20 @@ pub struct RuntimeItemStatus {
     version: Option<String>,
     message: Option<String>,
     can_install_managed: bool,
+    /// Version the embedded runtime catalog pins for this tool.
+    pinned_version: Option<String>,
+    /// `true` when the reported managed install is NOT the catalog-pinned
+    /// version. The runtime resolvers only ever use the pinned directory, so
+    /// a stale managed install is effectively unused until it is refreshed.
+    managed_stale: bool,
+}
+
+impl RuntimeItemStatus {
+    fn with_catalog_pin(mut self, pinned_version: &str, managed_stale: bool) -> Self {
+        self.pinned_version = Some(pinned_version.to_string());
+        self.managed_stale = managed_stale;
+        self
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -419,6 +433,8 @@ fn ready_status(
             version: (!version.is_empty()).then_some(version),
             message: None,
             can_install_managed,
+            pinned_version: None,
+            managed_stale: false,
         },
         Err(err) => RuntimeItemStatus {
             tool: tool.into(),
@@ -428,6 +444,8 @@ fn ready_status(
             version: None,
             message: Some(err),
             can_install_managed,
+            pinned_version: None,
+            managed_stale: false,
         },
     }
 }
@@ -445,6 +463,8 @@ fn missing_status(
         version: None,
         message,
         can_install_managed,
+        pinned_version: None,
+        managed_stale: false,
     }
 }
 
@@ -576,35 +596,27 @@ fn resolve_node_status(app: &HostContext) -> Result<RuntimeItemStatus, String> {
         &["", "bin"],
         &["--version"],
     ) {
-        let can_replace = can_install
-            && !managed_runtime_is_current(app, "node", runtime_catalog::node_version(), &path);
-        return Ok(ready_status(
-            "node",
-            "managed",
-            path,
-            &["--version"],
-            can_replace,
-        ));
+        let stale =
+            !managed_runtime_is_current(app, "node", runtime_catalog::node_version(), &path);
+        return Ok(
+            ready_status("node", "managed", path, &["--version"], can_install && stale)
+                .with_catalog_pin(runtime_catalog::node_version(), stale),
+        );
     }
     if let Some(path) = bundled_node_candidate(app) {
-        return Ok(ready_status(
-            "node",
-            "bundled",
-            path,
-            &["--version"],
-            can_install,
-        ));
+        return Ok(
+            ready_status("node", "bundled", path, &["--version"], can_install)
+                .with_catalog_pin(runtime_catalog::node_version(), false),
+        );
     }
     if let Some(path) = first_ready(path_candidates(&exe_names), &["--version"]) {
-        return Ok(ready_status(
-            "node",
-            "system",
-            path,
-            &["--version"],
-            can_install,
-        ));
+        return Ok(
+            ready_status("node", "system", path, &["--version"], can_install)
+                .with_catalog_pin(runtime_catalog::node_version(), false),
+        );
     }
-    Ok(missing_status("node", can_install, None))
+    Ok(missing_status("node", can_install, None)
+        .with_catalog_pin(runtime_catalog::node_version(), false))
 }
 
 fn bundled_node_candidate(app: &HostContext) -> Option<PathBuf> {
@@ -651,35 +663,27 @@ fn resolve_codex_status(app: &HostContext) -> Result<RuntimeItemStatus, String> 
         &["bin"],
         &["--version"],
     ) {
-        let can_replace = can_install
-            && !managed_runtime_is_current(app, "codex", runtime_catalog::codex_version(), &path);
-        return Ok(ready_status(
-            "codex",
-            "managed",
-            path,
-            &["--version"],
-            can_replace,
-        ));
+        let stale =
+            !managed_runtime_is_current(app, "codex", runtime_catalog::codex_version(), &path);
+        return Ok(
+            ready_status("codex", "managed", path, &["--version"], can_install && stale)
+                .with_catalog_pin(runtime_catalog::codex_version(), stale),
+        );
     }
     if let Some(path) = first_ready(path_candidates(&exe_names), &["--version"]) {
-        return Ok(ready_status(
-            "codex",
-            "system",
-            path,
-            &["--version"],
-            can_install,
-        ));
+        return Ok(
+            ready_status("codex", "system", path, &["--version"], can_install)
+                .with_catalog_pin(runtime_catalog::codex_version(), false),
+        );
     }
     if let Some(path) = bundled_codex_candidate(app) {
-        return Ok(ready_status(
-            "codex",
-            "bundled",
-            path,
-            &["--version"],
-            can_install,
-        ));
+        return Ok(
+            ready_status("codex", "bundled", path, &["--version"], can_install)
+                .with_catalog_pin(runtime_catalog::codex_version(), false),
+        );
     }
-    Ok(missing_status("codex", can_install, None))
+    Ok(missing_status("codex", can_install, None)
+        .with_catalog_pin(runtime_catalog::codex_version(), false))
 }
 
 fn codex_target_triple() -> Option<&'static str> {
@@ -762,30 +766,36 @@ fn bundled_codex_candidate_in_base(base: &Path) -> Option<PathBuf> {
 fn resolve_claude_status(app: &HostContext) -> Result<RuntimeItemStatus, String> {
     let exe = exe_name("claude");
     let exe_names = vec![exe.clone()];
+    let pinned = runtime_catalog::claude_version();
     if let Some(path) = managed_claude_cli_path(app) {
         if candidate_is_ready(&path, &["--version"]) {
-            return Ok(ready_status(
-                "claude",
-                "managed",
-                path,
-                &["--version"],
-                false,
-            ));
+            return Ok(ready_status("claude", "managed", path, &["--version"], false)
+                .with_catalog_pin(pinned, false));
         }
     }
+    // A managed install from a previous catalog pin. The Claude resolvers only
+    // look at the pinned directory, so surface it as stale/updatable instead of
+    // silently falling through to whatever the sidecar bundles.
+    if let Some(path) = scan_managed_runtime(
+        app,
+        "claude-agent-sdk",
+        pinned,
+        &exe_names,
+        &[""],
+        &["--version"],
+    ) {
+        return Ok(ready_status("claude", "managed", path, &["--version"], true)
+            .with_catalog_pin(pinned, true));
+    }
     if let Some(path) = first_ready(path_candidates(&exe_names), &["--version"]) {
-        return Ok(ready_status("claude", "system", path, &["--version"], true));
+        return Ok(ready_status("claude", "system", path, &["--version"], true)
+            .with_catalog_pin(pinned, false));
     }
     if let Some(path) = bundled_claude_candidate(app) {
-        return Ok(ready_status(
-            "claude",
-            "bundled",
-            path,
-            &["--version"],
-            true,
-        ));
+        return Ok(ready_status("claude", "bundled", path, &["--version"], true)
+            .with_catalog_pin(pinned, false));
     }
-    Ok(missing_status("claude", true, None))
+    Ok(missing_status("claude", true, None).with_catalog_pin(pinned, false))
 }
 
 fn managed_claude_cli_path(app: &HostContext) -> Option<PathBuf> {
@@ -1362,6 +1372,19 @@ mod tests {
         let integrity = format!("sha512-{}", B64.encode(Sha512::digest(bytes)));
         assert!(verify_sri_sha512(bytes, &integrity).is_ok());
         assert!(verify_sri_sha512(b"other", &integrity).is_err());
+    }
+
+    #[test]
+    fn runtime_item_status_serializes_catalog_pin_fields() {
+        let status = missing_status("codex", true, None).with_catalog_pin("0.153.2", false);
+        let value = serde_json::to_value(&status).expect("serialize");
+        assert_eq!(value["pinnedVersion"], json!("0.153.2"));
+        assert_eq!(value["managedStale"], json!(false));
+        assert_eq!(value["canInstallManaged"], json!(true));
+
+        let stale = missing_status("codex", true, None).with_catalog_pin("0.153.2", true);
+        assert!(stale.managed_stale);
+        assert_eq!(stale.pinned_version.as_deref(), Some("0.153.2"));
     }
 
     #[test]

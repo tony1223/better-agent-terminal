@@ -86,6 +86,8 @@ interface RuntimeItemStatus {
   version?: string
   message?: string
   canInstallManaged: boolean
+  pinnedVersion?: string | null
+  managedStale?: boolean
 }
 
 interface RuntimeStatus {
@@ -1564,12 +1566,20 @@ Reference: https://github.com/ind-igo/cx`
                           <span>{item.tool === 'node' ? 'Node' : item.tool === 'codex' ? 'Codex' : 'Claude'}</span>
                           <span className={`runtime-state-pill ${item.state}`}>{item.state}</span>
                           <span className="runtime-source-pill">{item.source}</span>
+                          {item.managedStale && (
+                            <span className="runtime-state-pill stale">{t('settings.runtimeStale', 'update available')}</span>
+                          )}
                         </div>
                         <div className="runtime-row-meta">
                           {item.version || t('settings.runtimeNoVersion', 'No version')}
                         </div>
                         {item.path && (
                           <div className="runtime-path" title={item.path}>{item.path}</div>
+                        )}
+                        {item.managedStale && item.pinnedVersion && (
+                          <div className="runtime-message">
+                            {t('settings.runtimeStaleHint', 'This app expects managed version {{version}}. Update to keep using the managed runtime.', { version: item.pinnedVersion })}
+                          </div>
                         )}
                         {item.message && (
                           <div className="runtime-message">{item.message}</div>

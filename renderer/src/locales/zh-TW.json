@@ -57,6 +57,8 @@
     "runtimeInstalling": "安裝中...",
     "runtimeInstallManaged": "安裝受管理版本",
     "runtimeUpdateManaged": "更新受管理版本",
+    "runtimeStale": "有新版本",
+    "runtimeStaleHint": "此版本 app 需要受管理版本 {{version}}，請更新以繼續使用受管理 runtime。",
     "runtimeInstalled": "受管理執行環境已可使用。",
     "runtimeInstallFailed": "受管理執行環境安裝失敗。",
     "runtimeUnavailable": "無法取得執行環境狀態。",

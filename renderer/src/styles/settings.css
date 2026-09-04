@@ -246,6 +246,11 @@
   color: #f85149;
 }
 
+.runtime-state-pill.stale {
+  background: rgba(245, 158, 11, 0.18);
+  color: #f59e0b;
+}
+
 .runtime-row-meta,
 .runtime-path,
 .runtime-message,

@@ -8,6 +8,12 @@
 // system / bundled source) but installable, kicks off the managed install in
 // the background. Node goes first — the sidecar depends on it.
 //
+// It also refreshes STALE managed installs: after an app upgrade the runtime
+// catalog pin moves, but the resolvers only ever use the pinned directory, so
+// an older managed runtime is silently ignored and the app falls back to PATH
+// or the bundled copy. The host flags those as `managedStale`; they are
+// re-installed the same way (the old version dir is pruned by the installer).
+//
 // Deliberately quiet: progress/results go to the persistent debug log, and the
 // Settings → Runtime tab reflects the outcome. Tools that are 'broken' (a
 // source exists but failed its probe) are NOT auto-touched — replacing a
@@ -23,6 +29,8 @@ interface RuntimeItemStatus {
   source: 'managed' | 'system' | 'bundled' | 'missing'
   canInstallManaged: boolean
   message?: string
+  pinnedVersion?: string | null
+  managedStale?: boolean
 }
 
 interface RuntimeStatus {
@@ -36,6 +44,12 @@ const INITIAL_DELAY_MS = 5_000
 const INSTALL_ORDER: RuntimeTool[] = ['node', 'codex', 'claude']
 
 let started = false
+
+/** Missing entirely, or a managed install left behind by an older catalog pin. */
+export function shouldAutoInstall(item: Pick<RuntimeItemStatus, 'state' | 'source' | 'managedStale'>): boolean {
+  if (item.state === 'missing') return true
+  return item.source === 'managed' && item.managedStale === true
+}
 
 export function startRuntimeAutoInstall(): void {
   if (started) return
@@ -55,11 +69,12 @@ export function startRuntimeAutoInstall(): void {
 
       const missing = INSTALL_ORDER
         .map(tool => status?.[tool])
-        .filter((item): item is RuntimeItemStatus =>
-          !!item && item.state === 'missing' && item.canInstallManaged)
+        .filter((item): item is RuntimeItemStatus => !!item && item.canInstallManaged && shouldAutoInstall(item))
       if (missing.length === 0) return
 
-      log(`missing runtimes detected: ${missing.map(m => m.tool).join(', ')} — starting managed install`)
+      const describe = (item: RuntimeItemStatus) =>
+        item.managedStale ? `${item.tool} (stale managed → ${item.pinnedVersion ?? '?'})` : item.tool
+      log(`runtimes needing managed install: ${missing.map(describe).join(', ')} — starting`)
       for (const item of missing) {
         try {
           const result = await host.runtime.install(item.tool) as { ok?: boolean; message?: string } | null

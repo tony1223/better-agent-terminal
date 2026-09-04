@@ -54,6 +54,8 @@
     "runtimeInstalling": "インストール中...",
     "runtimeInstallManaged": "管理対象版をインストール",
     "runtimeUpdateManaged": "管理対象版を更新",
+    "runtimeStale": "更新あり",
+    "runtimeStaleHint": "このアプリは管理対象バージョン {{version}} を必要とします。管理対象ランタイムを使い続けるには更新してください。",
     "runtimeInstalled": "管理対象ランタイムを使用できます。",
     "runtimeInstallFailed": "管理対象ランタイムのインストールに失敗しました。",
     "runtimeUnavailable": "ランタイムの状態を取得できません。",

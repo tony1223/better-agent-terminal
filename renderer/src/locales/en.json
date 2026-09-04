@@ -57,6 +57,8 @@
     "runtimeInstalling": "Installing...",
     "runtimeInstallManaged": "Install Managed",
     "runtimeUpdateManaged": "Update Managed",
+    "runtimeStale": "update available",
+    "runtimeStaleHint": "This app expects managed version {{version}}. Update to keep using the managed runtime.",
     "runtimeInstalled": "Managed runtime is ready.",
     "runtimeInstallFailed": "Managed runtime installation failed.",
     "runtimeUnavailable": "Runtime status is unavailable.",
