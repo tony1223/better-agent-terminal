@@ -41,12 +41,12 @@ async function inProcess() {
   const codexModels = getCodexSupportedModels()
   assert.deepEqual(
     codexModels.slice(0, 5).map(model => model.value),
-    ['gpt-6-astra', 'gpt-6-astra:auto-compact-200k', 'gpt-6-astra:auto-compact-300k', 'gpt-5.6-sol', 'gpt-5.6-sol:auto-compact-200k'],
-    'Codex sidecar model catalog should lead with GPT-6 Astra and its auto-compact presets',
+    ['gpt-6-astra', 'gpt-6-astra:272k', 'gpt-6-astra:872k', 'gpt-5.6-sol', 'gpt-5.6-terra'],
+    'Codex sidecar model catalog should lead with GPT-6 Astra and its context-window presets',
   )
-  assert.deepEqual(splitCodexModelSelection('gpt-6-astra:auto-compact-200k'), { model: 'gpt-6-astra', autoCompactTokenLimit: 200_000 })
-  assert.deepEqual(splitCodexModelSelection('gpt-6-astra'), { model: 'gpt-6-astra', autoCompactTokenLimit: null })
-  assert.deepEqual(splitCodexModelSelection('vendor:model'), { model: 'vendor:model', autoCompactTokenLimit: null })
+  assert.deepEqual(splitCodexModelSelection('gpt-6-astra:872k'), { model: 'gpt-6-astra', contextWindow: 872_000 })
+  assert.deepEqual(splitCodexModelSelection('gpt-6-astra'), { model: 'gpt-6-astra', contextWindow: null })
+  assert.deepEqual(splitCodexModelSelection('vendor:model'), { model: 'vendor:model', contextWindow: null })
   assert.ok(codexModels.every(model => model.source === 'builtin' && typeof model.description === 'string'))
   function writeClaudeHistory(projectsDir, cwd, sdkSessionId, entries = null) {
     const encoded = String(cwd || process.cwd()).replace(/[^a-zA-Z0-9]/g, '-')

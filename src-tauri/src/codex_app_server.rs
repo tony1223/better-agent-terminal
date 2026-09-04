@@ -401,7 +401,7 @@ impl CodexSession {
         let context_tokens = self.last_input_tokens + self.last_output_tokens;
         json!({
             "model": self.model,
-            "autoCompactTokenLimit": codex_auto_compact_token_limit(&self.model),
+            "contextWindowOverride": codex_context_window_override(&self.model),
             "sdkSessionId": self.thread_id,
             "cwd": self.cwd,
             "totalCost": 0,
@@ -496,17 +496,16 @@ fn remember_warned_stale_turn(session: &mut CodexSession, turn_id: &str) -> bool
 }
 
 /// Codex model selections follow the Claude picker convention:
-/// `<model>[:auto-compact-<N>k]`. The suffix is a Better Agent Terminal preset,
-/// not something the app-server understands — it is translated into the
-/// per-thread `model_auto_compact_token_limit` config override (Codex compacts
-/// at `min(limit, 90% of the context window)`), and stripped from the model id
-/// sent on thread/start, thread/resume and turn/start.
+/// `<model>[:<N>k]`. The suffix is a Better Agent Terminal preset, not something
+/// the app-server understands — it is translated into the per-thread
+/// `model_context_window` config override (Codex clamps it to the catalog's
+/// `max_context_window`, e.g. 872K for gpt-6-astra, and auto-compacts at 90%
+/// of the resulting window) and stripped from the model id sent on
+/// thread/start, thread/resume and turn/start. A bare selection leaves the
+/// window at whatever the backend serves for the account.
 fn split_codex_model_selection(selection: &str) -> (&str, Option<u64>) {
     if let Some((base, suffix)) = selection.rsplit_once(':') {
-        if let Some(thousands) = suffix
-            .strip_prefix("auto-compact-")
-            .and_then(|rest| rest.strip_suffix('k'))
-        {
+        if let Some(thousands) = suffix.strip_suffix('k') {
             if let Ok(n) = thousands.parse::<u64>() {
                 if n > 0 && !base.is_empty() {
                     return (base, Some(n * 1000));
@@ -521,17 +520,20 @@ fn codex_base_model(selection: &str) -> &str {
     split_codex_model_selection(selection).0
 }
 
-fn codex_auto_compact_token_limit(selection: &str) -> Option<u64> {
+fn codex_context_window_override(selection: &str) -> Option<u64> {
     split_codex_model_selection(selection).1
 }
 
-fn apply_codex_auto_compact_override(params: &mut Value, selection: &str) {
-    if let Some(limit) = codex_auto_compact_token_limit(selection) {
-        params["config"] = json!({ "model_auto_compact_token_limit": limit });
+fn apply_codex_context_window_override(params: &mut Value, selection: &str) {
+    if let Some(window) = codex_context_window_override(selection) {
+        params["config"] = json!({ "model_context_window": window });
     }
 }
 
 fn codex_context_window_for_model(model: &str) -> u64 {
+    if let Some(window) = codex_context_window_override(model) {
+        return window;
+    }
     match codex_base_model(model) {
         // The app-server reports the authoritative value in token usage updates.
         // Keep this fallback accurate before the first update arrives.
@@ -1849,7 +1851,7 @@ fn build_thread_start_params(
     if let Some(provider) = provider_for_model(base_model) {
         params["modelProvider"] = Value::String(provider.to_string());
     }
-    apply_codex_auto_compact_override(&mut params, model);
+    apply_codex_context_window_override(&mut params, model);
     params
 }
 
@@ -1872,7 +1874,7 @@ fn build_thread_resume_params(
     if let Some(provider) = provider_for_model(base_model) {
         params["modelProvider"] = Value::String(provider.to_string());
     }
-    apply_codex_auto_compact_override(&mut params, model);
+    apply_codex_context_window_override(&mut params, model);
     params
 }
 
@@ -2656,10 +2658,9 @@ impl CodexAppServerState {
     pub fn supported_models(&self) -> Value {
         let mut models = vec![
             json!({ "value": "gpt-6-astra", "displayName": "GPT-6 Astra", "description": "Most capable - complex, demanding work", "source": "builtin" }),
-            json!({ "value": "gpt-6-astra:auto-compact-200k", "displayName": "GPT-6 Astra (compact 200K)", "description": "GPT-6 Astra - auto-compact at 200K tokens", "source": "builtin" }),
-            json!({ "value": "gpt-6-astra:auto-compact-300k", "displayName": "GPT-6 Astra (compact 300K)", "description": "GPT-6 Astra - auto-compact at 300K tokens", "source": "builtin" }),
+            json!({ "value": "gpt-6-astra:272k", "displayName": "GPT-6 Astra (272K)", "description": "GPT-6 Astra - 272K context window", "source": "builtin" }),
+            json!({ "value": "gpt-6-astra:872k", "displayName": "GPT-6 Astra (872K)", "description": "GPT-6 Astra - 872K context window", "source": "builtin" }),
             json!({ "value": "gpt-5.6-sol", "displayName": "GPT-5.6 Sol", "description": "Flagship - complex, open-ended work", "source": "builtin" }),
-            json!({ "value": "gpt-5.6-sol:auto-compact-200k", "displayName": "GPT-5.6 Sol (compact 200K)", "description": "GPT-5.6 Sol - auto-compact at 200K tokens", "source": "builtin" }),
             json!({ "value": "gpt-5.6-terra", "displayName": "GPT-5.6 Terra", "description": "Balanced - everyday workhorse", "source": "builtin" }),
             json!({ "value": "gpt-5.6-luna", "displayName": "GPT-5.6 Luna", "description": "Fast - clear, repeatable work", "source": "builtin" }),
             json!({ "value": "gpt-5.3-codex-spark", "displayName": "GPT-5.3 Codex Spark", "description": "Research preview - near-instant coding", "source": "builtin" }),
@@ -7795,7 +7796,9 @@ mod tests {
             .filter_map(|model| model.get("value").and_then(Value::as_str))
             .collect::<Vec<_>>();
         assert!(values.contains(&"gpt-6-astra"));
-        assert!(values.contains(&"gpt-6-astra:auto-compact-200k"));
+        assert!(values.contains(&"gpt-6-astra:272k"));
+        assert!(values.contains(&"gpt-6-astra:872k"));
+        assert!(!values.iter().any(|value| value.starts_with("gpt-5.6-sol:")));
         assert!(values.contains(&"gpt-5.6-sol"));
         assert!(values.contains(&"gpt-5.6-terra"));
         assert!(values.contains(&"gpt-5.6-luna"));
@@ -7859,48 +7862,42 @@ mod tests {
     }
 
     #[test]
-    fn codex_model_selection_splits_auto_compact_preset() {
+    fn codex_model_selection_splits_context_window_preset() {
         assert_eq!(split_codex_model_selection("gpt-6-astra"), ("gpt-6-astra", None));
         assert_eq!(
-            split_codex_model_selection("gpt-6-astra:auto-compact-200k"),
-            ("gpt-6-astra", Some(200_000))
+            split_codex_model_selection("gpt-6-astra:272k"),
+            ("gpt-6-astra", Some(272_000))
         );
         assert_eq!(
-            split_codex_model_selection("gpt-5.6-sol:auto-compact-300k"),
-            ("gpt-5.6-sol", Some(300_000))
+            split_codex_model_selection("gpt-6-astra:872k"),
+            ("gpt-6-astra", Some(872_000))
         );
         // Unknown suffixes are left alone so custom model ids still pass through.
         assert_eq!(split_codex_model_selection("vendor:model"), ("vendor:model", None));
+        assert_eq!(split_codex_model_selection("gpt-6-astra:0k"), ("gpt-6-astra:0k", None));
+        assert_eq!(codex_context_window_for_model("gpt-6-astra:872k"), 872_000);
         assert_eq!(
-            split_codex_model_selection("gpt-6-astra:auto-compact-0k"),
-            ("gpt-6-astra:auto-compact-0k", None)
-        );
-        assert_eq!(
-            codex_context_window_for_model("gpt-6-astra:auto-compact-200k"),
+            codex_context_window_for_model("gpt-6-astra"),
             GPT_6_ASTRA_CONTEXT_WINDOW_FALLBACK
         );
     }
 
     #[test]
-    fn codex_thread_params_translate_auto_compact_preset_to_config_override() {
-        let params = build_thread_start_params(
-            "gpt-6-astra:auto-compact-200k",
-            "/repo",
-            "on-request",
-            "workspace-write",
-        );
+    fn codex_thread_params_translate_context_window_preset_to_config_override() {
+        let params =
+            build_thread_start_params("gpt-6-astra:872k", "/repo", "on-request", "workspace-write");
         assert_eq!(params["model"], "gpt-6-astra");
-        assert_eq!(params["config"]["model_auto_compact_token_limit"], 200_000);
+        assert_eq!(params["config"]["model_context_window"], 872_000);
 
         let resume = build_thread_resume_params(
             "thread-1",
-            "gpt-6-astra:auto-compact-300k",
+            "gpt-6-astra:272k",
             "/repo",
             "on-request",
             "workspace-write",
         );
         assert_eq!(resume["model"], "gpt-6-astra");
-        assert_eq!(resume["config"]["model_auto_compact_token_limit"], 300_000);
+        assert_eq!(resume["config"]["model_context_window"], 272_000);
 
         // Bare selections stay byte-identical: no config key at all.
         let bare = build_thread_start_params("gpt-6-astra", "/repo", "on-request", "workspace-write");
@@ -7910,7 +7907,7 @@ mod tests {
         let turn = build_turn_start_params(
             "thread-1",
             json!([]),
-            "gpt-6-astra:auto-compact-200k",
+            "gpt-6-astra:872k",
             "high",
             "on-request",
             "workspace-write",

@@ -17,10 +17,9 @@ import { activeWorktrees, worktreeCreate, worktreeRehydrate, worktreeGetBranch, 
 
 const CODEX_MODELS = [
   { value: 'gpt-6-astra', displayName: 'GPT-6 Astra', description: 'Most capable - complex, demanding work' },
-  { value: 'gpt-6-astra:auto-compact-200k', displayName: 'GPT-6 Astra (compact 200K)', description: 'GPT-6 Astra - auto-compact at 200K tokens' },
-  { value: 'gpt-6-astra:auto-compact-300k', displayName: 'GPT-6 Astra (compact 300K)', description: 'GPT-6 Astra - auto-compact at 300K tokens' },
+  { value: 'gpt-6-astra:272k', displayName: 'GPT-6 Astra (272K)', description: 'GPT-6 Astra - 272K context window' },
+  { value: 'gpt-6-astra:872k', displayName: 'GPT-6 Astra (872K)', description: 'GPT-6 Astra - 872K context window' },
   { value: 'gpt-5.6-sol', displayName: 'GPT-5.6 Sol', description: 'Flagship - complex, open-ended work' },
-  { value: 'gpt-5.6-sol:auto-compact-200k', displayName: 'GPT-5.6 Sol (compact 200K)', description: 'GPT-5.6 Sol - auto-compact at 200K tokens' },
   { value: 'gpt-5.6-terra', displayName: 'GPT-5.6 Terra', description: 'Balanced - everyday workhorse' },
   { value: 'gpt-5.6-luna', displayName: 'GPT-5.6 Luna', description: 'Fast - clear, repeatable work' },
   { value: 'gpt-5.3-codex-spark', displayName: 'GPT-5.3 Codex Spark', description: 'Research preview - near-instant coding' },
@@ -35,15 +34,15 @@ const CODEX_MODELS = [
 ]
 const DEFAULT_CODEX_MODEL = 'gpt-5.6-sol'
 
-// `<model>:auto-compact-<N>k` is a Better Agent Terminal preset (same shape as
-// the Claude picker). The Tauri host translates it into the app-server's
-// per-thread `model_auto_compact_token_limit` override; the sidecar only needs
-// to know how to split it so catalogs and tests agree on the convention.
+// `<model>:<N>k` is a Better Agent Terminal preset (same shape as the Claude
+// picker). The Tauri host translates it into the app-server's per-thread
+// `model_context_window` override; the sidecar only needs to know how to split
+// it so catalogs and tests agree on the convention.
 export function splitCodexModelSelection(selection) {
-  const match = typeof selection === 'string' ? /^(.+):auto-compact-(\d+)k$/.exec(selection) : null
+  const match = typeof selection === 'string' ? /^(.+):(\d+)k$/.exec(selection) : null
   const thousands = match ? Number(match[2]) : 0
-  if (match && thousands > 0) return { model: match[1], autoCompactTokenLimit: thousands * 1000 }
-  return { model: selection, autoCompactTokenLimit: null }
+  if (match && thousands > 0) return { model: match[1], contextWindow: thousands * 1000 }
+  return { model: selection, contextWindow: null }
 }
 const CODEX_EFFORTS = new Set(['minimal', 'low', 'medium', 'high', 'xhigh'])
 const CODEX_SANDBOX_MODES = new Set(['read-only', 'workspace-write', 'danger-full-access'])

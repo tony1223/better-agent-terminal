@@ -13,15 +13,15 @@ export const CODEX_EFFORT_LEVELS: readonly CodexEffortLevel[] = CODEX_EFFORT_LEV
 
 export const DEFAULT_CODEX_MODEL = 'gpt-5.6-sol'
 
-// `<model>:auto-compact-<N>k` rows are Better Agent Terminal presets (same
-// convention as the Claude picker): the host strips the suffix before talking
-// to the Codex app-server and sends `model_auto_compact_token_limit` instead.
+// `<model>:<N>k` rows are Better Agent Terminal presets (same convention as
+// the Claude picker): the host strips the suffix before talking to the Codex
+// app-server and sends a per-thread `model_context_window` override instead.
+// The bare row uses whatever window the backend serves for the account.
 export const CODEX_MODELS: CodexModelInfo[] = [
   { value: 'gpt-6-astra', displayName: 'GPT-6 Astra', description: 'Most capable · complex, demanding work' },
-  { value: 'gpt-6-astra:auto-compact-200k', displayName: 'GPT-6 Astra (compact 200K)', description: 'GPT-6 Astra · auto-compact at 200K tokens' },
-  { value: 'gpt-6-astra:auto-compact-300k', displayName: 'GPT-6 Astra (compact 300K)', description: 'GPT-6 Astra · auto-compact at 300K tokens' },
+  { value: 'gpt-6-astra:272k', displayName: 'GPT-6 Astra (272K)', description: 'GPT-6 Astra · 272K context window' },
+  { value: 'gpt-6-astra:872k', displayName: 'GPT-6 Astra (872K)', description: 'GPT-6 Astra · 872K context window' },
   { value: 'gpt-5.6-sol', displayName: 'GPT-5.6 Sol', description: 'Flagship · complex, open-ended work' },
-  { value: 'gpt-5.6-sol:auto-compact-200k', displayName: 'GPT-5.6 Sol (compact 200K)', description: 'GPT-5.6 Sol · auto-compact at 200K tokens' },
   { value: 'gpt-5.6-terra', displayName: 'GPT-5.6 Terra', description: 'Balanced · everyday workhorse' },
   { value: 'gpt-5.6-luna', displayName: 'GPT-5.6 Luna', description: 'Fast · clear, repeatable work' },
   { value: 'gpt-5.3-codex-spark', displayName: 'GPT-5.3 Codex Spark', description: 'Research preview · near-instant coding' },
