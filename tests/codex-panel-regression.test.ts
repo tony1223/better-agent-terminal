@@ -510,10 +510,12 @@ async function main() {
     const panelSource = await readFile(`renderer/src/components/${panel}.tsx`, 'utf8')
     // Remote pairs versions independently, so a new client still meets hosts
     // whose probe omits these. Coercing a missing isStreaming to false is what
-    // turns the indicator off on a host that is mid-turn.
+    // turns the indicator off on a host that is mid-turn. The guard may be
+    // preceded by other conditions (CodexAgentPanel also skips the restore
+    // after it re-sent a pending prompt); only the typeof check is required.
     assert.match(
       panelSource,
-      /if \(typeof existingState\.isStreaming === 'boolean'\) \{\s*\n\s*setIsStreaming\(existingState\.isStreaming\)/,
+      /if \((?:[^)]*?&&\s*)?typeof existingState\.isStreaming === 'boolean'\) \{\s*\n\s*setIsStreaming\(existingState\.isStreaming\)/,
       `${panel} must not read a missing isStreaming as "not streaming"`,
     )
     assert.doesNotMatch(
