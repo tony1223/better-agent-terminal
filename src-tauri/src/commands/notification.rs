@@ -74,6 +74,10 @@ pub struct NotificationEntry {
     // workspace_name instead.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    // Windows delivers local completion toasts from the host, even while the
+    // webview is throttled. Older/remote hosts may omit this additive field.
+    #[serde(rename = "nativeNotificationHandled", skip_serializing_if = "Option::is_none")]
+    pub native_notification_handled: Option<bool>,
 }
 
 #[derive(Default, Clone)]
@@ -620,6 +624,7 @@ pub fn add_agent_completion_from_event(app: &HostContext, topic: &str, payload: 
             agent_kind: session.agent_kind,
             kind: None,
             title: None,
+            native_notification_handled: None,
         },
     );
 }
@@ -657,6 +662,7 @@ pub fn add_remote_client_notification(app: &HostContext, label: &str) {
             agent_kind: None,
             kind: Some("remote-client".into()),
             title: Some(title),
+            native_notification_handled: None,
         },
     );
 }
@@ -947,7 +953,9 @@ fn publish_update(app: &HostContext, state: &NotificationState) {
 // We expose it on `NotificationState` so the eventual claude/codex/
 // runtime modules can call it directly without re-parsing JSON.
 #[allow(dead_code)]
-pub fn add_entry(app: &HostContext, state: &NotificationState, entry: NotificationEntry) {
+pub fn add_entry(app: &HostContext, state: &NotificationState, mut entry: NotificationEntry) {
+    #[cfg(all(feature = "desktop", windows))]
+    handle_native_completion_notification(app, &mut entry);
     {
         let mut entries = state.lock();
         // One entry per workspace: a fresh completion replaces that
@@ -962,6 +970,64 @@ pub fn add_entry(app: &HostContext, state: &NotificationState, entry: Notificati
         }
     }
     publish_update(app, state);
+}
+
+#[cfg(all(feature = "desktop", windows))]
+fn handle_native_completion_notification(app: &HostContext, entry: &mut NotificationEntry) {
+    if entry.kind.is_some() || entry.reason != "completed" {
+        return;
+    }
+    let Some(label) = entry.window_id.as_deref() else {
+        return;
+    };
+    let Some(window) = app.app().get_webview_window(label) else {
+        return;
+    };
+    // The local host must never deliver a remote profile's toasts. Those
+    // windows receive the remote host's entries through their existing API.
+    if remote_profile_target_id(app.app(), label).is_some() {
+        return;
+    }
+    let settings = app
+        .data_dir_opt()
+        .and_then(|dir| crate::commands::settings::settings_load_impl(&dir).ok().flatten())
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .unwrap_or(Value::Null);
+    let focused = window.is_focused().unwrap_or(false);
+    // Claim both delivery and intentional suppression. A delayed renderer
+    // must not reconsider focus/settings later and toast an old completion.
+    entry.native_notification_handled = Some(true);
+    let notify = completion_toast_enabled(&settings, focused);
+    log_tauri(app, &format!(
+        "[notify] completion id={} session={} eventAt={} hostAt={} focused={focused} deliver={notify}",
+        entry.id, entry.session_id, entry.timestamp, now_ms(),
+    ));
+    if !notify {
+        return;
+    }
+    crate::commands::app::notify_windows_toast(
+        app.app().clone(),
+        label.to_string(),
+        format!("{} ✓", entry.workspace_name),
+        entry.result.as_deref().map(completion_toast_body),
+        entry.workspace_id.clone(),
+        settings.get("notifySound").and_then(Value::as_bool) != Some(false),
+    );
+}
+
+fn completion_toast_enabled(settings: &Value, focused: bool) -> bool {
+    settings.get("notifyOnComplete").and_then(Value::as_bool) != Some(false)
+        && !(focused && settings.get("notifyOnlyBackground").and_then(Value::as_bool) == Some(true))
+}
+
+fn completion_toast_body(text: &str) -> String {
+    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = line.chars();
+    let mut body: String = chars.by_ref().take(120).collect();
+    if chars.next().is_some() {
+        body.push('…');
+    }
+    body
 }
 
 fn next_notification_id() -> String {
@@ -1086,7 +1152,39 @@ mod tests {
             agent_kind: None,
             kind: None,
             title: None,
+            native_notification_handled: None,
         }
+    }
+
+    #[test]
+    fn completion_toast_uses_settings_and_focus_at_completion() {
+        assert!(completion_toast_enabled(&json!({}), false));
+        assert!(completion_toast_enabled(&json!({}), true));
+        assert!(!completion_toast_enabled(&json!({ "notifyOnComplete": false }), false));
+        let background_only = json!({ "notifyOnlyBackground": true });
+        assert!(completion_toast_enabled(&background_only, false));
+        assert!(!completion_toast_enabled(&background_only, true));
+        assert!(completion_toast_enabled(&json!({ "notifyOnlyBackground": false }), true));
+    }
+
+    #[test]
+    fn native_notification_marker_is_additive_and_survives_broadcast() {
+        let mut entry = sample_entry("completion", "/repo", false);
+        let old_payload = serde_json::to_value(&entry).unwrap();
+        assert!(old_payload.get("nativeNotificationHandled").is_none());
+        let restored: NotificationEntry = serde_json::from_value(old_payload).unwrap();
+        assert_eq!(restored.native_notification_handled, None);
+        entry.native_notification_handled = Some(true);
+        let payload = serde_json::to_value(&entry).unwrap();
+        assert_eq!(payload["nativeNotificationHandled"], true);
+        assert!(!entry.read, "native delivery must not consume the bell's unread entry");
+    }
+
+    #[test]
+    fn completion_toast_body_preserves_unicode_and_bounds_long_results() {
+        assert_eq!(completion_toast_body("已完成\n\n  檢查通過"), "已完成 檢查通過");
+        assert_eq!(completion_toast_body(&"刀".repeat(120)), "刀".repeat(120));
+        assert_eq!(completion_toast_body(&"刀".repeat(121)), format!("{}…", "刀".repeat(120)));
     }
 
     #[test]

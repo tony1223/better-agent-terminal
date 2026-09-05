@@ -2,6 +2,7 @@ import { host } from '../host-api'
 import { workspaceStore } from './workspace-store'
 import { settingsStore } from './settings-store'
 import { summarizeResult } from '../utils/attention'
+import { shouldAnnounceNotification } from '../utils/notification-delivery'
 
 export interface NotificationEntry {
   id: string
@@ -21,6 +22,7 @@ export interface NotificationEntry {
   // client connected to the host; rendered from `title`, not workspace.
   kind?: 'remote-client'
   title?: string
+  nativeNotificationHandled?: boolean
 }
 
 type Listener = () => void
@@ -111,14 +113,18 @@ class NotificationStore {
     await host.notification.focusEntry(id)
   }
 
-  // OS toast for completions that arrived after this window last looked.
+  // Fallback OS toasts for remote hosts and platforms without native host
+  // delivery. Local Windows completions are handled before the update arrives.
   // Settings: notifyOnComplete (default on), notifyOnlyBackground (skip while
   // this window has focus), notifySound (short beep alongside the toast).
   private announceNew(entries: NotificationEntry[]): void {
     const known = this.knownIds
     this.knownIds = new Set(entries.map(e => e.id))
     if (!known) return
-    const fresh = entries.filter(e => !known.has(e.id) && !e.read && e.kind !== 'remote-client' && this.isMine(e))
+    const isRemote = !!workspaceStore.getViewedRemoteProfileId()
+    const now = Date.now()
+    const fresh = entries.filter(e => !known.has(e.id) && !e.read && e.kind !== 'remote-client' && this.isMine(e)
+      && shouldAnnounceNotification(e, isRemote, now))
     if (fresh.length === 0) return
     const settings = settingsStore.getSettings()
     if (settings.notifyOnComplete === false) return

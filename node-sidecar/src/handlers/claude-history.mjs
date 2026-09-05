@@ -12,6 +12,7 @@ import { loadAnthropicSdk } from '../lib/sdk-loader.mjs'
 import { warn as logWarn } from '../lib/logger.mjs'
 import { stripTaskNotifications, isHarnessNoiseUserText, isCompactSummaryUserText } from '../lib/harness-noise.mjs'
 import { resolveClaudeCliBinaryWithInstall } from './claude-auth.mjs'
+import { writeTranscriptSnapshot } from '../lib/transcript-transfer.mjs'
 
 function historyProjectDirCandidates(cwd) {
   const encoded = String(cwd || process.cwd()).replace(/[^a-zA-Z0-9]/g, '-')
@@ -64,6 +65,23 @@ async function findHistoryFileBySessionId(sdkSessionId) {
   }
   return walk(__resolveProjectsDir())
 }
+
+registerHandler('claude.exportTranscript', async (params) => {
+  const sessionId = params?.sessionId
+  const session = sessions.get(sessionId)
+  const sdkSessionId = session?.sdkSessionId
+  const cwd = session?.options?.cwd
+  if (!session || typeof sdkSessionId !== 'string' || !/^[a-zA-Z0-9_-]+$/.test(sdkSessionId) || typeof cwd !== 'string' || !cwd) {
+    throw new Error('Claude transcript is unavailable. Resume the source session before handing it off.')
+  }
+  if (session.streaming) throw new Error('Wait for the Claude turn to stop before handing it off.')
+  const raw = await readHistoryFile(sdkSessionId, cwd)
+  if (raw === null) throw new Error('Claude transcript was not found on disk. The session has not been handed off.')
+  if (sessions.get(sessionId) !== session || session.sdkSessionId !== sdkSessionId || session.streaming) {
+    throw new Error('The Claude session changed during export. Wait for it to stop and try again.')
+  }
+  return writeTranscriptSnapshot(raw, { sourceSessionId: sessionId, sourceSdkSessionId: sdkSessionId, cwd }, resolveDataDir())
+})
 
 function textFromContent(content) {
   if (typeof content === 'string') return content

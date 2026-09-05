@@ -697,7 +697,7 @@ pub fn app_notify(
     let body = body.filter(|b| !b.trim().is_empty());
     #[cfg(windows)]
     {
-        notify_windows_toast(app, window.label().to_string(), title, body, workspace_id);
+        notify_windows_toast(app, window.label().to_string(), title, body, workspace_id, true);
     }
     #[cfg(not(windows))]
     {
@@ -714,14 +714,15 @@ pub fn app_notify(
 }
 
 #[cfg(all(feature = "desktop", windows))]
-fn notify_windows_toast(
+pub(crate) fn notify_windows_toast(
     app: AppHandle,
     window_label: String,
     title: String,
     body: Option<String>,
     workspace_id: Option<String>,
+    sound: bool,
 ) {
-    use tauri_winrt_notification::{Duration as ToastDuration, Toast};
+    use tauri_winrt_notification::{Duration as ToastDuration, Sound, Toast};
     // Same AppUserModelID rule as tauri-plugin-notification: the installed
     // app's identifier (its Start Menu shortcut carries that AUMID, which is
     // what lets the toast show at all); a dev build borrows PowerShell's.
@@ -750,6 +751,7 @@ fn notify_windows_toast(
             .title(&title)
             .text1(body.as_deref().unwrap_or(""))
             .duration(ToastDuration::Short)
+            .sound(if sound { Some(Sound::Default) } else { None })
             .on_activated(move |_action| {
                 crate::commands::notification::focus_window_and_workspace(
                     &click_app,

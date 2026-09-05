@@ -944,6 +944,10 @@ function createTauriHost(): BatAppAPI {
           return (sessionId: string, contextMarkdown: string) =>
             getInvoke()<unknown>('claude_inject_codex_context', { sessionId, contextMarkdown })
         }
+        if (key === 'exportTranscript') {
+          return (sessionId: string) =>
+            getInvoke()<import('./utils/agent-context-transfer').TranscriptSnapshot>('claude_export_transcript', { sessionId })
+        }
         if (key === 'sendMessage') {
           return async (
             sessionId: string,

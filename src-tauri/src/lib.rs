@@ -355,6 +355,7 @@ fn app_builder(headless: bool) -> tauri::Builder<tauri::Wry> {
             claude_cmd::claude_account_list,
             claude_cmd::claude_start_session,
             claude_cmd::claude_inject_codex_context,
+            claude_cmd::claude_export_transcript,
             claude_cmd::claude_send_message,
             claude_cmd::claude_stop_session,
             claude_cmd::claude_abort_session,

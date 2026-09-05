@@ -1120,6 +1120,22 @@ async function run() {
     assert.equal(mod.parseWindowsBuildNumber('abc'), undefined)
   }
 
+  // Transcript handoff is a normal host call, available without BAT_DEBUG.
+  {
+    const calls: { cmd: string; args?: Record<string, unknown> }[] = []
+    const snapshot = { path: 'C:/BAT data/transcript.jsonl', recordCount: 42 }
+    const invoke: TauriInvoke = async <T>(cmd: string, args?: Record<string, unknown>) => {
+      calls.push({ cmd, args })
+      return (cmd === 'claude_export_transcript' ? snapshot : false) as T
+    }
+    setWindow({ __TAURI_INTERNALS__: { invoke } })
+    const mod = await loadFreshAdapter()
+    assert.deepEqual(await mod.host.claude.exportTranscript('source-130'), snapshot)
+    assert.deepEqual(calls.find(call => call.cmd === 'claude_export_transcript'), {
+      cmd: 'claude_export_transcript', args: { sessionId: 'source-130' },
+    })
+  }
+
   console.log('host-api: passed')
 }
 

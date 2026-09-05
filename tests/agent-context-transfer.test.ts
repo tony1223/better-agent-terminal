@@ -3,6 +3,8 @@ import {
   BAT_CONTEXT_TRANSFER_MARKER,
   buildClaudeToCodexContext,
   redactTransferSecrets,
+  buildTranscriptHandoffPrompt,
+  type TranscriptSnapshot,
 } from '../renderer/src/utils/agent-context-transfer'
 
 const redacted = redactTransferSecrets([
@@ -70,5 +72,20 @@ const conversationBudgetResult = buildClaudeToCodexContext({
 assert.ok(conversationBudgetResult.includedMessages < 30)
 assert.match(conversationBudgetResult.markdown, /"content": "29: z+/)
 assert.doesNotMatch(conversationBudgetResult.markdown, /"content": "0: z+/)
+
+const snapshot: TranscriptSnapshot = {
+  sourceSessionId: 'bat-source', sourceSdkSessionId: 'claude-source',
+  cwd: 'C:\\workspace with spaces', path: 'C:\\app data\\transcript-handoffs\\snapshot\\transcript.jsonl',
+  exportedAt: '2026-09-05T00:00:00.000Z', recordCount: 200, bytes: 1_000_000,
+  skippedLines: 1, omittedBlocks: 2, redactionCount: 3,
+  latestUserMessage: 'Continue ```\nthis task', latestUserMessageTruncated: false,
+}
+const prompt = buildTranscriptHandoffPrompt(snapshot)
+const metadata = JSON.parse(prompt.match(/```json\n([\s\S]*?)\n```/)![1])
+assert.deepEqual(metadata, snapshot, 'paths and user text survive quoting and markdown delimiters')
+assert.ok(prompt.length < 10_000, 'handoff embeds an entry point, not the transcript or full diff')
+assert.match(prompt, /Do not modify files during this verification turn/)
+assert.match(prompt, /If the file cannot be read/)
+assert.match(prompt, /last interrupted operation already completed/)
 
 console.log('agent-context-transfer: passed')

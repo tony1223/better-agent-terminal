@@ -45,7 +45,7 @@ import { AgentActivityTree } from './AgentActivityTree'
 import { buildAgentTaskTree, findAgentNode, formatAgentNodeElapsed, summarizeAgentTree, terminateLifecycleEntries, type TaskLifecycle } from '../lib/agent-task-tree'
 import { bindPanelActiveEvent, usePanelActivation, usePanelActiveEffect, type PanelActivation } from '../utils/panel-activation'
 import { prepareFilePickerResults, type FilePickerSearchEntry } from '../utils/file-picker-search'
-import { buildClaudeToCodexContext, CODEX_CONTEXT_VERIFICATION_PROMPT } from '../utils/agent-context-transfer'
+import { buildTranscriptHandoffPrompt, type TranscriptSnapshot } from '../utils/agent-context-transfer'
 
 interface SessionMeta {
   model?: string
@@ -2787,8 +2787,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
 
   const handleTransferToCodex = useCallback(async () => {
     if (
-      host.debug.isDebugMode !== true
-      || !isTauri()
+      !isTauri()
       || isRemoteConnected
       || isCodexSession
       || isStreaming
@@ -2796,42 +2795,24 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
       || !workspaceId
     ) return
 
+    if (!window.confirm(t('claude.transferToCodexTranscriptConfirm'))) return
+
     const tag = `[ContextTransfer:${sessionId.slice(0, 8)}]`
     let targetSessionId: string | null = null
     setIsTransferringToCodex(true)
     try {
-      const [gitRoot, gitBranch, gitStatus, gitDiff] = await Promise.all([
-        host.git.getRoot(cwd).catch(() => null),
-        host.git.getBranch(cwd).catch(() => null),
-        host.git.getStatus(cwd).catch(() => []),
-        host.git.getDiff(cwd).catch(() => ''),
-      ])
-      const transfer = buildClaudeToCodexContext({
-        sourceSessionId: sessionId,
-        sourceSdkSessionId: sessionMeta?.sdkSessionId || terminal?.sdkSessionId,
-        cwd,
-        gitRoot,
-        gitBranch,
-        gitStatus,
-        gitDiff,
-        messages: allMessages,
-      })
-      const confirmed = window.confirm(t('claude.transferToCodexConfirm', {
-        messages: transfer.includedMessages,
-        files: gitStatus.length,
-        redactions: transfer.redactionCount,
-        fidelity: transfer.truncated || transfer.omittedMessages > 0
-          ? t('claude.transferToCodexPartial')
-          : t('claude.transferToCodexComplete'),
-      }))
-      if (!confirmed) return
+      const snapshot = await host.claude.exportTranscript(sessionId) as TranscriptSnapshot
+      if (!snapshot?.path || !snapshot.cwd || !snapshot.recordCount) {
+        throw new Error('The host did not return a readable transcript snapshot.')
+      }
+      const prompt = buildTranscriptHandoffPrompt(snapshot)
 
       const settings = settingsStore.getSettings()
       const model = settings.defaultCodexModel || undefined
       const effort = settings.defaultCodexEffort || 'high'
       const target = workspaceStore.addTerminal(workspaceId, 'codex-agent' as AgentPresetId, {
         id: uuidv4(),
-        cwd,
+        cwd: snapshot.cwd,
         focus: false,
       })
       targetSessionId = target.id
@@ -2844,22 +2825,21 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
       if (model) workspaceStore.updateTerminalModel(target.id, model)
 
       const started = await host.claude.startSession(target.id, {
-        cwd,
+        cwd: snapshot.cwd,
         model,
         effort,
         agentPreset: 'codex-agent',
         codexSandboxMode: 'workspace-write',
         codexApprovalPolicy: 'on-request',
       }) as { sdkSessionId?: string } | null
-      const injected = await host.claude.injectCodexContext(target.id, transfer.markdown) as { sdkSessionId?: string } | null
-      const sdkSessionId = injected?.sdkSessionId || started?.sdkSessionId
-      if (!sdkSessionId) throw new Error('Codex backend returned no thread ID after context injection.')
+      const sdkSessionId = started?.sdkSessionId
+      if (!sdkSessionId) throw new Error('Codex backend returned no thread ID for the handoff.')
 
       workspaceStore.setTerminalSdkSessionId(target.id, sdkSessionId)
-      workspaceStore.setTerminalPendingPrompt(target.id, CODEX_CONTEXT_VERIFICATION_PROMPT)
+      workspaceStore.setTerminalPendingPrompt(target.id, prompt)
       workspaceStore.setFocusedTerminal(target.id)
       workspaceStore.save()
-      host.debug.log(`${tag} complete target=${target.id.slice(0, 8)} messages=${transfer.includedMessages} omitted=${transfer.omittedMessages} redactions=${transfer.redactionCount} truncated=${transfer.truncated}`)
+      host.debug.log(`${tag} complete target=${target.id.slice(0, 8)} records=${snapshot.recordCount} skipped=${snapshot.skippedLines} redactions=${snapshot.redactionCount}`)
     } catch (error) {
       const message = formatUnknownError(error)
       host.debug.log(`${tag} failed target=${targetSessionId?.slice(0, 8) || 'none'} error=${message}`)
@@ -2872,7 +2852,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
     } finally {
       setIsTransferringToCodex(false)
     }
-  }, [allMessages, cwd, isCodexSession, isRemoteConnected, isStreaming, isTransferringToCodex, sessionId, sessionMeta?.sdkSessionId, t, terminal?.sdkSessionId, workspaceId])
+  }, [isCodexSession, isRemoteConnected, isStreaming, isTransferringToCodex, sessionId, t, workspaceId])
 
   const handleRewindToPrompt = useCallback(async (promptIndex: number, promptCount: number) => {
     const removed = promptCount - promptIndex
@@ -6011,7 +5991,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
           </div>
 
           <div className="claude-input-actions">
-            {host.debug.isDebugMode === true && isTauri() && !isRemoteConnected && !isCodexSession && allMessages.length > 0 && (
+            {isTauri() && !isRemoteConnected && !isCodexSession && hasSdkSession && allMessages.length > 0 && (
               <button
                 className="claude-fork-btn"
                 onClick={handleTransferToCodex}

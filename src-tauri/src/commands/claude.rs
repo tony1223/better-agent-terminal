@@ -3431,6 +3431,30 @@ pub async fn claude_start_session(
 
 #[cfg(feature = "desktop")]
 #[tauri::command]
+pub async fn claude_export_transcript(
+    app: AppHandle,
+    window: WebviewWindow,
+    state: State<'_, SidecarState>,
+    session_id: String,
+) -> Result<Value, BridgeError> {
+    if is_remote_profile_window(&HostContext::from_app(app.clone()), &window) {
+        return Err(BridgeError {
+            message: "Transcript handoff is currently available in local workspaces only".into(),
+        });
+    }
+    ensure_local_agent_session_access(&app, &window, &session_id)?;
+    call_with_timeout_blocking(
+        app,
+        state,
+        "claude.exportTranscript",
+        json!({ "sessionId": session_id }),
+        Duration::from_secs(60),
+    )
+    .await
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
 pub async fn claude_inject_codex_context(
     app: AppHandle,
     window: WebviewWindow,
