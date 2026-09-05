@@ -152,7 +152,12 @@ pub struct PtySession {
 }
 
 pub(crate) enum PtyEntry {
-    Starting { generation: u64 },
+    Starting {
+        generation: u64,
+        /// Desktop resize that arrived before the PTY existed; applied by
+        /// `start_pty_session` right before the entry becomes `Active`.
+        pending_size: Option<(u16, u16)>,
+    },
     Active(PtySession),
 }
 
@@ -160,7 +165,7 @@ impl PtyEntry {
     #[cfg(test)]
     fn generation(&self) -> u64 {
         match self {
-            Self::Starting { generation } => *generation,
+            Self::Starting { generation, .. } => *generation,
             Self::Active(session) => session.generation,
         }
     }
@@ -245,7 +250,13 @@ impl PtyStartReservation {
                     message: format!("pty session {id} already exists"),
                 });
             }
-            map.insert(id.to_string(), PtyEntry::Starting { generation });
+            map.insert(
+                id.to_string(),
+                PtyEntry::Starting {
+                    generation,
+                    pending_size: None,
+                },
+            );
         }
         Ok(Self {
             sessions,
@@ -270,7 +281,7 @@ impl Drop for PtyStartReservation {
         };
         let reserved_by_self = matches!(
             map.get(&self.id),
-            Some(PtyEntry::Starting { generation }) if *generation == self.generation
+            Some(PtyEntry::Starting { generation, .. }) if *generation == self.generation
         );
         if reserved_by_self {
             map.remove(&self.id);
@@ -1366,7 +1377,7 @@ pub(crate) fn start_pty_session(
     let (exit_thread_done, exit_done) = pty_thread_completion();
     let map_for_exit = Arc::clone(&map_handle);
 
-    let session = PtySession {
+    let mut session = PtySession {
         generation,
         write_tx,
         master: pair.master,
@@ -1389,11 +1400,14 @@ pub(crate) fn start_pty_session(
     let mut map = map_handle.lock().map_err(|e| CommandError {
         message: e.to_string(),
     })?;
-    let reservation_is_current = matches!(
-        map.get(&options.id),
-        Some(PtyEntry::Starting { generation: current }) if *current == generation
-    );
-    if !reservation_is_current {
+    let current_reservation = match map.get(&options.id) {
+        Some(PtyEntry::Starting {
+            generation: current,
+            pending_size,
+        }) if *current == generation => Some(*pending_size),
+        _ => None,
+    };
+    let Some(pending_size) = current_reservation else {
         drop(map);
         drop(output_tx);
         drop(reader);
@@ -1403,7 +1417,24 @@ pub(crate) fn start_pty_session(
         return Err(CommandError {
             message: format!("pty session {} start was cancelled", options.id),
         });
-    }
+    };
+    // The renderer usually lays out the panel while CreateProcessW is still
+    // running, and that resize was stashed on the reservation. Apply it before
+    // the entry goes live so the shell (and anything it launches right away)
+    // sees the real size instead of the spawn default.
+    let applied_viewport = match apply_pending_resize(&mut session, pending_size) {
+        Ok(viewport) => viewport,
+        Err(err) => {
+            pty_lifecycle_log(
+                app,
+                format!(
+                    "pending resize failed id={} generation={generation}: {}",
+                    options.id, err.message
+                ),
+            );
+            None
+        }
+    };
     map.insert(options.id.clone(), PtyEntry::Active(session));
     reservation.commit();
 
@@ -1515,6 +1546,20 @@ pub(crate) fn start_pty_session(
     });
     drop(map);
 
+    if let Some(viewport) = applied_viewport {
+        pty_lifecycle_log(
+            app,
+            format!(
+                "applied pending resize id={} generation={generation} size={}x{}",
+                options.id, viewport.cols, viewport.rows
+            ),
+        );
+        let sessions = PtyState {
+            inner: Arc::clone(&map_handle),
+        };
+        emit_viewport_state(app, &sessions, &options.id, &viewport);
+    }
+
     pty_lifecycle_log(
         app,
         format!("session started id={} generation={generation}", options.id),
@@ -1618,10 +1663,21 @@ pub(crate) fn write_pty_session(
 }
 
 fn claim_pty_session(state: &PtyState, id: &str, window_label: &str) -> Result<(), CommandError> {
-    state.with_session(id, |session| {
-        session.owner_window = Some(window_label.to_string());
-        Ok(())
-    })
+    let mut map = state.inner.lock().map_err(|e| CommandError {
+        message: e.to_string(),
+    })?;
+    match map.get_mut(id) {
+        Some(PtyEntry::Active(session)) => {
+            session.owner_window = Some(window_label.to_string());
+            Ok(())
+        }
+        // A starting session already carries the creating window as its
+        // owner; let the command proceed so a resize can be stashed on it.
+        Some(PtyEntry::Starting { .. }) => Ok(()),
+        None => Err(CommandError {
+            message: format!("pty session {id} not found"),
+        }),
+    }
 }
 
 fn pty_output_buffer_text(session: &PtySession) -> String {
@@ -1716,25 +1772,80 @@ fn set_pty_viewport_size_for_source(
     source: TerminalViewportSource,
 ) -> Result<(TerminalViewportState, bool), CommandError> {
     validate_pty_size(cols, rows)?;
-    let (viewport, applied) = state.with_session(id, |session| {
-        if session.viewport.mode == TerminalViewportMode::Desktop
-            && source == TerminalViewportSource::Mobile
-        {
-            return Ok((session.viewport.clone(), false));
-        }
-
-        session.viewport.cols = cols;
-        session.viewport.rows = rows;
-        session.viewport.updated_by = source;
-        session.viewport.updated_at = unix_ms();
-        let next = session.viewport.clone();
-        resize_session(session, cols, rows)?;
-        Ok((next, true))
-    })?;
+    let (viewport, applied) = {
+        let mut map = state.inner.lock().map_err(|e| CommandError {
+            message: e.to_string(),
+        })?;
+        apply_viewport_size_or_stash(&mut map, id, cols, rows, source)?
+    };
     if applied {
         emit_viewport_state(app, state, id, &viewport);
     }
     Ok((viewport, applied))
+}
+
+/// Resizes an active session, or stashes a desktop resize on a session that is
+/// still starting so `start_pty_session` applies it once the PTY exists.
+///
+/// Without the stash the panel's first resize is rejected, the renderer then
+/// dedupes every later identical resize, and the PTY stays at its spawn size
+/// (100x30) while xterm is already laid out at the real size. A TUI started in
+/// that window (Claude Code via the agent auto command) draws for 100 columns
+/// into a wider terminal and the screen turns into overlapping garbage.
+fn apply_viewport_size_or_stash(
+    map: &mut HashMap<String, PtyEntry>,
+    id: &str,
+    cols: u16,
+    rows: u16,
+    source: TerminalViewportSource,
+) -> Result<(TerminalViewportState, bool), CommandError> {
+    match map.get_mut(id) {
+        Some(PtyEntry::Active(session)) => {
+            if session.viewport.mode == TerminalViewportMode::Desktop
+                && source == TerminalViewportSource::Mobile
+            {
+                return Ok((session.viewport.clone(), false));
+            }
+
+            session.viewport.cols = cols;
+            session.viewport.rows = rows;
+            session.viewport.updated_by = source;
+            session.viewport.updated_at = unix_ms();
+            let next = session.viewport.clone();
+            resize_session(session, cols, rows)?;
+            Ok((next, true))
+        }
+        Some(PtyEntry::Starting { pending_size, .. }) => {
+            if source != TerminalViewportSource::Desktop {
+                return Err(CommandError {
+                    message: format!("pty session {id} is still starting"),
+                });
+            }
+            *pending_size = Some((cols, rows));
+            Ok((desktop_viewport_state(cols, rows), false))
+        }
+        None => Err(CommandError {
+            message: format!("pty session {id} not found"),
+        }),
+    }
+}
+
+/// Applies the size stashed while the session was starting. Returns the new
+/// viewport state when the PTY was actually resized, `None` when nothing was
+/// pending or the pending size already matches the spawn size.
+fn apply_pending_resize(
+    session: &mut PtySession,
+    pending: Option<(u16, u16)>,
+) -> Result<Option<TerminalViewportState>, CommandError> {
+    let Some((cols, rows)) = pending else {
+        return Ok(None);
+    };
+    if session.viewport.cols == cols && session.viewport.rows == rows {
+        return Ok(None);
+    }
+    resize_session(session, cols, rows)?;
+    session.viewport = desktop_viewport_state(cols, rows);
+    Ok(Some(session.viewport.clone()))
 }
 
 pub(crate) fn resize_pty_session_from_desktop(
@@ -2103,6 +2214,7 @@ mod tests {
     struct FakeMasterPty {
         registry: Option<Arc<Mutex<HashMap<String, PtyEntry>>>>,
         dropped_outside_registry_lock: Option<Arc<AtomicBool>>,
+        resizes: Option<Arc<Mutex<Vec<(u16, u16)>>>>,
     }
 
     impl FakeMasterPty {
@@ -2110,6 +2222,7 @@ mod tests {
             Self {
                 registry: None,
                 dropped_outside_registry_lock: None,
+                resizes: None,
             }
         }
 
@@ -2120,6 +2233,15 @@ mod tests {
             Self {
                 registry: Some(registry),
                 dropped_outside_registry_lock: Some(dropped_outside_registry_lock),
+                resizes: None,
+            }
+        }
+
+        fn recording_resizes(resizes: Arc<Mutex<Vec<(u16, u16)>>>) -> Self {
+            Self {
+                registry: None,
+                dropped_outside_registry_lock: None,
+                resizes: Some(resizes),
             }
         }
     }
@@ -2137,7 +2259,10 @@ mod tests {
     }
 
     impl MasterPty for FakeMasterPty {
-        fn resize(&self, _size: PtySize) -> anyhow::Result<()> {
+        fn resize(&self, size: PtySize) -> anyhow::Result<()> {
+            if let Some(resizes) = &self.resizes {
+                resizes.lock().unwrap().push((size.cols, size.rows));
+            }
             Ok(())
         }
 
@@ -2462,6 +2587,61 @@ mod tests {
         assert!(validate_pty_size(56, 24).is_ok());
         assert!(validate_pty_size(0, 24).is_err());
         assert!(validate_pty_size(56, 0).is_err());
+    }
+
+    #[test]
+    fn desktop_resize_while_starting_is_stashed_then_applied_on_start() {
+        let state = PtyState::default();
+        let reservation = PtyStartReservation::reserve(state.handle(), "starting-id").unwrap();
+
+        // The panel lays itself out while CreateProcessW is still running.
+        let mut map = state.inner.lock().unwrap();
+        let (viewport, applied) = apply_viewport_size_or_stash(
+            &mut map,
+            "starting-id",
+            124,
+            33,
+            TerminalViewportSource::Desktop,
+        )
+        .unwrap();
+        assert!(!applied);
+        assert_eq!((viewport.cols, viewport.rows), (124, 33));
+        // Mobile viewers still get the old "still starting" answer.
+        assert!(apply_viewport_size_or_stash(
+            &mut map,
+            "starting-id",
+            56,
+            24,
+            TerminalViewportSource::Mobile,
+        )
+        .is_err());
+        let pending = match map.get("starting-id") {
+            Some(PtyEntry::Starting { pending_size, .. }) => *pending_size,
+            _ => None,
+        };
+        assert_eq!(pending, Some((124, 33)));
+        drop(map);
+
+        // start_pty_session applies the stash right before the entry goes live.
+        let resizes = Arc::new(Mutex::new(Vec::new()));
+        let mut session = fake_session(
+            reservation.generation,
+            FakeMasterPty::recording_resizes(Arc::clone(&resizes)),
+        );
+        let viewport = apply_pending_resize(&mut session, pending)
+            .unwrap()
+            .expect("pending size differs from the spawn size");
+        assert_eq!((viewport.cols, viewport.rows), (124, 33));
+        assert_eq!((session.viewport.cols, session.viewport.rows), (124, 33));
+        assert_eq!(resizes.lock().unwrap().as_slice(), &[(124, 33)]);
+
+        // Nothing pending, or a stash equal to the current size, is a no-op.
+        assert!(apply_pending_resize(&mut session, None).unwrap().is_none());
+        assert!(apply_pending_resize(&mut session, Some((124, 33)))
+            .unwrap()
+            .is_none());
+        assert_eq!(resizes.lock().unwrap().len(), 1);
+        drop(reservation);
     }
 
     #[test]
