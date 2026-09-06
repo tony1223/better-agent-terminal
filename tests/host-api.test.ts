@@ -1120,7 +1120,7 @@ async function run() {
     assert.equal(mod.parseWindowsBuildNumber('abc'), undefined)
   }
 
-  // Transcript handoff is a normal host call, available without BAT_DEBUG.
+  // The adapter keeps the handoff IPC contract; the host enforces BAT_DEBUG.
   {
     const calls: { cmd: string; args?: Record<string, unknown> }[] = []
     const snapshot = { path: 'C:/BAT data/transcript.jsonl', recordCount: 42 }

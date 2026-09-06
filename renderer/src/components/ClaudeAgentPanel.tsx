@@ -2787,7 +2787,8 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
 
   const handleTransferToCodex = useCallback(async () => {
     if (
-      !isTauri()
+      host.debug.isDebugMode !== true
+      || !isTauri()
       || isRemoteConnected
       || isCodexSession
       || isStreaming
@@ -5991,7 +5992,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
           </div>
 
           <div className="claude-input-actions">
-            {isTauri() && !isRemoteConnected && !isCodexSession && hasSdkSession && allMessages.length > 0 && (
+            {host.debug.isDebugMode === true && isTauri() && !isRemoteConnected && !isCodexSession && hasSdkSession && allMessages.length > 0 && (
               <button
                 className="claude-fork-btn"
                 onClick={handleTransferToCodex}

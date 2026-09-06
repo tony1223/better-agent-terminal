@@ -3437,6 +3437,11 @@ pub async fn claude_export_transcript(
     state: State<'_, SidecarState>,
     session_id: String,
 ) -> Result<Value, BridgeError> {
+    if !bat_debug_enabled() {
+        return Err(BridgeError {
+            message: "Transcript handoff requires BAT_DEBUG=1".into(),
+        });
+    }
     if is_remote_profile_window(&HostContext::from_app(app.clone()), &window) {
         return Err(BridgeError {
             message: "Transcript handoff is currently available in local workspaces only".into(),
