@@ -1129,6 +1129,13 @@ pub fn profile_load_snapshot_for_remote(app: &HostContext, profile_id: &str) -> 
     load_profile_snapshot_at(&dir, profile_id, false)
 }
 
+// Routing validation must not run catalog repair or activate a desktop window.
+pub fn profile_entry_for_context(app: &HostContext, profile_id: &str) -> Option<ProfileEntry> {
+    let dir = profiles_dir(app)?;
+    let _guard = profile_index_guard();
+    read_index_for_update_unlocked(&dir).ok()?.profiles.into_iter().find(|p| p.id == profile_id)
+}
+
 pub fn profile_load_for_remote(app: &HostContext, profile_id: &str) -> Option<Value> {
     let dir = profiles_dir(app)?;
     let snapshot = load_profile_snapshot_at(&dir, profile_id, true);

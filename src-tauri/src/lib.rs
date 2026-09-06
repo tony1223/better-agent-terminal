@@ -29,6 +29,7 @@ mod network_addresses;
 mod panic_log;
 mod path_guard;
 mod remote_client;
+mod profile_context;
 pub mod remote_core;
 mod remote_server;
 mod runtime_catalog;

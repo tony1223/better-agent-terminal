@@ -53,7 +53,10 @@ pub struct RustRemoteClientState {
     pool: Arc<Mutex<HashMap<ConnectionKey, Arc<RunningClient>>>>,
     bindings: Arc<Mutex<HashMap<String, ConnectionKey>>>,
     next_id: Arc<AtomicU64>,
+    event_sink: Option<RemoteEventSink>,
 }
+
+pub type RemoteEventSink = Arc<dyn Fn(&str, Value) + Send + Sync>;
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 struct ConnectionKey {
@@ -118,6 +121,7 @@ enum ClientCommand {
         id: String,
         channel: String,
         args: Vec<Value>,
+        params: Option<Value>,
         timeout: Duration,
         reply: mpsc::Sender<Result<Value, String>>,
     },
@@ -187,6 +191,14 @@ impl ServerCertVerifier for AllowAnyServerCertificate {
 }
 
 impl RustRemoteClientState {
+    // Profile consumers own their subscription independently of desktop windows.
+    pub fn with_event_sink(sink: RemoteEventSink) -> Self {
+        Self {
+            event_sink: Some(sink),
+            ..Self::default()
+        }
+    }
+
     pub fn connect(
         &self,
         app: HostContext,
@@ -261,6 +273,7 @@ impl RustRemoteClientState {
                 let event_owners = Arc::new(Mutex::new(HashMap::new()));
                 let event_owners_for_loop = Arc::clone(&event_owners);
                 let remote_origin = format!("{host}:{port}");
+                let event_sink = self.event_sink.clone();
                 thread::spawn(move || {
                     client_loop(
                         app,
@@ -271,6 +284,7 @@ impl RustRemoteClientState {
                         remote_origin,
                         referrers_for_loop,
                         event_owners_for_loop,
+                        event_sink,
                     )
                 });
                 let client = Arc::new(RunningClient {
@@ -424,6 +438,17 @@ impl RustRemoteClientState {
         args: Vec<Value>,
         timeout: Duration,
     ) -> Result<Value, String> {
+        self.invoke_params(window_label, channel, args, None, timeout)
+    }
+
+    pub fn invoke_params(
+        &self,
+        window_label: &str,
+        channel: &str,
+        args: Vec<Value>,
+        params: Option<Value>,
+        timeout: Duration,
+    ) -> Result<Value, String> {
         if channel.trim().is_empty() {
             return Err("remote.invoke: channel is required".to_string());
         }
@@ -468,6 +493,7 @@ impl RustRemoteClientState {
             id,
             channel: channel.to_string(),
             args,
+            params,
             timeout,
             reply: reply_tx,
         })
@@ -611,6 +637,7 @@ fn client_loop(
     remote_origin: String,
     referrers: Arc<Mutex<HashSet<String>>>,
     event_owners: Arc<Mutex<HashMap<String, String>>>,
+    event_sink: Option<RemoteEventSink>,
 ) {
     let mut pending: HashMap<String, PendingInvoke> = HashMap::new();
     let mut last_ping = Instant::now();
@@ -627,12 +654,16 @@ fn client_loop(
                     id,
                     channel,
                     args,
+                    params,
                     timeout,
                     reply,
                 } => {
                     log_remote_pty_write_args(&app, "remote-client.send", &channel, &args);
-                    let frame =
+                    let mut frame =
                         json!({ "type": "invoke", "id": id, "channel": channel, "args": args });
+                    if let Some(params) = params {
+                        frame["params"] = params;
+                    }
                     match send_json_frame(&mut ws, frame, compression) {
                         Ok(()) => {
                             pending.insert(
@@ -675,6 +706,7 @@ fn client_loop(
                         &remote_origin,
                         &referrers,
                         &event_owners,
+                        event_sink.as_ref(),
                     );
                 }
             }
@@ -687,6 +719,7 @@ fn client_loop(
                         &remote_origin,
                         &referrers,
                         &event_owners,
+                        event_sink.as_ref(),
                     );
                 }
             }
@@ -703,6 +736,9 @@ fn client_loop(
     }
     connected.store(false, Ordering::SeqCst);
     drain_pending(&mut pending, "Connection closed");
+    if let Some(sink) = event_sink {
+        sink("profile:status", json!({ "status": "unavailable" }));
+    }
 }
 
 fn log_remote_pty_write_args(app: &HostContext, phase: &str, channel: &str, args: &[Value]) {
@@ -769,6 +805,7 @@ fn handle_frame(
     remote_origin: &str,
     referrers: &Mutex<HashSet<String>>,
     event_owners: &Mutex<HashMap<String, String>>,
+    event_sink: Option<&RemoteEventSink>,
 ) {
     let frame_type = frame.get("type").and_then(Value::as_str).unwrap_or("");
     if matches!(frame_type, "invoke-result" | "invoke-error") {
@@ -805,6 +842,10 @@ fn handle_frame(
                 .unwrap_or_default();
             legacy_v1_event_args_to_params(&channel, &args)
         });
+        if let Some(sink) = event_sink {
+            sink(&channel, params);
+            return;
+        }
         if channel == "workspace:reload" {
             params = tag_remote_workspace_reload(params, remote_origin);
         } else if channel == "profile:changed" {

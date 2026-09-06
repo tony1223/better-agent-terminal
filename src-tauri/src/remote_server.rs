@@ -17,6 +17,7 @@ use crate::electron_safe_storage::{
 use crate::host_context::HostContext;
 use crate::latency_store;
 use crate::network_addresses;
+use crate::profile_context::{ConnectionContextGuard, ContextSink, ProfileContexts};
 use crate::remote_core::{
     canonical_remote_channel, decode_remote_binary_frame, decode_remote_text_frame,
     encode_remote_frame, event_params_to_legacy_v1_args, legacy_v1_args_to_params,
@@ -80,6 +81,7 @@ static CLAUDE_REMOTE_LOGIN_CLAIM: Mutex<Option<ClaudeRemoteLoginClaim>> = Mutex:
 
 fn remote_capabilities() -> Value {
     json!({
+        "profileContext": 1,
         "remoteAuth": {
             "claude": "paste-code-v1",
             "codex": "device-code-v1",
@@ -228,6 +230,7 @@ struct RunningServer {
 
 #[derive(Debug)]
 struct RemoteClientRecord {
+    contexts: Arc<ProfileContexts>,
     id: String,
     info: RemoteClientInfo,
     tx: mpsc::SyncSender<Value>,
@@ -796,6 +799,10 @@ fn send_remote_event_to_clients(
     let agent_channel = remote_agent_channel(channel);
     if let Ok(mut clients) = clients.lock() {
         clients.retain(|client| {
+            client.contexts.local_event(channel, params);
+            if client.contexts.has_contexts() && channel != "profile:changed" {
+                return !client.close.load(Ordering::Acquire);
+            }
             let frame = json!({
                 "type": "event",
                 "channel": agent_channel.clone(),
@@ -1214,6 +1221,8 @@ fn handle_client(
     let mut client_compression = RemoteCompression::None;
     let (out_tx, out_rx) = mpsc::sync_channel::<Value>(REMOTE_OUTBOUND_QUEUE_CAPACITY);
     let close = Arc::new(AtomicBool::new(false));
+    let contexts = Arc::new(ProfileContexts::default());
+    let _context_guard = ConnectionContextGuard(contexts.clone());
 
     loop {
         if close.load(Ordering::Acquire) {
@@ -1259,6 +1268,9 @@ fn handle_client(
         let id = frame.get("id").cloned().unwrap_or(Value::Null);
 
         if frame_type == "auth" {
+            if authenticated {
+                break;
+            }
             let current_token = token.lock().map(|token| token.clone()).unwrap_or_default();
             if frame.get("token").and_then(Value::as_str) != Some(current_token.as_str()) {
                 remote_debug_log(
@@ -1357,6 +1369,7 @@ fn handle_client(
             };
             if let Ok(mut guard) = clients.lock() {
                 guard.push(RemoteClientRecord {
+                    contexts: contexts.clone(),
                     id: client_id.clone(),
                     info: RemoteClientInfo {
                         label,
@@ -1447,18 +1460,28 @@ fn handle_client(
             let invoke_frame = frame.clone();
             let invoke_tx = out_tx.clone();
             let invoke_close = Arc::clone(&close);
+            let invoke_contexts = contexts.clone();
             let spawn_id = id.clone();
             let spawn_channel = channel.clone();
             if let Err(err) = thread::Builder::new()
                 .name("bat-remote-inv".to_string())
                 .spawn(move || {
                     let _invoke_slot = invoke_slot;
-                    let result = invoke_sidecar_for_remote(
+                    let event_tx = invoke_tx.clone();
+                    let event_close = invoke_close.clone();
+                    let sink: ContextSink = Arc::new(move |frame| {
+                        if !event_close.load(Ordering::Acquire) {
+                            try_queue_remote_frame(&event_tx, &event_close, frame);
+                        }
+                    });
+                    let result = invoke_with_profile_context(
                         &invoke_ctx,
                         &invoke_sidecar,
                         client_protocol,
                         &channel,
                         &invoke_frame,
+                        &invoke_contexts,
+                        sink,
                     );
                     let response = match result {
                         Ok(value) => {
@@ -1520,6 +1543,172 @@ fn handle_client(
         record_recent_client(&recent, info, now);
     }
     Ok(())
+}
+
+#[cfg(all(test, not(feature = "desktop")))]
+mod profile_context_integration_tests {
+    use super::*;
+    use crate::host_context::HeadlessHost;
+    use crate::profile_context::ProfileContexts;
+
+    struct TestHost {
+        ctx: HostContext,
+        server: RustRemoteServerState,
+        sidecar: SidecarState,
+        dir: std::path::PathBuf,
+        info: Value,
+    }
+
+    impl TestHost {
+        fn new() -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "bat-profile-context-test-{:032x}",
+                rand::random::<u128>()
+            ));
+            let server = RustRemoteServerState::default();
+            let sidecar = SidecarState::default();
+            let events = server.clone();
+            let mut host = HeadlessHost::new(
+                Some(dir.clone()),
+                Arc::new(move |channel, params| events.broadcast_event(channel, params)),
+            );
+            host.manage(server.clone());
+            host.manage(sidecar.clone());
+            host.manage(notification_cmd::NotificationState::default());
+            host.manage(notification_cmd::AgentNotificationState::default());
+            host.manage(crate::event_hub::RuntimeEventHubState::default());
+            let ctx = HostContext::from_headless(Arc::new(host));
+            let info = server
+                .start(
+                    ctx.clone(),
+                    sidecar.clone(),
+                    Some(json!({"port":0,"bindInterface":"localhost"})),
+                )
+                .unwrap();
+            profile_cmd::profile_list_core(&ctx);
+            Self {
+                ctx,
+                server,
+                sidecar,
+                dir,
+                info,
+            }
+        }
+
+        fn workspace(&self, label: &str) {
+            assert!(profile_cmd::profile_save_workspace_for_remote(&self.ctx, "default",
+                &json!({"workspaces":[{"id":label,"name":label,"folderPath":"/test"}],"terminals":[]}).to_string()));
+        }
+    }
+
+    impl Drop for TestHost {
+        fn drop(&mut self) {
+            self.server.stop();
+            assert_eq!(self.dir.parent(), Some(std::env::temp_dir().as_path()));
+            assert!(self
+                .dir
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("bat-profile-context-test-"));
+            let _ = fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[test]
+    fn profile_context_routes_local_and_remote_workspaces_and_runtime_events() {
+        let upstream = TestHost::new();
+        let entry = TestHost::new();
+        upstream.workspace("upstream-workspace");
+        entry.workspace("entry-workspace");
+        let path = entry.dir.join("profiles/index.json");
+        let mut index: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        index["profiles"].as_array_mut().unwrap().push(json!({
+            "id":"remote-alias", "name":"Remote", "type":"remote", "createdAt":1,"updatedAt":1,
+            "remoteHost":"127.0.0.1", "remotePort":upstream.info["port"],
+            "remoteToken":upstream.info["token"], "remoteFingerprint":upstream.info["fingerprint"],
+            "remoteProfileId":"default"
+        }));
+        fs::write(path, index.to_string()).unwrap();
+        let contexts = Arc::new(ProfileContexts::default());
+        let _guard = ConnectionContextGuard(contexts.clone());
+        let (tx, rx) = mpsc::channel();
+        let sink: ContextSink = Arc::new(move |event| {
+            let _ = tx.send(event);
+        });
+        let call = |channel: &str, frame: Value| {
+            invoke_with_profile_context(
+                &entry.ctx,
+                &entry.sidecar,
+                RemoteProtocol::V2,
+                channel,
+                &frame,
+                &contexts,
+                sink.clone(),
+            )
+        };
+        let local = call("profile:open", json!({"params":{"profileId":"default"}})).unwrap();
+        let remote = call(
+            "profile:open",
+            json!({"params":{"profileId":"remote-alias"}}),
+        )
+        .unwrap();
+        for (context, expected) in [(&local, "entry-workspace"), (&remote, "upstream-workspace")] {
+            let raw = call("workspace:load", json!({"contextId":context["contextId"],"params":{"profileId":context["profileId"]}})).unwrap();
+            let state: Value = serde_json::from_str(raw.as_str().unwrap()).unwrap();
+            assert_eq!(state["workspaces"][0]["id"], expected);
+        }
+        let data = json!({"workspaces":[{"id":"changed-upstream","name":"Changed","folderPath":"/test"}],"terminals":[]}).to_string();
+        assert_eq!(
+            call(
+                "workspace:save",
+                json!({"contextId":remote["contextId"],
+            "params":{"profileId":"remote-alias","data":data}})
+            )
+            .unwrap(),
+            true
+        );
+        let entry_raw =
+            profile_cmd::profile_workspace_json_for_remote(&entry.ctx, "default").unwrap();
+        assert!(entry_raw.contains("entry-workspace"));
+        assert!(!entry_raw.contains("changed-upstream"));
+
+        let context = contexts.get(remote["contextId"].as_str().unwrap()).unwrap();
+        context
+            .prepare(
+                &entry.ctx,
+                "claude:get-session-state",
+                json!({"sessionId":"session-test"}),
+            )
+            .unwrap();
+        upstream.server.broadcast_event(
+            "claude:message",
+            &json!({"sessionId":"session-test",
+            "message":{"id":"reply","role":"assistant","content":"hello from execution host"}}),
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let frame = rx
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap();
+            if frame["channel"] == "agent:message" {
+                assert_eq!(frame["contextId"], remote["contextId"]);
+                assert_eq!(
+                    frame["params"]["message"]["content"],
+                    "hello from execution host"
+                );
+                break;
+            }
+        }
+        assert!(call("workspace:load", json!({"contextId":"foreign","params":{}})).is_err());
+        contexts.close(remote["contextId"].as_str().unwrap());
+        assert!(call(
+            "workspace:load",
+            json!({"contextId":remote["contextId"],"params":{}})
+        )
+        .is_err());
+        assert!(upstream.server.own_host_identity().is_some());
+    }
 }
 
 fn parse_client_info(value: &Value) -> Option<RemoteClientDeviceInfo> {
@@ -1763,6 +1952,79 @@ fn websocket_accept_key_from_request(request: &[u8]) -> Result<String, String> {
         return Err("websocket request Sec-WebSocket-Key must decode to 16 bytes".to_string());
     }
     Ok(derive_accept_key(key.as_bytes()))
+}
+
+fn invoke_with_profile_context(
+    ctx: &HostContext,
+    sidecar: &SidecarState,
+    protocol: RemoteProtocol,
+    channel: &str,
+    frame: &Value,
+    contexts: &ProfileContexts,
+    sink: ContextSink,
+) -> Result<Value, String> {
+    let channel = canonical_remote_channel(channel);
+    let args = frame
+        .get("args")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let params = frame
+        .get("params")
+        .cloned()
+        .unwrap_or_else(|| legacy_v1_args_to_params(&channel, &args));
+    match channel.as_str() {
+        "profile:open" => {
+            if protocol != RemoteProtocol::V2 {
+                return Err("Profile contexts require protocol v2".into());
+            }
+            let profile_id = params
+                .get("profileId")
+                .and_then(Value::as_str)
+                .ok_or("Missing profileId")?;
+            return contexts.open(ctx, profile_id, sink);
+        }
+        "profile:close" => {
+            let id = params
+                .get("contextId")
+                .and_then(Value::as_str)
+                .ok_or("Missing contextId")?;
+            contexts.close(id);
+            return Ok(json!({"ok":true}));
+        }
+        "profile:status" => {
+            let id = params
+                .get("contextId")
+                .and_then(Value::as_str)
+                .ok_or("Missing contextId")?;
+            let context = contexts.get(id)?;
+            context.validate(ctx)?;
+            return Ok(context.info());
+        }
+        _ => {}
+    }
+    if let Some(id) = frame.get("contextId") {
+        let context = contexts.get(id.as_str().ok_or("Invalid contextId")?)?;
+        let params = context.prepare(ctx, &channel, params)?;
+        let result = if let Some(result) =
+            context.invoke_remote(&channel, params.clone(), remote_invoke_timeout(&channel))
+        {
+            result
+        } else {
+            invoke_sidecar_for_remote(
+                ctx,
+                sidecar,
+                RemoteProtocol::V2,
+                &channel,
+                &json!({"params":params}),
+            )
+        };
+        if let Ok(value) = &result {
+            context.observe_result(&channel, value);
+        }
+        return result;
+    }
+    invoke_sidecar_for_remote(ctx, sidecar, protocol, &channel, frame)
 }
 
 fn invoke_sidecar_for_remote(
@@ -3416,6 +3678,7 @@ mod tests {
         // A currently-connected client also counts as known.
         let (tx, _rx) = mpsc::sync_channel(1);
         clients.lock().unwrap().push(RemoteClientRecord {
+            contexts: Arc::new(ProfileContexts::default()),
             id: "c1".to_string(),
             info: test_client_info(Some("win-3"), "Tablet"),
             tx,
@@ -3447,6 +3710,7 @@ mod tests {
         let close = Arc::new(AtomicBool::new(false));
         let clients = Arc::new(Mutex::new(vec![RemoteClientRecord {
             id: "slow-client".to_string(),
+            contexts: Arc::new(ProfileContexts::default()),
             info: test_client_info(None, "slow client"),
             tx,
             close: Arc::clone(&close),
@@ -3611,6 +3875,7 @@ mod tests {
         let (tx, rx) = mpsc::sync_channel(1);
         let clients = Arc::new(Mutex::new(vec![RemoteClientRecord {
             id: "client-1".to_string(),
+            contexts: Arc::new(ProfileContexts::default()),
             info: RemoteClientInfo {
                 label: "phone".to_string(),
                 window_id: None,
