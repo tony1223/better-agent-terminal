@@ -4,8 +4,18 @@ import {
   buildClaudeToCodexContext,
   redactTransferSecrets,
   buildTranscriptHandoffPrompt,
+  codexPermissionsForClaudeHandoff,
   type TranscriptSnapshot,
 } from '../renderer/src/utils/agent-context-transfer'
+
+assert.deepEqual(codexPermissionsForClaudeHandoff('bypassPermissions'), {
+  sandboxMode: 'danger-full-access', approvalPolicy: 'never',
+}, 'handoff preserves the source session\'s unrestricted permissions')
+for (const mode of ['default', 'auto', 'acceptEdits', 'dontAsk', 'plan', 'bypassPlan', 'unknown']) {
+  assert.deepEqual(codexPermissionsForClaudeHandoff(mode), {
+    sandboxMode: 'workspace-write', approvalPolicy: 'on-request',
+  }, `${mode} must not grant unrestricted access during handoff`)
+}
 
 const redacted = redactTransferSecrets([
   'Authorization: Bearer abcdef123456',

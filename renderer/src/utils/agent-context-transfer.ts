@@ -1,9 +1,19 @@
 import type { ClaudeMessage, ClaudeToolCall } from '../types/claude-agent'
+import type { CodexApprovalPolicy, CodexSandboxMode } from '../types'
 import { isToolCall } from '../types/claude-agent'
 import { redactTransferSecrets } from '../../../shared/transfer-redaction.mjs'
 export { redactTransferSecrets } from '../../../shared/transfer-redaction.mjs'
 
 export const BAT_CONTEXT_TRANSFER_MARKER = '# BAT Context Transfer'
+
+export function codexPermissionsForClaudeHandoff(permissionMode: string): {
+  sandboxMode: CodexSandboxMode
+  approvalPolicy: CodexApprovalPolicy
+} {
+  return permissionMode === 'bypassPermissions'
+    ? { sandboxMode: 'danger-full-access', approvalPolicy: 'never' }
+    : { sandboxMode: 'workspace-write', approvalPolicy: 'on-request' }
+}
 
 const MAX_RECENT_MESSAGES = 30
 const MAX_MESSAGE_CHARS = 4_000

@@ -45,7 +45,7 @@ import { AgentActivityTree } from './AgentActivityTree'
 import { buildAgentTaskTree, findAgentNode, formatAgentNodeElapsed, summarizeAgentTree, terminateLifecycleEntries, type TaskLifecycle } from '../lib/agent-task-tree'
 import { bindPanelActiveEvent, usePanelActivation, usePanelActiveEffect, type PanelActivation } from '../utils/panel-activation'
 import { prepareFilePickerResults, type FilePickerSearchEntry } from '../utils/file-picker-search'
-import { buildTranscriptHandoffPrompt, type TranscriptSnapshot } from '../utils/agent-context-transfer'
+import { buildTranscriptHandoffPrompt, codexPermissionsForClaudeHandoff, type TranscriptSnapshot } from '../utils/agent-context-transfer'
 
 interface SessionMeta {
   model?: string
@@ -2810,6 +2810,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
       const settings = settingsStore.getSettings()
       const model = settings.defaultCodexModel || undefined
       const effort = settings.defaultCodexEffort || 'high'
+      const handoffPermissions = codexPermissionsForClaudeHandoff(permissionMode)
       const target = workspaceStore.addTerminal(workspaceId, 'codex-agent' as AgentPresetId, {
         id: uuidv4(),
         cwd: snapshot.cwd,
@@ -2819,8 +2820,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
       workspaceStore.setTerminalGeneratedTitle(target.id, 'Codex (from Claude)')
       workspaceStore.updateTerminalAgentParams(target.id, {
         effortLevel: effort,
-        sandboxMode: 'workspace-write',
-        approvalPolicy: 'on-request',
+        ...handoffPermissions,
       })
       if (model) workspaceStore.updateTerminalModel(target.id, model)
 
@@ -2829,8 +2829,8 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
         model,
         effort,
         agentPreset: 'codex-agent',
-        codexSandboxMode: 'workspace-write',
-        codexApprovalPolicy: 'on-request',
+        codexSandboxMode: handoffPermissions.sandboxMode,
+        codexApprovalPolicy: handoffPermissions.approvalPolicy,
       }) as { sdkSessionId?: string } | null
       const sdkSessionId = started?.sdkSessionId
       if (!sdkSessionId) throw new Error('Codex backend returned no thread ID for the handoff.')
@@ -2852,7 +2852,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
     } finally {
       setIsTransferringToCodex(false)
     }
-  }, [isCodexSession, isRemoteConnected, isStreaming, isTransferringToCodex, sessionId, t, workspaceId])
+  }, [isCodexSession, isRemoteConnected, isStreaming, isTransferringToCodex, permissionMode, sessionId, t, workspaceId])
 
   const handleRewindToPrompt = useCallback(async (promptIndex: number, promptCount: number) => {
     const removed = promptCount - promptIndex
