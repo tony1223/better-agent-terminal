@@ -1,8 +1,9 @@
-import { host } from '../host-api'
 import { useEffect, useRef } from 'react'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import hljs from 'highlight.js/lib/core'
+import { openChatMarkdownLink } from '../utils/chat-markdown'
+import { prepareMarkdownHeadingIds, resolveMarkdownPreviewHref, scrollToMarkdownFragment } from '../utils/markdown-preview-links'
 
 marked.setOptions({
   gfm: true,
@@ -27,7 +28,8 @@ renderer.code = function ({ text, lang }: { text: string; lang?: string }) {
 }
 
 renderer.link = function ({ href, text }: { href: string; text: string }) {
-  return `<a href="${href}" data-external-link="true">${text}</a>`
+  const escapedHref = href.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  return `<a href="${escapedHref}">${text}</a>`
 }
 
 renderer.image = function ({ href, text }: { href: string; text: string }) {
@@ -42,6 +44,7 @@ function renderMarkdown(text: string): string {
   return DOMPurify.sanitize(rawHtml, {
     ADD_TAGS: ['input'],
     ADD_ATTR: ['checked', 'disabled', 'type', 'data-external-link'],
+    ALLOWED_URI_REGEXP: /^(?:(?:https?|ftps?|mailto|tel|file):|[A-Za-z]:[\\/]|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
   })
 }
 
@@ -84,15 +87,17 @@ async function renderMermaidBlocks(container: HTMLElement) {
   }
 }
 
-export function MarkdownPreview({ content }: { content: string }) {
+export function MarkdownPreview({ content, filePath, fragment }: { content: string; filePath: string; fragment?: string }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const html = renderMarkdown(content)
 
   useEffect(() => {
     if (containerRef.current) {
+      prepareMarkdownHeadingIds(containerRef.current)
+      if (fragment) scrollToMarkdownFragment(containerRef.current, fragment)
       renderMermaidBlocks(containerRef.current)
     }
-  }, [html])
+  }, [html, filePath, fragment])
 
   return (
     <div
@@ -101,10 +106,16 @@ export function MarkdownPreview({ content }: { content: string }) {
       dangerouslySetInnerHTML={{ __html: html }}
       onClick={(e) => {
         const target = e.target as HTMLElement
-        const link = target.closest('a[data-external-link]') as HTMLAnchorElement | null
+        const link = target.closest('a[href]') as HTMLAnchorElement | null
         if (link) {
           e.preventDefault()
-          host.shell.openExternal(link.href)
+          const href = resolveMarkdownPreviewHref(link.getAttribute('href') || '', filePath)
+          if (!href) return
+          if (href.startsWith('#')) {
+            if (containerRef.current) scrollToMarkdownFragment(containerRef.current, href)
+          } else {
+            openChatMarkdownLink(href)
+          }
         }
       }}
     />

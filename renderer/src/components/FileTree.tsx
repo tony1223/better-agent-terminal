@@ -405,7 +405,7 @@ ${fileName}`
         <div className="file-preview-scroll" ref={previewContentRef}>
           {richKind && viewMode === 'rendered'
             ? (
-              richKind === 'markdown' ? <MarkdownPreview content={content} />
+              richKind === 'markdown' ? <MarkdownPreview content={content} filePath={filePath} />
               : richKind === 'csv' ? <CsvPreview text={content} />
               : <HtmlPreview html={content} title={fileName} />
             )

@@ -167,11 +167,13 @@ export function openChatMarkdownLink(href: string): void {
       const url = new URL(href)
       let filePath = decodeURIComponent(url.pathname)
       if (/^\/[A-Za-z]:\//.test(filePath)) filePath = filePath.slice(1)
+      if (url.hostname && url.hostname !== 'localhost') filePath = `//${url.hostname}${filePath}`
       const lineMatch = url.hash.match(/(?:^#|[&#])line=(\d+)(?:[&#]column=(\d+))?/)
       const detail = {
         path: filePath,
         line: lineMatch ? Number(lineMatch[1]) : undefined,
         column: lineMatch?.[2] ? Number(lineMatch[2]) : undefined,
+        fragment: !lineMatch && url.hash ? url.hash : undefined,
       }
       const eventName = /\.mdx?$/i.test(filePath) ? 'preview-markdown' : 'preview-file'
       window.dispatchEvent(new CustomEvent(eventName, { detail }))

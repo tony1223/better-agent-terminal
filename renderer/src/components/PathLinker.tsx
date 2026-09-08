@@ -454,7 +454,7 @@ export function FilePreviewModal({ filePath: rawFilePath, onClose }: FilePreview
           {content !== null && (
             richKind && viewMode === 'rendered'
               ? (
-                richKind === 'markdown' ? <MarkdownPreview content={content} />
+                richKind === 'markdown' ? <MarkdownPreview content={content} filePath={filePath} />
                 : richKind === 'csv' ? <CsvPreview text={content} />
                 : <HtmlPreview html={content} title={fileName} />
               )

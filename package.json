@@ -50,7 +50,7 @@
     "test:latency-stats": "tsx tests/latency-stats.test.ts",
     "test:slash-commands": "tsx tests/slash-commands.test.ts",
     "test:tool-row-density": "tsx tests/tool-row-density.test.ts",
-    "test:chat-markdown": "tsx tests/chat-markdown-table-repair.test.ts",
+    "test:chat-markdown": "tsx tests/chat-markdown-table-repair.test.ts && tsx tests/markdown-preview-links.test.ts",
     "test:agent-task-tree": "tsx tests/agent-task-tree.test.ts",
     "test:active-tasks-bar-overflow": "tsx tests/active-tasks-bar-overflow.test.ts",
     "test:workspace-restore": "tsx tests/workspace-restore-focus.test.ts",

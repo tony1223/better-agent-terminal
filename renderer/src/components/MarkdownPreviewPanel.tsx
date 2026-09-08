@@ -6,10 +6,11 @@ import { formatErrorMessage } from '../utils/error-message'
 
 interface MarkdownPreviewPanelProps {
   filePath: string
+  fragment?: string
   onClose: () => void
 }
 
-export function MarkdownPreviewPanel({ filePath, onClose }: MarkdownPreviewPanelProps) {
+export function MarkdownPreviewPanel({ filePath, fragment, onClose }: MarkdownPreviewPanelProps) {
   const { t } = useTranslation()
   const [content, setContent] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -286,7 +287,7 @@ export function MarkdownPreviewPanel({ filePath, onClose }: MarkdownPreviewPanel
       )}
       <div className="md-preview-content" ref={contentRef}>
         {error && <div className="md-preview-error">{error}</div>}
-        {content !== null && <MarkdownPreview content={content} />}
+        {content !== null && <MarkdownPreview content={content} filePath={filePath} fragment={fragment} />}
       </div>
       {contextMenu && (
         <div ref={contextMenuRef} className="workspace-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }}>

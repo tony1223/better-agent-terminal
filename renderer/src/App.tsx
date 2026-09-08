@@ -171,6 +171,7 @@ export default function App() {
   // Markdown preview in right panel
   const [previewMarkdown, setPreviewMarkdown] = useState<{
     path: string
+    fragment?: string
     workspaceId: string | null
   } | null>(null)
   // Track collapsed state before markdown preview opened, to restore on close
@@ -374,9 +375,10 @@ export default function App() {
   // Listen for markdown preview requests from PathLinker
   useEffect(() => {
     const handler = (e: Event) => {
-      const { path } = (e as CustomEvent).detail as { path: string }
+      const { path, fragment } = (e as CustomEvent).detail as { path: string; fragment?: string }
       setPreviewMarkdown({
         path,
+        fragment,
         workspaceId: workspaceStore.getState().activeWorkspaceId,
       })
       // Save current collapsed state so we can restore it on close, then expand panel
@@ -1318,6 +1320,7 @@ export default function App() {
             <div className="right-sidebar-wrapper" style={{ width: `${panelSettings.snippetSidebar.width}px`, minWidth: `${panelSettings.snippetSidebar.width}px`, display: 'flex', flexDirection: 'column' }}>
               <MarkdownPreviewPanel
                 filePath={previewMarkdown.path}
+                fragment={previewMarkdown.fragment}
                 onClose={closeMarkdownPreview}
               />
             </div>
