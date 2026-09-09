@@ -255,55 +255,56 @@ impl RustRemoteClientState {
                     window_id.clone(),
                     device_id,
                 )?;
-                let compression = connection.compression;
-                let protocol = connection.protocol.clone();
-                let server_version = connection.server_version.clone();
-                let capabilities = connection.capabilities.clone();
-                let (tx, rx) = mpsc::channel();
-                let connected = Arc::new(AtomicBool::new(true));
-                let connected_for_loop = Arc::clone(&connected);
-                let referrers = Arc::new(Mutex::new(HashSet::new()));
-                if let Some(window_label) = window_id.as_deref() {
-                    referrers
-                        .lock()
-                        .expect("remote client referrers lock")
-                        .insert(window_label.to_string());
-                }
-                let referrers_for_loop = Arc::clone(&referrers);
-                let event_owners = Arc::new(Mutex::new(HashMap::new()));
-                let event_owners_for_loop = Arc::clone(&event_owners);
-                let remote_origin = format!("{host}:{port}");
-                let event_sink = self.event_sink.clone();
-                thread::spawn(move || {
-                    client_loop(
-                        app,
-                        connection.ws,
-                        rx,
-                        connected_for_loop,
+                // Another window (or its reconnect poll) may have finished dialing
+                // while we were authenticating. Only the chosen pooled connection
+                // may start an event loop; dropping the unused socket closes it.
+                self.get_or_insert_live_client(&key, || {
+                    let compression = connection.compression;
+                    let protocol = connection.protocol.clone();
+                    let server_version = connection.server_version.clone();
+                    let capabilities = connection.capabilities.clone();
+                    let (tx, rx) = mpsc::channel();
+                    let connected = Arc::new(AtomicBool::new(true));
+                    let connected_for_loop = Arc::clone(&connected);
+                    let referrers = Arc::new(Mutex::new(HashSet::new()));
+                    if let Some(window_label) = window_id.as_deref() {
+                        referrers
+                            .lock()
+                            .expect("remote client referrers lock")
+                            .insert(window_label.to_string());
+                    }
+                    let referrers_for_loop = Arc::clone(&referrers);
+                    let event_owners = Arc::new(Mutex::new(HashMap::new()));
+                    let event_owners_for_loop = Arc::clone(&event_owners);
+                    let remote_origin = format!("{host}:{port}");
+                    let event_sink = self.event_sink.clone();
+                    thread::spawn(move || {
+                        client_loop(
+                            app,
+                            connection.ws,
+                            rx,
+                            connected_for_loop,
+                            compression,
+                            remote_origin,
+                            referrers_for_loop,
+                            event_owners_for_loop,
+                            event_sink,
+                        )
+                    });
+                    let client = Arc::new(RunningClient {
+                        host: host.clone(),
+                        port,
                         compression,
-                        remote_origin,
-                        referrers_for_loop,
-                        event_owners_for_loop,
-                        event_sink,
-                    )
-                });
-                let client = Arc::new(RunningClient {
-                    host: host.clone(),
-                    port,
-                    compression,
-                    protocol,
-                    server_version,
-                    capabilities,
-                    connected,
-                    tx,
-                    referrers,
-                    event_owners,
-                });
-                self.pool
-                    .lock()
-                    .expect("remote client pool lock")
-                    .insert(key.clone(), Arc::clone(&client));
-                client
+                        protocol,
+                        server_version,
+                        capabilities,
+                        connected,
+                        tx,
+                        referrers,
+                        event_owners,
+                    });
+                    client
+                })
             }
         };
 
@@ -342,6 +343,25 @@ impl RustRemoteClientState {
             "serverVersion": server_version,
             "capabilities": client.capabilities,
         }))
+    }
+
+    fn get_or_insert_live_client(
+        &self,
+        key: &ConnectionKey,
+        start: impl FnOnce() -> Arc<RunningClient>,
+    ) -> Arc<RunningClient> {
+        let mut pool = self.pool.lock().expect("remote client pool lock");
+        if let Some(client) = pool
+            .get(key)
+            .filter(|client| client.connected.load(Ordering::SeqCst))
+        {
+            return Arc::clone(client);
+        }
+        // Network I/O has already finished. Hold the lock only while starting and
+        // publishing the winner, so no competing dial can overwrite a live loop.
+        let client = start();
+        pool.insert(key.clone(), Arc::clone(&client));
+        client
     }
 
     /// Release a window's connection binding. The underlying socket is torn down
@@ -641,8 +661,15 @@ fn client_loop(
 ) {
     let mut pending: HashMap<String, PendingInvoke> = HashMap::new();
     let mut last_ping = Instant::now();
-    loop {
-        while let Ok(command) = rx.try_recv() {
+    'connection: loop {
+        loop {
+            let command = match rx.try_recv() {
+                Ok(command) => command,
+                Err(mpsc::TryRecvError::Empty) => break,
+                // The pool/state no longer owns this socket. Do not keep
+                // receiving and publishing output from an orphaned connection.
+                Err(mpsc::TryRecvError::Disconnected) => break 'connection,
+            };
             match command {
                 ClientCommand::Disconnect => {
                     let _ = ws.close(None);
@@ -734,6 +761,7 @@ fn client_loop(
             Err(_) => break,
         }
     }
+    let _ = ws.close(None);
     connected.store(false, Ordering::SeqCst);
     drain_pending(&mut pending, "Connection closed");
     if let Some(sink) = event_sink {
@@ -1479,10 +1507,9 @@ mod tests {
 
     // Build a fake pooled connection without opening a socket, so the
     // pool/binding/referrer lifecycle can be exercised in isolation.
-    fn register_fake_client(state: &RustRemoteClientState, windows: &[&str]) -> ConnectionKey {
-        let key = ConnectionKey::new("host", 9001, "tok");
+    fn fake_client() -> Arc<RunningClient> {
         let (tx, _rx) = mpsc::channel();
-        let client = Arc::new(RunningClient {
+        Arc::new(RunningClient {
             host: "host".to_string(),
             port: 9001,
             compression: RemoteCompression::None,
@@ -1493,7 +1520,59 @@ mod tests {
             tx,
             referrers: Arc::new(Mutex::new(HashSet::new())),
             event_owners: Arc::new(Mutex::new(HashMap::new())),
-        });
+        })
+    }
+
+    #[test]
+    fn concurrent_dials_start_only_one_pooled_event_loop() {
+        let state = RustRemoteClientState::default();
+        let key = ConnectionKey::new("host", 9001, "tok");
+        let ready = Arc::new(std::sync::Barrier::new(4));
+        let starts = Arc::new(AtomicU64::new(0));
+        let workers: Vec<_> = (0..4)
+            .map(|_| {
+                let state = state.clone();
+                let key = key.clone();
+                let ready = Arc::clone(&ready);
+                let starts = Arc::clone(&starts);
+                thread::spawn(move || {
+                    // All callers saw an empty pool before their network dial.
+                    assert!(!state.pool.lock().unwrap().contains_key(&key));
+                    ready.wait();
+                    state.get_or_insert_live_client(&key, || {
+                        starts.fetch_add(1, Ordering::SeqCst);
+                        fake_client()
+                    })
+                })
+            })
+            .collect();
+        let clients: Vec<_> = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect();
+        assert_eq!(starts.load(Ordering::SeqCst), 1, "one event loop per host");
+        for client in &clients {
+            assert!(Arc::ptr_eq(client, &clients[0]));
+        }
+        assert!(Arc::ptr_eq(&state.pool.lock().unwrap()[&key], &clients[0]));
+    }
+
+    #[test]
+    fn redial_replaces_a_dead_connection_but_reuses_a_live_one() {
+        let state = RustRemoteClientState::default();
+        let key = ConnectionKey::new("host", 9001, "tok");
+        let old = state.get_or_insert_live_client(&key, fake_client);
+        let shared = state.get_or_insert_live_client(&key, || panic!("live client must be reused"));
+        assert!(Arc::ptr_eq(&old, &shared));
+        old.connected.store(false, Ordering::SeqCst);
+        let replacement = state.get_or_insert_live_client(&key, fake_client);
+        assert!(!Arc::ptr_eq(&old, &replacement));
+        assert!(replacement.connected.load(Ordering::SeqCst));
+    }
+
+    fn register_fake_client(state: &RustRemoteClientState, windows: &[&str]) -> ConnectionKey {
+        let key = ConnectionKey::new("host", 9001, "tok");
+        let client = fake_client();
         state
             .pool
             .lock()

@@ -1616,6 +1616,79 @@ mod profile_context_integration_tests {
     }
 
     #[test]
+    fn concurrent_remote_connects_deliver_pty_output_once_and_close_when_dropped() {
+        let upstream = TestHost::new();
+        let entry = TestHost::new();
+        let (tx, rx) = mpsc::channel();
+        let client = crate::remote_client::RustRemoteClientState::with_event_sink(Arc::new(
+            move |channel, params| {
+                if channel == "pty:output" {
+                    tx.send(params).unwrap();
+                }
+            },
+        ));
+        let ready = Arc::new(std::sync::Barrier::new(4));
+        let workers: Vec<_> = (0..4)
+            .map(|_| {
+                let client = client.clone();
+                let ctx = entry.ctx.clone();
+                let info = upstream.info.clone();
+                let ready = Arc::clone(&ready);
+                thread::spawn(move || {
+                    ready.wait();
+                    client
+                        .connect(
+                            ctx,
+                            "127.0.0.1".into(),
+                            info["port"].as_u64().unwrap() as u16,
+                            info["token"].as_str().unwrap().into(),
+                            info["fingerprint"].as_str().unwrap().into(),
+                            Some("paste regression".into()),
+                            Some("terminal-window".into()),
+                        )
+                        .unwrap()
+                })
+            })
+            .collect();
+        for worker in workers {
+            assert_eq!(worker.join().unwrap()["connected"], json!(true));
+        }
+        let wait_for_connections = |expected: u64| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let count = upstream.server.status()["activeConnections"]
+                    .as_u64()
+                    .unwrap();
+                if count == expected {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "expected {expected} connections, got {count}"
+                );
+                thread::sleep(Duration::from_millis(20));
+            }
+        };
+        wait_for_connections(1);
+
+        let output = json!({"id":"terminal-1", "data":"gcloud auth login"});
+        upstream.server.broadcast_event("pty:output", &output);
+        assert_eq!(rx.recv_timeout(Duration::from_secs(3)).unwrap(), output);
+        // Identical consecutive host output is legitimate and must remain intact.
+        upstream.server.broadcast_event("pty:output", &output);
+        assert_eq!(rx.recv_timeout(Duration::from_secs(3)).unwrap(), output);
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_millis(300)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+
+        // Dropping the last pool owner must stop its socket/event loop even
+        // without an explicit Disconnect command.
+        drop(client);
+        wait_for_connections(0);
+    }
+
+    #[test]
     fn profile_context_routes_local_and_remote_workspaces_and_runtime_events() {
         let upstream = TestHost::new();
         let entry = TestHost::new();
