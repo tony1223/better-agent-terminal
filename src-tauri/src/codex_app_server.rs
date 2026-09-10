@@ -2068,8 +2068,95 @@ fn timestamp_or_now(value: Option<&Value>) -> u128 {
     now_millis()
 }
 
+fn history_response_message_text(payload: &Value) -> String {
+    let content = payload.get("content").unwrap_or(&Value::Null);
+    if payload.get("role").and_then(Value::as_str) != Some("user") {
+        return text_from_value(content);
+    }
+    let Some(blocks) = content.as_array() else {
+        return text_from_value(content);
+    };
+    let kinds = payload
+        .pointer("/internal_chat_message_metadata_passthrough/content_item_kinds")
+        .and_then(Value::as_array);
+    blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(index, block)| {
+            let text = text_from_value(block);
+            let trimmed = text.trim();
+            // Image attachments are bracketed by text labels in rollouts.
+            // Legacy user_message events contain only the actual prompt.
+            let image_after = blocks
+                .get(index + 1)
+                .and_then(|block| block.get("type"))
+                .and_then(Value::as_str)
+                == Some("input_image");
+            let image_before = index
+                .checked_sub(1)
+                .and_then(|index| blocks.get(index))
+                .and_then(|block| block.get("type"))
+                .and_then(Value::as_str)
+                == Some("input_image");
+            if (image_after && trimmed.starts_with("<image "))
+                || (image_before && trimmed == "</image>")
+            {
+                return None;
+            }
+            let kind = kinds
+                .and_then(|kinds| kinds.get(index))
+                .and_then(Value::as_str);
+            match kind {
+                Some(kind) if kind.starts_with("user.") => {}
+                Some(kind) if kind != "unknown" => return None,
+                _ => {
+                    // Older rollouts lack content_item_kinds. Their injected
+                    // workspace context also uses role=user, but isn't a chat
+                    // message. Explicit user.text blocks remain verbatim.
+                    let trimmed = text.trim_start();
+                    if [
+                        "<environment_context>",
+                        "<recommended_plugins>",
+                        "# AGENTS.md instructions for ",
+                    ]
+                    .iter()
+                    .any(|prefix| trimmed.starts_with(prefix))
+                    {
+                        return None;
+                    }
+                }
+            }
+            (!text.trim().is_empty()).then_some(text)
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn push_history_message(
+    items: &mut Vec<Value>,
+    unmatched: &mut Vec<(usize, bool)>,
+    message: Value,
+    from_response_item: bool,
+) {
+    // Older Codex versions record each message as both an event_msg and a
+    // response_item, in either order. Pair the two representations one for
+    // one within a turn; never deduplicate repeated messages of one format.
+    if let Some(index) = unmatched.iter().position(|(index, from_response)| {
+        *from_response != from_response_item
+            && items[*index]["role"] == message["role"]
+            && items[*index]["content"] == message["content"]
+    }) {
+        unmatched.remove(index);
+        return;
+    }
+    unmatched.push((items.len(), from_response_item));
+    items.push(message);
+}
+
 fn codex_history_items_from_content(session_id: &str, content: &str) -> Vec<Value> {
     let mut items = Vec::new();
+    let mut unmatched_messages = Vec::new();
+    let mut turn_id = String::new();
     for line in content.lines().filter(|line| !line.trim().is_empty()) {
         let Ok(entry) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -2078,37 +2165,40 @@ fn codex_history_items_from_content(session_id: &str, content: &str) -> Vec<Valu
             continue;
         };
         let timestamp = timestamp_or_now(entry.get("timestamp"));
+        let entry_type = entry.get("type").and_then(Value::as_str);
+        let payload_type = payload.get("type").and_then(Value::as_str);
+        if entry_type == Some("turn_context")
+            || (entry_type == Some("event_msg") && payload_type == Some("task_started"))
+        {
+            let next_turn = payload.get("turn_id").and_then(Value::as_str).unwrap_or("");
+            if next_turn != turn_id || payload_type == Some("task_started") {
+                unmatched_messages.clear();
+                turn_id = next_turn.to_string();
+            }
+        }
 
-        match entry.get("type").and_then(Value::as_str) {
+        match entry_type {
             Some("event_msg") => match payload.get("type").and_then(Value::as_str) {
-                Some("user_message") => {
+                Some("task_complete" | "turn_aborted") => unmatched_messages.clear(),
+                Some("user_message" | "agent_message") => {
+                    let role = if payload_type == Some("user_message") {
+                        "user"
+                    } else {
+                        "assistant"
+                    };
                     if let Some(message) = payload
                         .get("message")
                         .and_then(Value::as_str)
                         .filter(|message| !message.trim().is_empty())
                     {
-                        items.push(json!({
-                            "id": format!("hist-user-{}", items.len()),
+                        let message = json!({
+                            "id": format!("hist-{role}-{}", items.len()),
                             "sessionId": session_id,
-                            "role": "user",
+                            "role": role,
                             "content": message,
                             "timestamp": timestamp,
-                        }));
-                    }
-                }
-                Some("agent_message") => {
-                    if let Some(message) = payload
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .filter(|message| !message.trim().is_empty())
-                    {
-                        items.push(json!({
-                            "id": format!("hist-assistant-{}", items.len()),
-                            "sessionId": session_id,
-                            "role": "assistant",
-                            "content": message,
-                            "timestamp": timestamp,
-                        }));
+                        });
+                        push_history_message(&mut items, &mut unmatched_messages, message, false);
                     }
                 }
                 Some("exec_command_end") => {
@@ -2201,21 +2291,33 @@ fn codex_history_items_from_content(session_id: &str, content: &str) -> Vec<Valu
             },
             Some("response_item") => match payload.get("type").and_then(Value::as_str) {
                 Some("message") => {
-                    let context = text_from_value(payload.get("content").unwrap_or(&Value::Null));
-                    if context.starts_with(BAT_CONTEXT_TRANSFER_MARKER) {
+                    let Some(role @ ("user" | "assistant")) =
+                        payload.get("role").and_then(Value::as_str)
+                    else {
+                        continue;
+                    };
+                    let text = history_response_message_text(payload);
+                    if !text.trim().is_empty() {
+                        let is_context_transfer = text.starts_with(BAT_CONTEXT_TRANSFER_MARKER);
+                        let id_prefix = if is_context_transfer {
+                            "context-transfer"
+                        } else {
+                            role
+                        };
                         let id = payload
                             .get("id")
                             .and_then(Value::as_str)
                             .filter(|id| !id.is_empty())
                             .map(str::to_string)
-                            .unwrap_or_else(|| format!("hist-context-transfer-{}", items.len()));
-                        items.push(json!({
+                            .unwrap_or_else(|| format!("hist-{id_prefix}-{}", items.len()));
+                        let message = json!({
                             "id": id,
                             "sessionId": session_id,
-                            "role": "assistant",
-                            "content": context,
+                            "role": if is_context_transfer { "assistant" } else { role },
+                            "content": text,
                             "timestamp": timestamp,
-                        }));
+                        });
+                        push_history_message(&mut items, &mut unmatched_messages, message, true);
                     }
                 }
                 Some("reasoning") => {
@@ -8547,18 +8649,144 @@ mod tests {
     }
 
     #[test]
-    fn codex_history_loader_restores_only_marked_injected_messages() {
+    fn codex_history_loader_restores_context_transfer_and_response_messages() {
         let content = r##"
 {"timestamp":"2026-05-11T00:00:01Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"# BAT Context Transfer\n\nportable context"}]}}
 {"timestamp":"2026-05-11T00:00:02Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ordinary response item"}]}}
 "##;
         let items = codex_history_items_from_content("s-1", content);
-        assert_eq!(items.len(), 1);
+        assert_eq!(items.len(), 2);
         assert_eq!(items[0]["role"], "assistant");
         assert_eq!(
             items[0]["content"],
             "# BAT Context Transfer\n\nportable context"
         );
+        assert_eq!(items[1]["role"], "assistant");
+        assert_eq!(items[1]["content"], "ordinary response item");
+    }
+
+    #[test]
+    fn codex_history_loader_restores_response_only_conversation_in_order() {
+        // Current rollouts have response_item messages and item_completed
+        // notifications, without the old user_message / agent_message events.
+        let content = r#"
+{"timestamp":"2026-09-09T00:00:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}
+{"timestamp":"2026-09-09T00:00:01Z","type":"response_item","payload":{"type":"message","id":"user-1","role":"user","content":[{"type":"input_text","text":"Check the project"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-1","content_item_kinds":["user.text"]}}}
+{"timestamp":"2026-09-09T00:00:02Z","type":"response_item","payload":{"type":"message","id":"progress-1","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"I will check it."}],"internal_chat_message_metadata_passthrough":{"content_item_kinds":["unknown"]}}}
+{"timestamp":"2026-09-09T00:00:03Z","type":"response_item","payload":{"type":"reasoning","id":"reasoning-1","summary":[{"type":"summary_text","text":"Inspect the working tree"}]}}
+{"timestamp":"2026-09-09T00:00:04Z","type":"response_item","payload":{"type":"custom_tool_call","name":"exec","input":"text(await tools.exec_command({cmd: 'git status'}))","call_id":"call-1"}}
+{"timestamp":"2026-09-09T00:00:05Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-1","output":"working tree clean"}}
+{"timestamp":"2026-09-09T00:00:06Z","type":"response_item","payload":{"type":"message","id":"answer-1","role":"assistant","phase":"final","content":[{"type":"output_text","text":"Checks passed."},{"type":"output_text","text":"The working tree is clean."}]}}
+{"timestamp":"2026-09-09T00:00:06Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","text":"Checks passed."}}}
+"#;
+        let items = codex_history_items_from_content("s-1", content);
+        assert_eq!(items.len(), 5);
+        assert!(items.iter().all(|item| item["sessionId"] == "s-1"));
+        assert_eq!(items[0]["id"], "user-1");
+        assert_eq!(items[0]["role"], "user");
+        assert_eq!(items[0]["content"], "Check the project");
+        assert_eq!(items[0]["timestamp"].as_u64(), Some(1_788_912_001_000));
+        assert_eq!(items[1]["content"], "I will check it.");
+        assert_eq!(items[2]["thinking"], "Inspect the working tree");
+        assert_eq!(items[3]["toolName"], "exec");
+        assert_eq!(items[3]["status"], "completed");
+        assert_eq!(items[3]["result"], "working tree clean");
+        assert_eq!(items[4]["id"], "answer-1");
+        assert_eq!(items[4]["role"], "assistant");
+        assert_eq!(
+            items[4]["content"],
+            "Checks passed.\n\nThe working tree is clean."
+        );
+    }
+
+    #[test]
+    fn codex_history_loader_pairs_formats_without_losing_repeated_messages() {
+        let content = r#"
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"again"}]}}
+{"type":"event_msg","payload":{"type":"user_message","message":"again"}}
+{"type":"event_msg","payload":{"type":"agent_message","message":"Checking"}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Checking"}]}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Checking"}]}}
+{"type":"event_msg","payload":{"type":"agent_message","message":"Checking"}}
+{"type":"event_msg","payload":{"type":"agent_message","message":"Legacy-only reply"}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Response-only reply"}]}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"again"}]}}
+{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-2"}}
+{"type":"event_msg","payload":{"type":"user_message","message":"again"}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Repeated reply"}]}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Repeated reply"}]}}
+"#;
+        let items = codex_history_items_from_content("s-1", content);
+        let messages: Vec<&str> = items
+            .iter()
+            .map(|item| item["content"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            messages,
+            vec![
+                "again",
+                "Checking",
+                "Checking",
+                "Legacy-only reply",
+                "Response-only reply",
+                "again",
+                "again",
+                "Repeated reply",
+                "Repeated reply",
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_history_loader_keeps_matching_text_across_turn_contexts() {
+        let content = r#"
+{"type":"turn_context","payload":{"turn_id":"turn-1"}}
+{"type":"event_msg","payload":{"type":"agent_message","message":"Done"}}
+{"type":"turn_context","payload":{"turn_id":"turn-2"}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Done"}]}}
+"#;
+        let items = codex_history_items_from_content("s-1", content);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["content"], "Done");
+        assert_eq!(items[1]["content"], "Done");
+    }
+
+    #[test]
+    fn codex_history_loader_pairs_user_prompt_with_image_attachment_labels() {
+        let content = r#"
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<image name=[Image #1] path=\"/tmp/screenshot.png\">"},{"type":"input_image","image_url":"data:image/png;base64,AAAA"},{"type":"input_text","text":"</image>"},{"type":"input_text","text":"Why is this incomplete?"}]}}
+{"type":"event_msg","payload":{"type":"user_message","message":"Why is this incomplete?","local_images":["/tmp/screenshot.png"]}}
+"#;
+        let items = codex_history_items_from_content("s-1", content);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["role"], "user");
+        assert_eq!(items[0]["content"], "Why is this incomplete?");
+    }
+
+    #[test]
+    fn codex_history_loader_filters_injected_context_per_content_block() {
+        let content = r##"
+{"type":"response_item","payload":{"type":"message","role":"system","content":[{"type":"input_text","text":"System instructions"}]}}
+{"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"Developer instructions"}]}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Injected plugins"},{"type":"input_text","text":"Injected environment"}],"internal_chat_message_metadata_passthrough":{"content_item_kinds":["plugins.recommendations","environments.environment_context"]}}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Workspace rules"},{"type":"input_text","text":"Actual user prompt"}],"internal_chat_message_metadata_passthrough":{"content_item_kinds":["environments.agents_md","user.text"]}}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<recommended_plugins>hidden</recommended_plugins>"},{"type":"input_text","text":"<environment_context>hidden</environment_context>"},{"type":"input_text","text":"# AGENTS.md instructions for /tmp\nHidden rules"}]}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>quoted by the user</environment_context>"}],"internal_chat_message_metadata_passthrough":{"content_item_kinds":["user.text"]}}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Ordinary older prompt"}]}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"   "}]}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[]}}
+invalid json
+"##;
+        let items = codex_history_items_from_content("s-1", content);
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0]["content"], "Actual user prompt");
+        assert_eq!(
+            items[1]["content"],
+            "<environment_context>quoted by the user</environment_context>"
+        );
+        assert_eq!(items[2]["content"], "Ordinary older prompt");
     }
 
     #[test]
