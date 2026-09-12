@@ -637,7 +637,16 @@ export const TerminalPanel = memo(function TerminalPanel({
         lastSentCols = cols
         lastSentRows = rows
         dlog(`[resize] pty.resize cols=${cols} rows=${rows} terminal=${terminalId}`)
-        host.pty.resize(terminalId, cols, rows)
+        void Promise.resolve(host.pty.resize(terminalId, cols, rows)).catch((error: unknown) => {
+          // Forget a size the host rejected (e.g. an older host while the PTY
+          // is still starting) so the next doResize resends it instead of
+          // deduping it away and leaving the PTY at its spawn size.
+          if (lastSentCols === cols && lastSentRows === rows) {
+            lastSentCols = 0
+            lastSentRows = 0
+          }
+          dlog(`[resize] pty.resize rejected cols=${cols} rows=${rows} terminal=${terminalId}`, error)
+        })
       }
     }
     doResizeRef.current = doResize
