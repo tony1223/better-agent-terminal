@@ -2430,6 +2430,34 @@ fn invoke_rust_for_remote(
                 })
             })
         }
+        // Same rule as the local router's client_resume (commands/claude.rs):
+        // codex history is owned by the app-server runtime, so a client-resume
+        // for a codex session is a regular resume there. Without this arm the
+        // request fell through to the node sidecar, whose codex support is
+        // gone — it created a session record, emitted "Codex session started",
+        // then failed on createCodexInstance, and every send into that phantom
+        // answered "session has no cwd". Only remote clients (the phone) hit
+        // this: local windows go through claude_client_resume, which routes.
+        //
+        // is_owned covers the second half of the local rule: a session the
+        // runtime already holds is codex whatever the options say.
+        "claude:client-resume" => {
+            let options = params.get("options").cloned().unwrap_or(Value::Null);
+            let maybe_options = Some(options.clone());
+            let codex = ctx.state::<CodexAppServerState>();
+            let session_id = match string_param(params, "sessionId", channel) {
+                Ok(value) => value,
+                Err(err) => return Some(Err(err)),
+            };
+            if !should_handle_codex(&maybe_options) && !codex.is_owned(&session_id) {
+                return None;
+            }
+            string_param(params, "sdkSessionId", channel).and_then(|sdk_session_id| {
+                codex
+                    .resume_session(&ctx, session_id, sdk_session_id, maybe_options)
+                    .map_err(bridge_error_message)
+            })
+        }
         "claude:send-message" => {
             let Some(route) = codex_for_remote_session(ctx, channel, params) else {
                 return None;
