@@ -3073,7 +3073,7 @@ impl ClaudeRuntimeRouter {
         agent_preset: Option<String>,
     ) -> Result<Value, BridgeError> {
         if let Some(value) = self.codex.get_session_meta(&session_id) {
-            return Ok(notification_cmd::with_agent_activity_meta(&self.app, &session_id, value));
+            return Ok(notification_cmd::with_runtime_activity_meta(&self.app, &session_id, value));
         }
         if is_codex_agent_preset_id(agent_preset.as_deref()) {
             return Ok(Value::Null);

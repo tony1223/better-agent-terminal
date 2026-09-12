@@ -577,6 +577,10 @@ registerHandler('claude.getSessionState', async (params) => {
     codexApprovalPolicy: s.codexApprovalPolicy,
     messages: Array.isArray(s.messages) ? s.messages : [],
     isStreaming: s.streaming === true,
+    // Include current turn/phase metadata, not only the transcript. Clients
+    // need an explicit idle snapshot to clear a pre-restart turn, and must
+    // distinguish idle from the pre-stream `starting`/queued window.
+    meta: buildSessionMeta(s),
     streamingText: s.streamingText || '',
     streamingThinking: s.streamingThinking || '',
     // A prompt the agent is blocked on. claude:ask-user and

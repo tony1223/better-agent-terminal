@@ -60,6 +60,31 @@ const QUESTIONS = [{
 }]
 
 try {
+  await check('session state distinguishes restored idle from startup and live work', async () => {
+    const sessionId = 'activity-recovery'
+    const s = seedSession(sessionId, cwd)
+    try {
+      s.streaming = false
+      s.runtimeStatus = null
+      const idle = (await send('claude.getSessionState', { sessionId })).result
+      assert.equal(idle.isStreaming, false)
+      assert.equal(idle.meta.isStreaming, false)
+      assert.equal(idle.meta.runtimeStatus, null)
+      s.runtimeStatus = 'starting'
+      const starting = (await send('claude.getSessionState', { sessionId })).result
+      assert.equal(starting.meta.isStreaming, true)
+      assert.equal(starting.meta.runtimeStatus, 'starting')
+      s.runtimeStatus = null
+      s.streaming = true
+      const running = (await send('claude.getSessionState', { sessionId })).result
+      assert.equal(running.isStreaming, true)
+      assert.equal(running.meta.isStreaming, true)
+    } finally {
+      sessions.delete(sessionId)
+    }
+    assert.equal((await send('claude.getSessionMeta', { sessionId })).result, null)
+  })
+
   await check('a pending AskUserQuestion is recoverable from session state, options included', async () => {
     const sessionId = 'pending-ask'
     const s = seedSession(sessionId, cwd)

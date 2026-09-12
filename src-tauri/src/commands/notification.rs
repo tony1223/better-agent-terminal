@@ -177,6 +177,17 @@ impl AgentActivity {
         }
         meta
     }
+
+    fn enrich_runtime(&self, meta: Value) -> Value {
+        // The Codex runtime owns its current turn state. An older observed
+        // stream/turn-end event must not override that authoritative snapshot.
+        let streaming = meta.get("isStreaming").and_then(Value::as_bool);
+        let mut enriched = self.enrich(meta);
+        if let (Some(streaming), Some(map)) = (streaming, enriched.as_object_mut()) {
+            map.insert("isStreaming".into(), json!(streaming));
+        }
+        enriched
+    }
 }
 
 pub fn update_agent_activity_from_event(app: &HostContext, topic: &str, payload: &Value) {
@@ -194,6 +205,13 @@ pub fn with_agent_activity_meta(app: &HostContext, id: &str, meta: Value) -> Val
     let activity = state.activity.lock().unwrap_or_else(|e| e.into_inner())
         .get(id).cloned().unwrap_or_default();
     activity.enrich(meta)
+}
+
+pub fn with_runtime_activity_meta(app: &HostContext, id: &str, meta: Value) -> Value {
+    let Some(state) = app.try_state::<AgentNotificationState>() else { return meta; };
+    let activity = state.activity.lock().unwrap_or_else(|e| e.into_inner())
+        .get(id).cloned().unwrap_or_default();
+    activity.enrich_runtime(meta)
 }
 
 impl NotificationState {
@@ -1267,6 +1285,23 @@ mod tests {
         assert_eq!(activity.last_data_at, None);
         assert!(activity.enrich(json!({}))["lastDataAt"].is_null());
         assert!(activity.enrich(Value::Null).is_null());
+    }
+
+    #[test]
+    fn agent_activity_never_overrides_current_runtime_with_old_events() {
+        let mut activity = AgentActivity::default();
+        activity.observe("claude:stream", &json!({"data":{"text":"old output"}}), 100);
+        let idle = activity.enrich_runtime(json!({"isStreaming":false,"runtimeStatus":null}));
+        assert_eq!(idle["isStreaming"], false);
+        assert!(idle["runtimeStatus"].is_null());
+        assert_eq!(idle["lastDataAt"], 100);
+
+        activity.observe("claude:turn-end", &json!({}), 200);
+        let running = activity.enrich_runtime(json!({"isStreaming":true,"runtimeStatus":"queued"}));
+        assert_eq!(running["isStreaming"], true);
+        assert_eq!(running["runtimeStatus"], "queued");
+        assert_eq!(running["lastDataAt"], 200);
+        assert!(activity.enrich_runtime(Value::Null).is_null());
     }
 
     #[test]
