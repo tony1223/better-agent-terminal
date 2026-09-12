@@ -117,6 +117,7 @@
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@openai/codex": "0.153.2",
     "@vscode/ripgrep": "^1.17.1",
+    "@xterm/addon-webgl": "^0.18.0",
     "better-sqlite3": "^12.5.0",
     "papaparse": "^5.7.0",
     "selfsigned": "^5.5.0",

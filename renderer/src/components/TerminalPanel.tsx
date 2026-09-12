@@ -5,6 +5,7 @@ import { Terminal, type ILink } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
+import { WebglAddon } from '@xterm/addon-webgl'
 import { workspaceStore } from '../stores/workspace-store'
 import { settingsStore } from '../stores/settings-store'
 import type { AgentPresetId } from '../types/agent-presets'
@@ -589,6 +590,27 @@ export const TerminalPanel = memo(function TerminalPanel({
     window.addEventListener('keydown', handleNativeTerminalKeydown, true)
 
     terminal.open(containerRef.current)
+
+    // The DOM renderer lays a row out with the browser's text flow, so a run
+    // that falls back to a second CJK font (Japanese 弾/顔 next to Traditional
+    // Chinese on Windows, for example) no longer measures a whole number of
+    // cells and every column after it drifts — table borders end up one cell
+    // off on exactly those rows. The WebGL renderer draws each glyph into its
+    // own cell. Keep the DOM renderer when WebGL is unavailable or lost.
+    let webglAddon: WebglAddon | null = null
+    try {
+      webglAddon = new WebglAddon()
+      webglAddon.onContextLoss(() => {
+        dlog(`[render] webgl context lost, using DOM renderer terminal=${terminalId}`)
+        webglAddon?.dispose()
+        webglAddon = null
+      })
+      terminal.loadAddon(webglAddon)
+    } catch (error) {
+      dlog(`[render] webgl renderer unavailable, using DOM renderer terminal=${terminalId}`, error)
+      webglAddon?.dispose()
+      webglAddon = null
+    }
 
     // Register file:// URL link provider (WebLinksAddon only handles http/https)
     terminal.registerLinkProvider({
