@@ -118,6 +118,82 @@ struct AgentSessionOwner {
 pub struct AgentNotificationState {
     inner: Arc<Mutex<HashMap<String, AgentNotificationSession>>>,
     owners: Arc<Mutex<HashMap<String, AgentSessionOwner>>>,
+    activity: Arc<Mutex<HashMap<String, AgentActivity>>>,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
+struct AgentActivity {
+    last_data_at: Option<i64>,
+    is_streaming: Option<bool>,
+}
+
+impl AgentActivity {
+    fn observe(&mut self, topic: &str, payload: &Value, now: i64) {
+        let data = payload.get("data").unwrap_or(payload);
+        let has_output = match topic {
+            "claude:stream" => ["text", "thinking"].iter().any(|key| {
+                data.get(*key).and_then(Value::as_str).is_some_and(|s| !s.is_empty())
+            }),
+            "claude:message" => payload.get("message")
+                .and_then(|message| message.get("role")).and_then(Value::as_str) == Some("assistant"),
+            "claude:tool-use" | "claude:tool-result" | "claude:result" |
+            "claude:turn-end" | "claude:error" | "claude:permission-request" | "claude:ask-user" => true,
+            _ => false,
+        };
+        if has_output { self.last_data_at = Some(self.last_data_at.unwrap_or(0).max(now)); }
+        match topic {
+            "claude:stream" if has_output => self.is_streaming = Some(true),
+            "claude:tool-use" | "claude:permission-request" | "claude:ask-user" => self.is_streaming = Some(true),
+            "claude:result" | "claude:turn-end" | "claude:error" => self.is_streaming = Some(false),
+            "claude:status" => {
+                if let Some(meta) = payload.get("meta") {
+                    if meta.get("runtimeStatus").and_then(Value::as_str).is_some_and(|s| !s.is_empty()) {
+                        self.is_streaming = Some(true);
+                    } else if let Some(active) = meta.get("isStreaming").and_then(Value::as_bool) {
+                        self.is_streaming = Some(active);
+                    }
+                }
+            }
+            "claude:history" => {
+                // History replay supplies original timestamps, not replay time.
+                if let Some(items) = payload.get("items").or_else(|| payload.get("messages")).and_then(Value::as_array) {
+                    for item in items {
+                        if item.get("toolName").is_some() || item.get("role").and_then(Value::as_str) == Some("assistant") {
+                            if let Some(time) = item.get("timestamp").and_then(Value::as_i64).filter(|time| *time > 0) {
+                                self.last_data_at = Some(self.last_data_at.unwrap_or(0).max(time));
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn enrich(&self, mut meta: Value) -> Value {
+        if let Some(map) = meta.as_object_mut() {
+            map.insert("lastDataAt".into(), json!(self.last_data_at));
+            if let Some(active) = self.is_streaming { map.insert("isStreaming".into(), json!(active)); }
+        }
+        meta
+    }
+}
+
+pub fn update_agent_activity_from_event(app: &HostContext, topic: &str, payload: &Value) {
+    if !topic.starts_with("claude:") { return; }
+    let Some(id) = payload.get("sessionId").and_then(Value::as_str) else { return; };
+    let Some(state) = app.try_state::<AgentNotificationState>() else { return; };
+    if !state.lock().contains_key(id) { return; }
+    state.activity.lock().unwrap_or_else(|e| e.into_inner())
+        .entry(id.to_string()).or_default().observe(topic, payload, now_ms());
+}
+
+/// Additive metadata fields: querying does not advance the last-output clock.
+pub fn with_agent_activity_meta(app: &HostContext, id: &str, meta: Value) -> Value {
+    let Some(state) = app.try_state::<AgentNotificationState>() else { return meta; };
+    let activity = state.activity.lock().unwrap_or_else(|e| e.into_inner())
+        .get(id).cloned().unwrap_or_default();
+    activity.enrich(meta)
 }
 
 impl NotificationState {
@@ -548,6 +624,7 @@ pub fn unregister_agent_session(app: &HostContext, session_id: &str) {
     if let Some(state) = app.try_state::<AgentNotificationState>() {
         state.lock().remove(session_id);
         state.lock_owners().remove(session_id);
+        state.activity.lock().unwrap_or_else(|e| e.into_inner()).remove(session_id);
     }
 }
 
@@ -1154,6 +1231,42 @@ mod tests {
             title: None,
             native_notification_handled: None,
         }
+    }
+
+    #[test]
+    fn agent_activity_tracks_output_not_polls_or_status_and_replays_original_time() {
+        let mut activity = AgentActivity::default();
+        activity.observe("claude:status", &json!({ "meta": { "runtimeStatus": "starting" } }), 100);
+        assert_eq!(activity.last_data_at, None);
+        assert_eq!(activity.is_streaming, Some(true));
+        activity.observe("claude:stream", &json!({ "data": { "thinking": "working" } }), 200);
+        assert_eq!(activity.last_data_at, Some(200));
+        assert_eq!(activity.enrich(json!({}))["lastDataAt"], 200);
+        assert_eq!(activity.enrich(json!({}))["lastDataAt"], 200);
+        activity.observe("claude:status", &json!({ "meta": { "runtimeStatus": null } }), 300);
+        assert_eq!(activity.last_data_at, Some(200));
+        assert_eq!(activity.is_streaming, Some(true));
+        activity.observe("claude:tool-result", &json!({}), 400);
+        activity.observe("claude:turn-end", &json!({}), 500);
+        assert_eq!(activity.last_data_at, Some(500));
+        assert_eq!(activity.is_streaming, Some(false));
+        activity.observe("claude:history", &json!({ "items": [{ "role": "assistant", "timestamp": 250 }] }), 900);
+        assert_eq!(activity.last_data_at, Some(500));
+        let mut replay = AgentActivity::default();
+        replay.observe("claude:history", &json!({ "items": [{ "role": "assistant", "timestamp": 250 }] }), 900);
+        assert_eq!(replay.last_data_at, Some(250));
+        assert_eq!(replay.is_streaming, None);
+    }
+
+    #[test]
+    fn agent_activity_does_not_count_session_creation_or_user_input_as_output() {
+        let mut activity = AgentActivity::default();
+        activity.observe("claude:message", &json!({ "message": { "role": "system" } }), 100);
+        activity.observe("claude:message", &json!({ "message": { "role": "user" } }), 200);
+        activity.observe("claude:stream", &json!({ "data": { "text": "" } }), 300);
+        assert_eq!(activity.last_data_at, None);
+        assert!(activity.enrich(json!({}))["lastDataAt"].is_null());
+        assert!(activity.enrich(Value::Null).is_null());
     }
 
     #[test]

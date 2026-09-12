@@ -105,6 +105,7 @@ impl RuntimeEventHubState {
             let _ = targets;
             app.emit(topic, payload.clone());
         }
+        notification::update_agent_activity_from_event(app, topic, &payload);
         notification::update_agent_session_meta_from_event(app, topic, &payload);
         notification::update_agent_session_worktree_from_event(app, topic, &payload);
         notification::add_agent_completion_from_event(app, topic, &payload);

@@ -2564,13 +2564,15 @@ fn invoke_rust_for_remote(
         },
         "claude:get-session-meta" => match codex_for_remote_session(ctx, channel, params) {
             Some(route) => route.map(|(codex, session_id)| {
-                codex.get_session_meta(&session_id).unwrap_or(Value::Null)
+                notification_cmd::with_agent_activity_meta(ctx, &session_id,
+                    codex.get_session_meta(&session_id).unwrap_or(Value::Null))
             }),
             None => match string_param(params, "sessionId", channel) {
                 Ok(session_id) => {
                     match notification_cmd::get_agent_session_snapshot(&ctx, &session_id) {
                         Some(session) => {
-                            Ok(claude_cmd::session_meta_from_notification_snapshot(&session))
+                            Ok(notification_cmd::with_agent_activity_meta(ctx, &session_id,
+                                claude_cmd::session_meta_from_notification_snapshot(&session)))
                         }
                         None => return None,
                     }
