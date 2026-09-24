@@ -32,6 +32,8 @@ pub mod github;
 pub mod image;
 pub mod notification;
 pub mod profile;
+#[cfg(feature = "desktop")]
+pub mod projects;
 pub mod pty;
 #[cfg(feature = "desktop")]
 pub mod remote;

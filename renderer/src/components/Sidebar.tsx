@@ -5,6 +5,7 @@ import type { Workspace } from '../types'
 import { WORKSPACE_COLORS } from '../types'
 import { workspaceStore } from '../stores/workspace-store'
 import { ActivityIndicator } from './ActivityIndicator'
+import { ProjectsSidebar } from './ProjectsSidebar'
 import { NotificationBell } from './NotificationBell'
 import { isTauriNativeDropInside, listenTauriNativeDrop } from '../utils/tauri-native-drop'
 import {
@@ -114,6 +115,8 @@ export function Sidebar({
   const [githubUrl, setGithubUrl] = useState<string | null>(null)
   const [groupEditTarget, setGroupEditTarget] = useState<string | null>(null)
   const [groupEditValue, setGroupEditValue] = useState('')
+  // The Projects list mounts (and scans) only while its section is expanded.
+  const [projectsOpen, setProjectsOpen] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
   const groupInputRef = useRef<HTMLInputElement>(null)
   const contextMenuRef = useRef<HTMLDivElement>(null)
@@ -812,6 +815,14 @@ export function Sidebar({
         )
         )}
       </div>
+      <details
+        className="projects-section"
+        open={projectsOpen}
+        onToggle={(e) => setProjectsOpen(e.currentTarget.open)}
+      >
+        <summary className="projects-summary">{t('projects.title')}</summary>
+        {projectsOpen && <ProjectsSidebar />}
+      </details>
       <div className="sidebar-footer">
         <NotificationBell />
         <button className="add-workspace-btn" onClick={onAddWorkspace}>

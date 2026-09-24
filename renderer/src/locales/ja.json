@@ -260,6 +260,21 @@
     "restAgent": "エージェントを休止",
     "closeWorkspace": "ワークスペースを閉じる"
   },
+  "projects": {
+    "title": "プロジェクト",
+    "repoCount_one": "{{count}} 件のリポジトリ",
+    "repoCount_other": "{{count}} 件のリポジトリ",
+    "sessionCount_one": "Claude セッション {{count}} 件",
+    "sessionCount_other": "Claude セッション {{count}} 件",
+    "rescan": "再スキャン",
+    "scanning": "スキャン中…",
+    "empty": "ワークスペースと同じ階層に Git リポジトリが見つかりません。",
+    "scanFailed": "プロジェクトをスキャンできませんでした: {{error}}",
+    "startSession": "Claude セッションを開始",
+    "startSessionInWorktree": "この worktree で Claude セッションを開始",
+    "detached": "（HEAD 切り離し）",
+    "worktreeFallback": "worktree"
+  },
   "profiles": {
     "title": "プロファイル",
     "saveCurrent": "現在の状態を保存",
