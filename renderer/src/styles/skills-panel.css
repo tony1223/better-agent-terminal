@@ -180,6 +180,109 @@
   font-family: monospace;
 }
 
+/* MCP server rows — grid keeps controls pinned and the name truncating at
+   any sidebar width: [dot] [name (flex, ellipsis)] [actions], meta below. */
+.mcp-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas:
+    "dot name actions"
+    "meta meta meta";
+  align-items: center;
+  column-gap: 6px;
+  row-gap: 2px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  cursor: default;
+}
+
+.mcp-row:hover {
+  background: var(--bg-tertiary, #2a2a2a);
+}
+
+.mcp-name {
+  grid-area: name;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 600;
+  color: #5fb3d9;
+  font-family: monospace;
+}
+
+.mcp-meta {
+  grid-area: meta;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--text-secondary, #888);
+}
+
+.mcp-row-disabled .mcp-name,
+.mcp-row-disabled .mcp-meta {
+  opacity: 0.5;
+}
+
+.mcp-dot {
+  grid-area: dot;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background: #888;
+}
+
+.mcp-dot-connected { background: #3fb950; }
+.mcp-dot-failed { background: #f85149; }
+.mcp-dot-needs-auth { background: #d29922; }
+.mcp-dot-pending { background: #58a6ff; animation: mcp-pulse 1.2s ease-in-out infinite; }
+.mcp-dot-disabled { background: #6e7681; }
+.mcp-dot-configured { background: #484f58; }
+
+@keyframes mcp-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+.mcp-actions {
+  grid-area: actions;
+  display: flex;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+
+.mcp-action-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary, #888);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 3px;
+}
+
+.mcp-action-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--text-primary, #e5e5e5);
+}
+
+.mcp-action-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.mcp-hint {
+  font-size: 11px;
+  color: var(--text-secondary, #888);
+  padding: 8px;
+  font-style: italic;
+}
+
 .skills-item-desc {
   font-size: 11px;
   color: var(--text-secondary, #888);

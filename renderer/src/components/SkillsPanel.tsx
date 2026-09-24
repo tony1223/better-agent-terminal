@@ -32,7 +32,7 @@ const BUILTIN_COMMANDS = new Set([
 export function SkillsPanel({ isVisible, activeCwd, activeSessionId }: SkillsPanelProps) {
   const { t } = useTranslation()
   const [sdkCommands, setSdkCommands] = useState<SkillItem[]>([])
-  const [fsCommands, setFsCommands] = useState<{ name: string; description: string; scope: 'project' | 'global' }[]>([])
+  const [fsCommands, setFsCommands] = useState<{ name: string; description: string; scope: 'project' | 'global' | 'plugin' }[]>([])
   const [searchQuery, setSearchQuery] = useState('')
   const retryRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
@@ -93,22 +93,30 @@ export function SkillsPanel({ isVisible, activeCwd, activeSessionId }: SkillsPan
     }).catch(() => setFsCommands([]))
   }, [activeCwd])
 
-  // Classify: custom (top) vs built-in (bottom)
-  const { customItems, builtinItems } = useMemo(() => {
+  // Classify: plugin (top) vs custom (middle) vs built-in (bottom).
+  // Plugin items are namespaced "<plugin>:<name>" — both from the fs scan
+  // (scope 'plugin') and from SDK commands that carry a ':' namespace.
+  const { pluginItems, customItems, builtinItems } = useMemo(() => {
     const fsNames = new Set(fsCommands.map(f => f.name))
 
-    // Filesystem commands are always custom
-    const custom: SkillItem[] = fsCommands.map(f => ({
-      name: f.name,
-      description: f.description,
-    }))
+    const fsPlugin: SkillItem[] = []
+    const fsCustom: SkillItem[] = []
+    for (const f of fsCommands) {
+      const item = { name: f.name, description: f.description }
+      if (f.scope === 'plugin') fsPlugin.push(item)
+      else fsCustom.push(item)
+    }
 
-    // SDK commands: split into custom (unknown) vs built-in (known)
+    // SDK commands: split into plugin (namespaced), custom (unknown) and
+    // built-in (known).
+    const sdkPlugin: SkillItem[] = []
     const sdkCustom: SkillItem[] = []
     const sdkBuiltin: SkillItem[] = []
     for (const cmd of sdkCommands) {
-      if (fsNames.has(cmd.name)) continue // already in filesystem custom list
-      if (BUILTIN_COMMANDS.has(cmd.name)) {
+      if (fsNames.has(cmd.name)) continue // already covered by the fs scan
+      if (cmd.name.includes(':')) {
+        sdkPlugin.push(cmd)
+      } else if (BUILTIN_COMMANDS.has(cmd.name)) {
         sdkBuiltin.push(cmd)
       } else {
         sdkCustom.push(cmd)
@@ -116,12 +124,19 @@ export function SkillsPanel({ isVisible, activeCwd, activeSessionId }: SkillsPan
     }
 
     return {
-      customItems: [...custom, ...sdkCustom],
+      pluginItems: [...fsPlugin, ...sdkPlugin],
+      customItems: [...fsCustom, ...sdkCustom],
       builtinItems: sdkBuiltin,
     }
   }, [sdkCommands, fsCommands])
 
   // Filter by search
+  const filteredPlugin = useMemo(() => {
+    if (!searchQuery) return pluginItems
+    const q = searchQuery.toLowerCase()
+    return pluginItems.filter(s => s.name.toLowerCase().includes(q) || s.description.toLowerCase().includes(q))
+  }, [pluginItems, searchQuery])
+
   const filteredCustom = useMemo(() => {
     if (!searchQuery) return customItems
     const q = searchQuery.toLowerCase()
@@ -156,8 +171,8 @@ export function SkillsPanel({ isVisible, activeCwd, activeSessionId }: SkillsPan
     </div>
   )
 
-  const hasAny = customItems.length > 0 || builtinItems.length > 0
-  const hasFiltered = filteredCustom.length > 0 || filteredBuiltin.length > 0
+  const hasAny = pluginItems.length > 0 || customItems.length > 0 || builtinItems.length > 0
+  const hasFiltered = filteredPlugin.length > 0 || filteredCustom.length > 0 || filteredBuiltin.length > 0
 
   return (
     <div className="skills-sidebar">
@@ -171,7 +186,17 @@ export function SkillsPanel({ isVisible, activeCwd, activeSessionId }: SkillsPan
       </div>
 
       <div className="skills-sidebar-body">
-        {/* Top section: Custom / user skills (scrollable) */}
+        {/* Top section: Plugin-provided commands (scrollable) */}
+        {filteredPlugin.length > 0 && (
+          <div className="skills-section">
+            <div className="skills-group-header">{t('skills.pluginCommands', 'Plugin commands')}</div>
+            <div className="skills-section-list">
+              {filteredPlugin.map(renderItem)}
+            </div>
+          </div>
+        )}
+
+        {/* Middle section: Custom / user skills (scrollable) */}
         {filteredCustom.length > 0 && (
           <div className="skills-section">
             <div className="skills-group-header">{t('skills.customCommands')}</div>

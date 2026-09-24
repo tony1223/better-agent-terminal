@@ -3048,6 +3048,16 @@ fn invoke_rust_for_remote(
             serde_json::to_value(claude_cmd::scan_skills_native(Path::new(&cwd)))
                 .map_err(|err| format!("{channel} serialization failed: {err}"))
         }),
+        "claude:scan-mcp-servers" => string_param(params, "cwd", channel)
+            .map(|cwd| claude_cmd::scan_mcp_servers_native(Path::new(&cwd))),
+        // Live MCP control is session/SDK-bound and not yet bridged over the
+        // remote channel — degrade gracefully so remote clients don't error.
+        "claude:get-mcp-server-status" => Ok(json!([])),
+        "claude:reconnect-mcp-server"
+        | "claude:toggle-mcp-server"
+        | "claude:set-mcp-server-enabled" => {
+            Err(format!("{channel}: MCP control is not available in remote mode"))
+        }
         "claude:check-mcp-json-status" => string_param(params, "cwd", channel)
             .map(|cwd| claude_cmd::check_mcp_json_status_native(Path::new(&cwd))),
         "claude:enable-all-project-mcp" => string_param(params, "cwd", channel).and_then(|cwd| {

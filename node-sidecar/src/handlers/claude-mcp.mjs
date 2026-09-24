@@ -19,11 +19,18 @@
 // local `<cwd>/.claude/settings.local.json`. Approval in ANY of them
 // counts (the CLI ORs the merge result).
 
-import { readFile, writeFile, mkdir } from 'node:fs/promises'
+import { readFile, writeFile, mkdir, rename, stat, unlink } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
 import { registerHandler } from '../lib/protocol.mjs'
+
+// Override hook for tests — replaces the ~/.claude.json path.
+let _claudeJsonPathOverrideForTests = null
+export function __setClaudeJsonPathOverrideForTests(p) { _claudeJsonPathOverrideForTests = p }
+function claudeJsonPath() {
+  return _claudeJsonPathOverrideForTests || join(homedir(), '.claude.json')
+}
 
 async function readJsonSafe(path) {
   try {
@@ -95,4 +102,86 @@ registerHandler('claude.enableAllProjectMcp', async (params) => {
   existing.enableAllProjectMcpServers = true
   await writeFile(path, JSON.stringify(existing, null, 2) + '\n', 'utf-8')
   return { ok: true, changed: true, path }
+})
+
+// Durable enable/disable of an MCP server for a given cwd, mirroring how the
+// Claude CLI persists it under ~/.claude.json -> projects[cwd]:
+//   - project `.mcp.json` servers  -> disabledMcpjsonServers / enabledMcpjsonServers
+//   - everything else (user/project `mcpServers`, plugin) -> disabledMcpServers
+// We write in JS (NOT Rust serde_json, which lacks preserve_order and would
+// reorder the whole shared file). JSON.stringify(_, null, 2) round-trips the
+// CLI's format byte-for-byte, so only the touched array changes. The write is
+// atomic (temp + rename) and a no-op returns early without rewriting the file.
+// The CLI rewrites this file too, so if it changes between our read and our
+// write, the edit is redone on the fresh content instead of clobbering it.
+const SET_ENABLED_ATTEMPTS = 3
+
+function arrayField(obj, key) {
+  return Array.isArray(obj[key]) ? obj[key] : []
+}
+
+// Mutates `project` in place; returns whether anything changed.
+function applyMcpEnabled(project, { name, enabled, source }) {
+  const key = source === 'project-file' ? 'disabledMcpjsonServers' : 'disabledMcpServers'
+  const disabled = arrayField(project, key)
+  const wasDisabled = disabled.includes(name)
+  let changed = false
+
+  if (enabled && wasDisabled) {
+    project[key] = disabled.filter(n => n !== name)
+    changed = true
+  } else if (!enabled && !wasDisabled) {
+    project[key] = [...disabled, name]
+    changed = true
+  }
+
+  // For `.mcp.json` servers keep the enabled list consistent so the CLI
+  // re-attaches an unapproved server on enable and drops it on disable.
+  if (source === 'project-file') {
+    const en = arrayField(project, 'enabledMcpjsonServers')
+    if (enabled && !en.includes(name)) {
+      project.enabledMcpjsonServers = [...en, name]
+      changed = true
+    } else if (!enabled && en.includes(name)) {
+      project.enabledMcpjsonServers = en.filter(n => n !== name)
+      changed = true
+    }
+  }
+  return { key, changed }
+}
+
+registerHandler('claude.setMcpServerEnabled', async (params) => {
+  const cwd = typeof params?.cwd === 'string' ? params.cwd : ''
+  const name = typeof params?.name === 'string' ? params.name : ''
+  const enabled = params?.enabled === true
+  const source = typeof params?.source === 'string' ? params.source : ''
+  if (!cwd || !name) throw new Error('claude.setMcpServerEnabled: missing cwd/name')
+
+  const path = claudeJsonPath()
+  for (let attempt = 1; ; attempt++) {
+    let data
+    let mtimeMs
+    try {
+      mtimeMs = (await stat(path)).mtimeMs
+      data = JSON.parse(await readFile(path, 'utf-8'))
+    } catch {
+      throw new Error('claude.setMcpServerEnabled: ~/.claude.json unreadable')
+    }
+    if (!data || typeof data !== 'object') throw new Error('claude.setMcpServerEnabled: invalid config')
+    if (!data.projects || typeof data.projects !== 'object') data.projects = {}
+    if (!data.projects[cwd] || typeof data.projects[cwd] !== 'object') data.projects[cwd] = {}
+
+    const { key, changed } = applyMcpEnabled(data.projects[cwd], { name, enabled, source })
+    if (!changed) return { ok: true, changed: false, key, disabled: !enabled }
+
+    const tmp = `${path}.tmp-${process.pid}`
+    await writeFile(tmp, JSON.stringify(data, null, 2), 'utf-8')
+    if ((await stat(path)).mtimeMs !== mtimeMs) {
+      await unlink(tmp).catch(() => {})
+      if (attempt < SET_ENABLED_ATTEMPTS) continue
+      throw new Error('claude.setMcpServerEnabled: ~/.claude.json kept changing, try again')
+    }
+    await rename(tmp, path)
+    return { ok: true, changed: true, key, disabled: !enabled }
+  }
 })

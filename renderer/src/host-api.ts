@@ -1230,6 +1230,24 @@ function createTauriHost(): BatAppAPI {
         if (key === 'scanSkills') {
           return (cwd: string) => getInvoke()<unknown>('claude_scan_skills', { cwd })
         }
+        if (key === 'scanMcpServers') {
+          return (cwd: string) =>
+            getInvoke()<{ name: string; scope: 'user' | 'project' | 'plugin'; transport: string; plugin?: string }[]>(
+              'claude_scan_mcp_servers', { cwd })
+        }
+        if (key === 'reconnectMcpServer') {
+          return (sessionId: string, name: string) =>
+            getInvoke()<{ ok: boolean; error?: string }>('claude_reconnect_mcp_server', { sessionId, name })
+        }
+        if (key === 'toggleMcpServer') {
+          return (sessionId: string, name: string, enabled: boolean) =>
+            getInvoke()<{ ok: boolean; enabled?: boolean; error?: string }>('claude_toggle_mcp_server', { sessionId, name, enabled })
+        }
+        if (key === 'setMcpServerEnabled') {
+          return (cwd: string, name: string, enabled: boolean, source: string) =>
+            getInvoke()<{ ok: boolean; changed?: boolean; disabled?: boolean; key?: string }>(
+              'claude_set_mcp_server_enabled', { cwd, name, enabled, source })
+        }
         if (key === 'cleanupWorktree') {
           return (sessionId: string, deleteBranch: boolean) =>
             getInvoke()<unknown>('claude_cleanup_worktree', { sessionId, deleteBranch })
@@ -1299,6 +1317,7 @@ function createTauriHost(): BatAppAPI {
           getSupportedCodexApprovalPolicies: 'claude_get_supported_codex_approval_policies',
           getSupportedCommands: 'claude_get_supported_commands',
           getSupportedAgents: 'claude_get_supported_agents',
+          getMcpServerStatus: 'claude_get_mcp_server_status',
           getAccountInfo: 'claude_get_account_info',
           getSessionState: 'claude_get_session_state',
           getSessionMeta: 'claude_get_session_meta',
