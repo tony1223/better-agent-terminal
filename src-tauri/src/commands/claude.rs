@@ -742,6 +742,8 @@ pub(crate) struct SkillScanEntry {
     description: String,
     scope: String,
     path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    plugin: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2113,6 +2115,7 @@ fn scan_markdown_file(path: &Path, fallback_name: &str, scope: &str) -> Option<S
         description,
         scope: scope.to_string(),
         path: path.to_string_lossy().to_string(),
+        plugin: None,
     })
 }
 
@@ -2155,6 +2158,66 @@ fn scan_skills_dir(dir: &Path, scope: &str) -> Vec<SkillScanEntry> {
         .collect()
 }
 
+// Reads ~/.claude/plugins/installed_plugins.json and returns each installed
+// plugin's (namespace name, install path). The namespace name is the key
+// before '@' (e.g. "everything-claude-code@everything-claude-code" →
+// "everything-claude-code"), matching the SDK's "<plugin>:<command>"
+// command naming. Returns [] on any missing-file / parse failure.
+fn load_installed_plugin_entries() -> Vec<(String, PathBuf)> {
+    let mut out = Vec::new();
+    let Some(home) = home_dir() else {
+        return out;
+    };
+    let path = home
+        .join(".claude")
+        .join("plugins")
+        .join("installed_plugins.json");
+    let Some(data) = read_json_safe(&path) else {
+        return out;
+    };
+    let Some(plugins) = data.get("plugins").and_then(Value::as_object) else {
+        return out;
+    };
+    for (key, entries) in plugins {
+        let Some(arr) = entries.as_array() else {
+            continue;
+        };
+        let prefix = key.split('@').next().unwrap_or(key);
+        let name = if prefix.is_empty() {
+            key.clone()
+        } else {
+            prefix.to_string()
+        };
+        for entry in arr {
+            if let Some(install) = entry.get("installPath").and_then(Value::as_str) {
+                out.push((name.clone(), PathBuf::from(install)));
+            }
+        }
+    }
+    out
+}
+
+// Walks each installed plugin's commands/ and skills/ dirs, namespacing
+// names as "<plugin>:<base>" (scope "plugin") so plugin-provided commands
+// surface in the sidebar without a live SDK query.
+fn scan_plugin_skills(entries: &[(String, PathBuf)]) -> Vec<SkillScanEntry> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (plugin, base) in entries {
+        let mut group = scan_commands_dir(&base.join("commands"), "plugin");
+        group.extend(scan_skills_dir(&base.join("skills"), "plugin"));
+        for mut entry in group {
+            let namespaced = format!("{plugin}:{}", entry.name);
+            if seen.insert(namespaced.clone()) {
+                entry.name = namespaced;
+                entry.plugin = Some(plugin.clone());
+                out.push(entry);
+            }
+        }
+    }
+    out
+}
+
 pub(crate) fn scan_skills_native(cwd: &Path) -> Vec<SkillScanEntry> {
     let mut results = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -2177,6 +2240,9 @@ pub(crate) fn scan_skills_native(cwd: &Path) -> Vec<SkillScanEntry> {
         for entry in scan_skills_dir(&home.join(".claude").join("skills"), "global") {
             push_unique(entry);
         }
+    }
+    for entry in scan_plugin_skills(&load_installed_plugin_entries()) {
+        push_unique(entry);
     }
     results
 }
@@ -2270,6 +2336,164 @@ pub(crate) fn enable_all_project_mcp_native(cwd: &Path) -> Result<Value, BridgeE
         message: format!("could not write {}: {err}", path.display()),
     })?;
     Ok(json!({ "ok": true, "changed": true, "path": path.to_string_lossy() }))
+}
+
+// Classifies an MCP server config into a transport label. http/sse when a
+// url or explicit type is present; stdio when a command is present.
+fn mcp_transport(cfg: &Value) -> &'static str {
+    match cfg.get("type").and_then(Value::as_str) {
+        Some("http") => return "http",
+        Some("sse") => return "sse",
+        Some("stdio") => return "stdio",
+        _ => {}
+    }
+    if cfg.get("url").and_then(Value::as_str).is_some() {
+        return "http";
+    }
+    if cfg.get("command").and_then(Value::as_str).is_some() {
+        return "stdio";
+    }
+    "unknown"
+}
+
+// Maps an `mcpServers` object into display entries tagged with scope and
+// (optionally) the owning plugin. Non-object input yields [].
+// Maps an `mcpServers` object into display entries. `scope` drives UI
+// grouping (user/project/plugin); `source` drives the durable-disable key
+// choice (project-file -> disabledMcpjsonServers, else disabledMcpServers).
+// `disabled` is seeded from the persisted disable list for the cwd so the
+// panel reflects on/off state without a live session. Non-object -> [].
+fn mcp_entries_from(
+    value: &Value,
+    scope: &str,
+    source: &str,
+    plugin: Option<&str>,
+    disabled: &std::collections::HashSet<String>,
+) -> Vec<Value> {
+    let Some(map) = value.as_object() else {
+        return Vec::new();
+    };
+    map.iter()
+        .map(|(name, cfg)| {
+            let mut entry = json!({
+                "name": name,
+                "scope": scope,
+                "source": source,
+                "transport": mcp_transport(cfg),
+                "disabled": disabled.contains(name),
+            });
+            if let Some(p) = plugin {
+                entry["plugin"] = json!(p);
+            }
+            entry
+        })
+        .collect()
+}
+
+// Collects a string array (e.g. disabledMcpServers) into a name set.
+fn names_set(value: Option<&Value>) -> std::collections::HashSet<String> {
+    let mut set = std::collections::HashSet::new();
+    if let Some(arr) = value.and_then(Value::as_array) {
+        for item in arr {
+            if let Some(name) = item.as_str() {
+                set.insert(name.to_string());
+            }
+        }
+    }
+    set
+}
+
+// Aggregates MCP servers from every source the Claude CLI honours:
+//   - user:    ~/.claude.json  -> mcpServers
+//   - project: ~/.claude.json  -> projects[cwd].mcpServers, and <cwd>/.mcp.json
+//   - plugin:  <installPath>/.mcp.json for each installed plugin
+// Deduped by name with scope precedence user > project > plugin, sorted by
+// name. Each entry carries `source` + `disabled` (persisted state) so the
+// renderer can drive durable enable/disable without a live session.
+pub(crate) fn scan_mcp_servers_native(cwd: &Path) -> Value {
+    let global = home_dir().and_then(|home| read_json_safe(&home.join(".claude.json")));
+    let project_cfg = if cwd.as_os_str().is_empty() {
+        None
+    } else {
+        global
+            .as_ref()
+            .and_then(|g| g.get("projects"))
+            .and_then(|p| p.get(cwd.to_string_lossy().as_ref()))
+            .cloned()
+    };
+    let disabled_servers = names_set(project_cfg.as_ref().and_then(|p| p.get("disabledMcpServers")));
+    let disabled_mcpjson =
+        names_set(project_cfg.as_ref().and_then(|p| p.get("disabledMcpjsonServers")));
+
+    let scope_rank = |scope: &str| match scope {
+        "user" => 0,
+        "project" => 1,
+        "plugin" => 2,
+        _ => 3,
+    };
+    let mut by_name: std::collections::BTreeMap<String, Value> = std::collections::BTreeMap::new();
+    let mut consider = |entry: Value| {
+        let name = entry
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if name.is_empty() {
+            return;
+        }
+        let scope = entry.get("scope").and_then(Value::as_str).unwrap_or("");
+        let replace = match by_name.get(&name) {
+            Some(prev) => {
+                let prev_scope = prev.get("scope").and_then(Value::as_str).unwrap_or("");
+                scope_rank(scope) < scope_rank(prev_scope)
+            }
+            None => true,
+        };
+        if replace {
+            by_name.insert(name, entry);
+        }
+    };
+
+    if let Some(global) = global.as_ref() {
+        if let Some(servers) = global.get("mcpServers") {
+            for entry in mcp_entries_from(servers, "user", "user", None, &disabled_servers) {
+                consider(entry);
+            }
+        }
+        if let Some(proj) = project_cfg.as_ref() {
+            if let Some(servers) = proj.get("mcpServers") {
+                for entry in
+                    mcp_entries_from(servers, "project", "project-local", None, &disabled_servers)
+                {
+                    consider(entry);
+                }
+            }
+        }
+    }
+    if !cwd.as_os_str().is_empty() {
+        if let Some(mcp) = read_json_safe(&cwd.join(".mcp.json")) {
+            if let Some(servers) = mcp.get("mcpServers") {
+                for entry in
+                    mcp_entries_from(servers, "project", "project-file", None, &disabled_mcpjson)
+                {
+                    consider(entry);
+                }
+            }
+        }
+    }
+    for (plugin, base) in load_installed_plugin_entries() {
+        if let Some(mcp) = read_json_safe(&base.join(".mcp.json")) {
+            if let Some(servers) = mcp.get("mcpServers") {
+                for entry in
+                    mcp_entries_from(servers, "plugin", "plugin", Some(&plugin), &disabled_servers)
+                {
+                    consider(entry);
+                }
+            }
+        }
+    }
+
+    Value::Array(by_name.into_values().collect())
 }
 
 fn archive_empty_page() -> Value {
@@ -3021,6 +3245,51 @@ impl ClaudeRuntimeRouter {
         self.sidecar_call(
             "claude.getSupportedAgents",
             json!({ "sessionId": session_id }),
+            DEFAULT_TIMEOUT,
+        )
+        .await
+    }
+
+    async fn mcp_server_status(&self, session_id: String) -> Result<Value, BridgeError> {
+        if self.codex.is_owned(&session_id) {
+            return Ok(json!([]));
+        }
+        self.sidecar_call(
+            "claude.getMcpServerStatus",
+            json!({ "sessionId": session_id }),
+            DEFAULT_TIMEOUT,
+        )
+        .await
+    }
+
+    async fn reconnect_mcp_server(
+        &self,
+        session_id: String,
+        name: String,
+    ) -> Result<Value, BridgeError> {
+        if self.codex.is_owned(&session_id) {
+            return Ok(json!({ "ok": false, "error": "codex session" }));
+        }
+        self.sidecar_call(
+            "claude.reconnectMcpServer",
+            json!({ "sessionId": session_id, "name": name }),
+            DEFAULT_TIMEOUT,
+        )
+        .await
+    }
+
+    async fn toggle_mcp_server(
+        &self,
+        session_id: String,
+        name: String,
+        enabled: bool,
+    ) -> Result<Value, BridgeError> {
+        if self.codex.is_owned(&session_id) {
+            return Ok(json!({ "ok": false, "error": "codex session" }));
+        }
+        self.sidecar_call(
+            "claude.toggleMcpServer",
+            json!({ "sessionId": session_id, "name": name, "enabled": enabled }),
             DEFAULT_TIMEOUT,
         )
         .await
@@ -4448,6 +4717,128 @@ pub async fn claude_get_supported_commands(
 
 #[cfg(feature = "desktop")]
 #[tauri::command]
+pub async fn claude_get_mcp_server_status(
+    app: AppHandle,
+    window: WebviewWindow,
+    state: State<'_, SidecarState>,
+    codex_state: State<'_, CodexAppServerState>,
+    session_id: String,
+) -> Result<Value, BridgeError> {
+    if let Some(result) = remote_invoke_for_window(
+        &HostContext::from_app(app.clone()),
+        &state,
+        &window,
+        "agent:get-mcp-server-status",
+        vec![json!(session_id.clone())],
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    {
+        return result;
+    }
+    ClaudeRuntimeRouter::from_states(app, &state, &codex_state)
+        .mcp_server_status(session_id)
+        .await
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn claude_reconnect_mcp_server(
+    app: AppHandle,
+    window: WebviewWindow,
+    state: State<'_, SidecarState>,
+    codex_state: State<'_, CodexAppServerState>,
+    session_id: String,
+    name: String,
+) -> Result<Value, BridgeError> {
+    if let Some(result) = remote_invoke_for_window(
+        &HostContext::from_app(app.clone()),
+        &state,
+        &window,
+        "agent:reconnect-mcp-server",
+        vec![json!(session_id.clone()), json!(name.clone())],
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    {
+        return result;
+    }
+    ClaudeRuntimeRouter::from_states(app, &state, &codex_state)
+        .reconnect_mcp_server(session_id, name)
+        .await
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn claude_toggle_mcp_server(
+    app: AppHandle,
+    window: WebviewWindow,
+    state: State<'_, SidecarState>,
+    codex_state: State<'_, CodexAppServerState>,
+    session_id: String,
+    name: String,
+    enabled: bool,
+) -> Result<Value, BridgeError> {
+    if let Some(result) = remote_invoke_for_window(
+        &HostContext::from_app(app.clone()),
+        &state,
+        &window,
+        "agent:toggle-mcp-server",
+        vec![json!(session_id.clone()), json!(name.clone()), json!(enabled)],
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    {
+        return result;
+    }
+    ClaudeRuntimeRouter::from_states(app, &state, &codex_state)
+        .toggle_mcp_server(session_id, name, enabled)
+        .await
+}
+
+// Durable enable/disable: persists to ~/.claude.json via the sidecar (JS,
+// order-preserving — Rust serde_json would reorder the whole shared file).
+// cwd-keyed, no session required, so disable sticks across restarts.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn claude_set_mcp_server_enabled(
+    app: AppHandle,
+    window: WebviewWindow,
+    state: State<'_, SidecarState>,
+    cwd: String,
+    name: String,
+    enabled: bool,
+    source: String,
+) -> Result<Value, BridgeError> {
+    if let Some(result) = remote_invoke_for_window(
+        &HostContext::from_app(app.clone()),
+        &state,
+        &window,
+        "agent:set-mcp-server-enabled",
+        vec![
+            json!(cwd.clone()),
+            json!(name.clone()),
+            json!(enabled),
+            json!(source.clone()),
+        ],
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    {
+        return result;
+    }
+    call_sidecar_with_timeout_blocking(
+        HostContext::from_app(app),
+        (*state).clone(),
+        "claude.setMcpServerEnabled",
+        json!({ "cwd": cwd, "name": name, "enabled": enabled, "source": source }),
+        DEFAULT_TIMEOUT,
+    )
+    .await
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
 pub async fn claude_get_supported_agents(
     app: AppHandle,
     window: WebviewWindow,
@@ -4650,6 +5041,29 @@ pub async fn claude_scan_skills(
     }
     let entries = scan_skills_native(Path::new(&cwd));
     Ok(serde_json::to_value(entries).unwrap_or_else(|_| json!([])))
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn claude_scan_mcp_servers(
+    app: AppHandle,
+    window: WebviewWindow,
+    state: State<'_, SidecarState>,
+    cwd: String,
+) -> Result<Value, BridgeError> {
+    if let Some(result) = remote_invoke_for_window(
+        &HostContext::from_app(app.clone()),
+        &state,
+        &window,
+        "agent:scan-mcp-servers",
+        vec![json!(cwd.clone())],
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    {
+        return result;
+    }
+    Ok(scan_mcp_servers_native(Path::new(&cwd)))
 }
 
 #[cfg(feature = "desktop")]
@@ -5837,6 +6251,127 @@ mod tests {
             .expect("deploy entry");
         assert_eq!(deploy.description, "Command deploy");
         assert_eq!(deploy.scope, "project");
+
+        fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn scan_plugin_skills_namespaces_commands_and_skills() {
+        let base = temp_data_dir("scan-plugin");
+        let command_dir = base.join("commands");
+        let skill_dir = base.join("skills").join("deep-research");
+        fs::create_dir_all(&command_dir).unwrap();
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            command_dir.join("plan.md"),
+            "---\ndescription: do plan\n---\n# Plan",
+        )
+        .unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: deep-research\ndescription: research\n---\nbody",
+        )
+        .unwrap();
+
+        let entries = scan_plugin_skills(&[("ecc".to_string(), base.clone())]);
+        let plan = entries
+            .iter()
+            .find(|entry| entry.name == "ecc:plan")
+            .expect("ecc:plan entry");
+        assert_eq!(plan.scope, "plugin");
+        assert_eq!(plan.plugin.as_deref(), Some("ecc"));
+        assert_eq!(plan.description, "do plan");
+        assert!(entries
+            .iter()
+            .any(|entry| entry.name == "ecc:deep-research"));
+
+        fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn mcp_transport_classifies_configs() {
+        assert_eq!(
+            mcp_transport(&json!({ "command": "docker", "args": [] })),
+            "stdio"
+        );
+        assert_eq!(
+            mcp_transport(&json!({ "type": "http", "url": "https://x" })),
+            "http"
+        );
+        assert_eq!(
+            mcp_transport(&json!({ "type": "sse", "url": "https://x" })),
+            "sse"
+        );
+        assert_eq!(mcp_transport(&json!({ "url": "https://x" })), "http");
+        assert_eq!(mcp_transport(&json!({})), "unknown");
+    }
+
+    #[test]
+    fn mcp_entries_from_tags_scope_and_plugin() {
+        let disabled: std::collections::HashSet<String> =
+            ["gitnexus".to_string()].into_iter().collect();
+        let servers = json!({
+            "gitnexus": { "command": "gitnexus" },
+            "ctx": { "type": "http", "url": "u" }
+        });
+        let mut entries = mcp_entries_from(&servers, "user", "user", None, &disabled);
+        entries.sort_by(|a, b| {
+            a["name"]
+                .as_str()
+                .unwrap_or("")
+                .cmp(b["name"].as_str().unwrap_or(""))
+        });
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["name"], json!("ctx"));
+        assert_eq!(entries[0]["scope"], json!("user"));
+        assert_eq!(entries[0]["source"], json!("user"));
+        assert_eq!(entries[0]["transport"], json!("http"));
+        assert_eq!(entries[0]["disabled"], json!(false));
+        assert!(entries[0].get("plugin").is_none());
+        assert_eq!(entries[1]["name"], json!("gitnexus"));
+        assert_eq!(entries[1]["transport"], json!("stdio"));
+        assert_eq!(entries[1]["disabled"], json!(true));
+
+        let empty: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let plug = mcp_entries_from(
+            &json!({ "exa": { "command": "exa" } }),
+            "plugin",
+            "plugin",
+            Some("ecc"),
+            &empty,
+        );
+        assert_eq!(plug[0]["plugin"], json!("ecc"));
+        assert_eq!(plug[0]["scope"], json!("plugin"));
+        assert_eq!(plug[0]["source"], json!("plugin"));
+
+        assert!(mcp_entries_from(&json!("nope"), "user", "user", None, &empty).is_empty());
+    }
+
+    #[test]
+    fn scan_mcp_servers_native_picks_up_project_mcp_json() {
+        // Uses a uniquely-named server so the assertion holds regardless of
+        // whatever user/plugin servers exist in the real ~/.claude on the
+        // machine running the test.
+        let base = temp_data_dir("scan-mcp-native");
+        fs::create_dir_all(&base).unwrap();
+        fs::write(
+            base.join(".mcp.json"),
+            r#"{"mcpServers":{"bat-unit-test-mcp":{"command":"node","args":["s.js"]}}}"#,
+        )
+        .unwrap();
+
+        let value = scan_mcp_servers_native(&base);
+        let found = value
+            .as_array()
+            .expect("array")
+            .iter()
+            .find(|e| e.get("name").and_then(Value::as_str) == Some("bat-unit-test-mcp"))
+            .expect("project mcp server present");
+        assert_eq!(found.get("scope").and_then(Value::as_str), Some("project"));
+        assert_eq!(
+            found.get("transport").and_then(Value::as_str),
+            Some("stdio")
+        );
 
         fs::remove_dir_all(base).ok();
     }

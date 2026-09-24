@@ -78,3 +78,34 @@ export async function scanSkills(cwd) {
   }
   return out
 }
+
+// Walks each installed plugin's commands/ and skills/ directories and
+// returns SkillMeta entries namespaced as "<pluginName>:<base>", matching
+// the SDK's plugin-command naming so the renderer can dedupe these against
+// getSupportedCommands. scope is 'plugin'; a `plugin` field carries the
+// owning plugin name. entries: [{ name, path }] from
+// loadInstalledPluginEntries(). Returns [] for empty/invalid input.
+export async function scanPluginSkills(entries) {
+  if (!Array.isArray(entries) || entries.length === 0) return []
+  const out = []
+  const seen = new Set()
+  for (const entry of entries) {
+    const pluginName = entry?.name
+    const base = entry?.path
+    if (typeof pluginName !== 'string' || !pluginName) continue
+    if (typeof base !== 'string' || !base) continue
+    const groups = await Promise.all([
+      scanSkillsDir(join(base, 'commands'), 'plugin'),
+      scanSkillsDir(join(base, 'skills'), 'plugin'),
+    ])
+    for (const group of groups) {
+      for (const s of group) {
+        const name = `${pluginName}:${s.name}`
+        if (seen.has(name)) continue
+        seen.add(name)
+        out.push({ ...s, name, plugin: pluginName })
+      }
+    }
+  }
+  return out
+}

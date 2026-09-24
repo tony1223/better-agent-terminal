@@ -452,6 +452,39 @@ async function inProcess() {
     rmSync(fakeProject, { recursive: true, force: true })
   }
 
+  // scanPluginSkills — fabricate a plugin install dir with commands/ and
+  // skills/ and verify entries are namespaced "<plugin>:<name>", scope is
+  // 'plugin', and the plugin field is carried. Invalid/empty input -> [].
+  const { scanPluginSkills } = mod
+  assert.deepEqual(await scanPluginSkills([]), [], 'empty entries -> []')
+  assert.deepEqual(await scanPluginSkills(null), [], 'null entries -> []')
+  assert.deepEqual(await scanPluginSkills([{ name: '', path: '' }]), [], 'blank entry -> []')
+
+  const fakePlugin = mkdtempSync(join(tmpdir(), 'sidecar-plugin-'))
+  try {
+    const cmdDir = join(fakePlugin, 'commands')
+    mkdirSync(cmdDir, { recursive: true })
+    // Command .md — frontmatter description, name falls back to filename.
+    writeFileSync(join(cmdDir, 'plan.md'),
+      '---\ndescription: plan something\n---\n# Plan\n')
+    const pSkills = join(fakePlugin, 'skills')
+    const pSub = join(pSkills, 'deep-research')
+    mkdirSync(pSub, { recursive: true })
+    writeFileSync(join(pSub, 'SKILL.md'),
+      '---\nname: deep-research\ndescription: research deeply\n---\nbody\n')
+
+    const items = await scanPluginSkills([{ name: 'ecc', path: fakePlugin }])
+    const byName = new Map(items.map(s => [s.name, s]))
+    assert.ok(byName.has('ecc:plan'), 'missing namespaced command ecc:plan')
+    assert.equal(byName.get('ecc:plan').description, 'plan something')
+    assert.equal(byName.get('ecc:plan').scope, 'plugin')
+    assert.equal(byName.get('ecc:plan').plugin, 'ecc')
+    assert.ok(byName.has('ecc:deep-research'), 'missing namespaced skill ecc:deep-research')
+    assert.equal(byName.get('ecc:deep-research').scope, 'plugin')
+  } finally {
+    rmSync(fakePlugin, { recursive: true, force: true })
+  }
+
   // agent preset list moved to Rust (commands/agent.rs).
 
   // Both sides derive their model lists from a hand-maintained
@@ -3385,6 +3418,33 @@ async function inProcess() {
       assert.match(p.path, /^\/home\/u\/\.claude\/plugins\//)
     }
 
+    // loadInstalledPluginEntries: same source, but preserves the plugin
+    // namespace name (key before '@') alongside the install path.
+    const { loadInstalledPluginEntries } = mod
+    __setPluginsPathOverrideForTests(missingPath)
+    assert.deepEqual(await loadInstalledPluginEntries(), [], 'missing file -> []')
+    const namedPath = join(tmpRoot, 'named.json')
+    writeFileSync(namedPath, JSON.stringify({
+      plugins: {
+        'everything-claude-code@everything-claude-code': [
+          { installPath: '/home/u/.claude/plugins/cache/ecc' },
+        ],
+        'plain-key': [
+          { installPath: '/home/u/.claude/plugins/cache/plain' },
+          { /* no installPath */ },
+        ],
+      },
+    }))
+    __setPluginsPathOverrideForTests(namedPath)
+    const entries = await loadInstalledPluginEntries()
+    assert.equal(entries.length, 2, 'expected 2 entries (malformed skipped)')
+    const ecc = entries.find(e => e.path.endsWith('/ecc'))
+    assert.ok(ecc, 'missing ecc entry')
+    assert.equal(ecc.name, 'everything-claude-code', 'name should drop @marketplace suffix')
+    const plain = entries.find(e => e.path.endsWith('/plain'))
+    assert.equal(plain.name, 'plain-key', 'name without @ stays as-is')
+    __setPluginsPathOverrideForTests(goodPath)
+
     // Now verify sendMessage actually wires the plugins into queryOptions.
     const pluginCaptured = []
     const restoreSend = mod.__setSendEventForTests(() => {})
@@ -3425,6 +3485,76 @@ async function inProcess() {
   } finally {
     __setPluginsPathOverrideForTests(null)
     rmSync(tmpRoot, { recursive: true, force: true })
+  }
+
+  // claude.setMcpServerEnabled — durable enable/disable persisted to
+  // ~/.claude.json projects[cwd]. Verifies: correct key per source, add/
+  // remove semantics, key-order preservation (no scrambling of the shared
+  // file), and idempotent no-op.
+  {
+    const mcpMod = await import('../src/handlers/claude-mcp.mjs')
+    const mcpRoot = mkdtempSync(join(tmpdir(), 'sidecar-setmcp-'))
+    const cfgPath = join(mcpRoot, 'claude.json')
+    const cwd = '/Users/alice/code/demo'
+    try {
+      // Ordered keys: numStartups first, projects last — must stay in order.
+      const original = {
+        numStartups: 7,
+        installMethod: 'global',
+        projects: {
+          [cwd]: { allowedTools: ['Read'], mcpServers: { serena: { command: 'serena' } } },
+        },
+      }
+      const write = (obj) => writeFileSync(cfgPath, JSON.stringify(obj, null, 2))
+      write(original)
+      mcpMod.__setClaudeJsonPathOverrideForTests(cfgPath)
+
+      // Disable a user/project server -> disabledMcpServers.
+      const off = await dispatch({ jsonrpc: '2.0', id: 700, method: 'claude.setMcpServerEnabled',
+        params: { cwd, name: 'serena', enabled: false, source: 'user' } })
+      assert.equal(off.result.changed, true)
+      assert.equal(off.result.key, 'disabledMcpServers')
+      let data = JSON.parse(readFileSync(cfgPath, 'utf-8'))
+      assert.deepEqual(data.projects[cwd].disabledMcpServers, ['serena'])
+      // Key order preserved (numStartups before installMethod before projects).
+      assert.deepEqual(Object.keys(data), ['numStartups', 'installMethod', 'projects'])
+      // Untouched data intact.
+      assert.deepEqual(data.projects[cwd].allowedTools, ['Read'])
+
+      // Re-enable -> removed from disabledMcpServers.
+      const on = await dispatch({ jsonrpc: '2.0', id: 701, method: 'claude.setMcpServerEnabled',
+        params: { cwd, name: 'serena', enabled: true, source: 'user' } })
+      assert.equal(on.result.changed, true)
+      data = JSON.parse(readFileSync(cfgPath, 'utf-8'))
+      assert.deepEqual(data.projects[cwd].disabledMcpServers, [])
+
+      // Idempotent: enabling an already-enabled server is a no-op.
+      const noop = await dispatch({ jsonrpc: '2.0', id: 702, method: 'claude.setMcpServerEnabled',
+        params: { cwd, name: 'serena', enabled: true, source: 'user' } })
+      assert.equal(noop.result.changed, false)
+
+      // .mcp.json server -> disabledMcpjsonServers + enabledMcpjsonServers.
+      const offJson = await dispatch({ jsonrpc: '2.0', id: 703, method: 'claude.setMcpServerEnabled',
+        params: { cwd, name: 'projsrv', enabled: false, source: 'project-file' } })
+      assert.equal(offJson.result.key, 'disabledMcpjsonServers')
+      data = JSON.parse(readFileSync(cfgPath, 'utf-8'))
+      assert.deepEqual(data.projects[cwd].disabledMcpjsonServers, ['projsrv'])
+
+      // Creates projects[cwd] when missing (fresh cwd).
+      const freshCwd = '/Users/alice/code/fresh'
+      await dispatch({ jsonrpc: '2.0', id: 704, method: 'claude.setMcpServerEnabled',
+        params: { cwd: freshCwd, name: 'x', enabled: false, source: 'user' } })
+      data = JSON.parse(readFileSync(cfgPath, 'utf-8'))
+      assert.deepEqual(data.projects[freshCwd].disabledMcpServers, ['x'])
+
+      // Missing cwd/name rejects.
+      const bad = await dispatch({ jsonrpc: '2.0', id: 705, method: 'claude.setMcpServerEnabled',
+        params: { cwd: '', name: 'x', enabled: false, source: 'user' } })
+      assert.ok(bad.error, 'missing cwd should error')
+    } finally {
+      mcpMod.__setClaudeJsonPathOverrideForTests(null)
+      rmSync(mcpRoot, { recursive: true, force: true })
+    }
   }
 
   // Regression: __normalizeMainPath must equate a Windows verbatim-
