@@ -149,7 +149,7 @@
     "accountSwitchingError": "エラー: {{error}}",
     "notifications": "通知",
     "showDockBadge": "Dock アイコンに保留中の件数を表示する",
-    "showDockBadgeHint": "ワークスペースに保留中のアクション（許可リクエスト、ユーザーへの質問）がある場合に、Dock アイコンにバッジ番号を表示します。",
+    "showDockBadgeHint": "ワークスペースに保留中のアクション（許可リクエスト、ユーザーへの質問）や未読のエージェント完了通知がある場合に、Dock アイコンにバッジ番号を表示します。",
     "notifyOnComplete": "エージェントの完了時に通知する",
     "notifyOnCompleteHint": "エージェントセッションがタスクを完了したときにシステム通知を送信します。",
     "notifySound": "通知音を再生する",

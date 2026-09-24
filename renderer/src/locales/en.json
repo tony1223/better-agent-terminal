@@ -152,7 +152,7 @@
     "accountSwitchingError": "Error: {{error}}",
     "notifications": "Notifications",
     "showDockBadge": "Show pending count on Dock icon",
-    "showDockBadgeHint": "Display a badge number on the Dock icon when workspaces have pending actions (permission requests, user questions).",
+    "showDockBadgeHint": "Display a badge number on the Dock icon when workspaces have pending actions (permission requests, user questions) or unread agent completions.",
     "notifyOnComplete": "Notify when Agent completes",
     "notifyOnCompleteHint": "Send a system notification when an Agent session finishes its task.",
     "notifySound": "Play notification sound",
