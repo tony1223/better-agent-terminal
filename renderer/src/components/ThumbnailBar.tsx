@@ -3,7 +3,7 @@ import { useState, useRef, useEffect, useCallback, useLayoutEffect } from 'react
 import { createPortal } from 'react-dom'
 import { useTranslation } from 'react-i18next'
 import type { TerminalInstance } from '../types'
-import { TerminalThumbnail } from './TerminalThumbnail'
+import { TerminalThumbnail, requestThumbnailRename } from './TerminalThumbnail'
 import type { AgentPreset } from '../types/agent-presets'
 import { groupAgentPresetsForMenu, worktreeMenuName } from '../utils/agent-preset-menu'
 
@@ -466,7 +466,7 @@ export function ThumbnailBar({
           </div>
         ))}
       </div>
-      {isActive && contextMenu && onCloseTerminal && createPortal(
+      {isActive && contextMenu && createPortal(
         <div
           ref={contextMenuRef}
           className="workspace-context-menu"
@@ -476,14 +476,25 @@ export function ThumbnailBar({
           }
         >
           <div
-            className="context-menu-item danger"
+            className="context-menu-item"
             onClick={() => {
-              onCloseTerminal(contextMenu.terminalId)
+              requestThumbnailRename(contextMenu.terminalId)
               setContextMenu(null)
             }}
           >
-            {t('terminal.closeTerminal')}
+            {t('terminal.rename')}
           </div>
+          {onCloseTerminal && (
+            <div
+              className="context-menu-item danger"
+              onClick={() => {
+                onCloseTerminal(contextMenu.terminalId)
+                setContextMenu(null)
+              }}
+            >
+              {t('terminal.closeTerminal')}
+            </div>
+          )}
         </div>,
         document.body
       )}

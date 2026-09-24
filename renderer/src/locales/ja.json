@@ -386,6 +386,7 @@
   },
   "terminal": {
     "doubleClickToRename": "ダブルクリックで名前を変更",
+    "rename": "名前を変更",
     "hidePromptBox": "プロンプトボックスを非表示",
     "showPromptBox": "プロンプトボックスを表示",
     "restartTerminal": "ターミナルを再起動",
