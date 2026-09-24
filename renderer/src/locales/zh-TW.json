@@ -396,6 +396,7 @@
 
   "terminal": {
     "doubleClickToRename": "雙擊以重新命名",
+    "rename": "重新命名",
     "hidePromptBox": "隱藏提示輸入框",
     "showPromptBox": "顯示提示輸入框",
     "restartTerminal": "重新啟動終端",

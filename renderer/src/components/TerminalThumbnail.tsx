@@ -1,8 +1,10 @@
 import { host } from '../host-api'
 import { useEffect, useState, memo } from 'react'
+import { useTranslation } from 'react-i18next'
 import type { TerminalInstance } from '../types'
 import { ActivityIndicator } from './ActivityIndicator'
 import { settingsStore } from '../stores/settings-store'
+import { workspaceStore } from '../stores/workspace-store'
 import { getAgentPreset } from '../types/agent-presets'
 
 // Global preview cache - persists across component unmounts
@@ -14,6 +16,13 @@ const previewSubscribers = new Map<string, Set<() => void>>()
 export function clearPreviewCache(terminalId: string) {
   previewCache.delete(terminalId)
   previewSubscribers.delete(terminalId)
+}
+
+// Rename requests from outside the thumbnail (e.g. the context menu) put the
+// matching thumbnail into inline-edit mode. One subscriber per terminal id.
+const renameSubscribers = new Map<string, () => void>()
+export function requestThumbnailRename(terminalId: string) {
+  renameSubscribers.get(terminalId)?.()
 }
 
 function updatePreviewCache(id: string, value: string) {
@@ -119,6 +128,33 @@ export const TerminalThumbnail = memo(function TerminalThumbnail({ terminal, isA
   const agentConfig = isAgent ? getAgentPreset(terminal.agentPreset!) : null
   const isWorktreeTerminal = !!terminal.worktreePath
   const displayTitle = terminal.alias || terminal.title
+  const { t } = useTranslation()
+  const [isEditing, setIsEditing] = useState(false)
+  const [editValue, setEditValue] = useState(displayTitle ?? '')
+
+  const handleRenameDoubleClick = (e: React.MouseEvent) => {
+    e.stopPropagation()
+    setEditValue(displayTitle ?? '')
+    setIsEditing(true)
+  }
+  const handleRenameSave = () => {
+    if (editValue.trim()) workspaceStore.renameTerminal(terminal.id, editValue.trim())
+    setIsEditing(false)
+  }
+  const handleRenameKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') handleRenameSave()
+    else if (e.key === 'Escape') setIsEditing(false)
+  }
+
+  useEffect(() => {
+    renameSubscribers.set(terminal.id, () => {
+      setEditValue(terminal.alias || terminal.title || '')
+      setIsEditing(true)
+    })
+    return () => {
+      renameSubscribers.delete(terminal.id)
+    }
+  }, [terminal.id, terminal.alias, terminal.title])
 
   useEffect(() => {
     setupGlobalListener()
@@ -147,10 +183,28 @@ export const TerminalThumbnail = memo(function TerminalThumbnail({ terminal, isA
       style={agentConfig ? { '--agent-color': agentConfig.color } as React.CSSProperties : undefined}
     >
       <div className="thumbnail-header">
-        <div className={`thumbnail-title ${isAgent ? 'agent-terminal' : ''}`}>
+        <div
+          className={`thumbnail-title ${isAgent ? 'agent-terminal' : ''}`}
+          onDoubleClick={handleRenameDoubleClick}
+          title={terminal.alias ? terminal.title : t('terminal.doubleClickToRename')}
+        >
           {isAgent && <span>{agentConfig?.icon}</span>}
           {isWorktreeTerminal && <span title={terminal.worktreeBranch || 'worktree'}>🌳</span>}
-          <span>{displayTitle}</span>
+          {isEditing ? (
+            <input
+              type="text"
+              className="terminal-name-input"
+              value={editValue}
+              onChange={(e) => setEditValue(e.target.value)}
+              onBlur={handleRenameSave}
+              onKeyDown={handleRenameKeyDown}
+              onClick={(e) => e.stopPropagation()}
+              onMouseDown={(e) => e.stopPropagation()}
+              autoFocus
+            />
+          ) : (
+            <span>{displayTitle}</span>
+          )}
         </div>
         <ActivityIndicator terminalId={terminal.id} size="small" />
       </div>
