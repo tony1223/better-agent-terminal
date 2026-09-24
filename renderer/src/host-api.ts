@@ -1416,6 +1416,12 @@ function createTauriHost(): BatAppAPI {
       onResult: (callback: (payload: unknown) => void) =>
         listenAdapter<unknown>('claude-channel:result', callback),
     },
+    // Project discovery (sidebar Projects section): git repos under the given
+    // code roots, scanned by the sidecar on the window's host.
+    projects: {
+      list: (codeRoots: string[]) =>
+        getInvoke()<unknown>('projects_list', { codeRoots }),
+    },
     claudeCli: {
       getCapabilities: () => getInvoke()<unknown>('claude_cli_get_capabilities'),
       startSession: async (sessionId: string, options: unknown) =>

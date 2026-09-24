@@ -258,6 +258,19 @@
     "restAgent": "休眠 Agent",
     "closeWorkspace": "关闭工作区"
   },
+  "projects": {
+    "title": "项目",
+    "repoCount_other": "{{count}} 个仓库",
+    "sessionCount_other": "{{count}} 个 Claude 会话",
+    "rescan": "重新扫描",
+    "scanning": "扫描中…",
+    "empty": "在工作区所在目录中未找到 Git 仓库。",
+    "scanFailed": "无法扫描项目：{{error}}",
+    "startSession": "启动 Claude 会话",
+    "startSessionInWorktree": "在此 worktree 中启动 Claude 会话",
+    "detached": "（分离 HEAD）",
+    "worktreeFallback": "worktree"
+  },
   "profiles": {
     "title": "配置文件",
     "saveCurrent": "保存当前状态",
