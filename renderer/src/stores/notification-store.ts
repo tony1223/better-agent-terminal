@@ -113,8 +113,9 @@ class NotificationStore {
     await host.notification.focusEntry(id)
   }
 
-  // Fallback OS toasts for remote hosts and platforms without native host
-  // delivery. Local Windows completions are handled before the update arrives.
+  // Fallback OS toasts for remote hosts and entries the host did not deliver
+  // itself. Local completions are toasted by the host (all desktop platforms)
+  // before the update arrives and carry nativeNotificationHandled.
   // Settings: notifyOnComplete (default on), notifyOnlyBackground (skip while
   // this window has focus), notifySound (short beep alongside the toast).
   private announceNew(entries: NotificationEntry[]): void {

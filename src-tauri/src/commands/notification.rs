@@ -1021,6 +1021,8 @@ fn mark_entry_read_and_emit(app: &AppHandle, state: &State<'_, NotificationState
 // local update landing there would overwrite it with this machine's entries.
 fn publish_update(app: &HostContext, state: &NotificationState) {
     let entries = state.lock().clone();
+    #[cfg(feature = "desktop")]
+    crate::commands::app::set_dock_badge_completions(app.app(), unread_agent_entry_count(&entries));
     let payload = serde_json::to_value(entries).unwrap_or_default();
     #[cfg(feature = "desktop")]
     {
@@ -1049,7 +1051,7 @@ fn publish_update(app: &HostContext, state: &NotificationState) {
 // runtime modules can call it directly without re-parsing JSON.
 #[allow(dead_code)]
 pub fn add_entry(app: &HostContext, state: &NotificationState, mut entry: NotificationEntry) {
-    #[cfg(all(feature = "desktop", windows))]
+    #[cfg(feature = "desktop")]
     handle_native_completion_notification(app, &mut entry);
     {
         let mut entries = state.lock();
@@ -1067,47 +1069,69 @@ pub fn add_entry(app: &HostContext, state: &NotificationState, mut entry: Notifi
     publish_update(app, state);
 }
 
-#[cfg(all(feature = "desktop", windows))]
+// Completion toasts are delivered by the host on every desktop platform, at
+// the moment the turn ends. Leaving them to the renderer is unreliable: a
+// window in the background has its webview throttled, so the update can
+// arrive long after the fact and is then (correctly) too old to announce.
+#[cfg(feature = "desktop")]
 fn handle_native_completion_notification(app: &HostContext, entry: &mut NotificationEntry) {
     if entry.kind.is_some() || entry.reason != "completed" {
         return;
     }
-    let Some(label) = entry.window_id.as_deref() else {
+    let Some(label) = entry.window_id.clone() else {
         return;
     };
-    let Some(window) = app.app().get_webview_window(label) else {
+    let Some(window) = app.app().get_webview_window(&label) else {
         return;
     };
     // The local host must never deliver a remote profile's toasts. Those
     // windows receive the remote host's entries through their existing API.
-    if remote_profile_target_id(app.app(), label).is_some() {
+    if remote_profile_target_id(app.app(), &label).is_some() {
         return;
     }
-    let settings = app
-        .data_dir_opt()
-        .and_then(|dir| crate::commands::settings::settings_load_impl(&dir).ok().flatten())
-        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-        .unwrap_or(Value::Null);
-    let focused = window.is_focused().unwrap_or(false);
     // Claim both delivery and intentional suppression. A delayed renderer
     // must not reconsider focus/settings later and toast an old completion.
     entry.native_notification_handled = Some(true);
-    let notify = completion_toast_enabled(&settings, focused);
-    log_tauri(app, &format!(
-        "[notify] completion id={} session={} eventAt={} hostAt={} focused={focused} deliver={notify}",
-        entry.id, entry.session_id, entry.timestamp, now_ms(),
-    ));
-    if !notify {
-        return;
-    }
-    crate::commands::app::notify_windows_toast(
-        app.app().clone(),
-        label.to_string(),
-        format!("{} ✓", entry.workspace_name),
-        entry.result.as_deref().map(completion_toast_body),
-        entry.workspace_id.clone(),
-        settings.get("notifySound").and_then(Value::as_bool) != Some(false),
-    );
+    // This runs on the sidecar event thread. Reading focus waits on the main
+    // thread, so decide and deliver off-thread to never stall event delivery.
+    let app = app.clone();
+    let id = entry.id.clone();
+    let session_id = entry.session_id.clone();
+    let event_at = entry.timestamp;
+    let title = format!("{} ✓", entry.workspace_name);
+    let body = entry.result.as_deref().map(completion_toast_body);
+    let workspace_id = entry.workspace_id.clone();
+    std::thread::spawn(move || {
+        let settings = app
+            .data_dir_opt()
+            .and_then(|dir| crate::commands::settings::settings_load_impl(&dir).ok().flatten())
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+            .unwrap_or(Value::Null);
+        let focused = window.is_focused().unwrap_or(false);
+        let notify = completion_toast_enabled(&settings, focused);
+        log_tauri(&app, &format!(
+            "[notify] completion id={id} session={session_id} eventAt={event_at} hostAt={} focused={focused} deliver={notify}",
+            now_ms(),
+        ));
+        if !notify {
+            return;
+        }
+        crate::commands::app::notify_completion_toast(
+            app.app().clone(),
+            label,
+            title,
+            body,
+            workspace_id,
+            settings.get("notifySound").and_then(Value::as_bool) != Some(false),
+        );
+    });
+}
+
+// Unread agent entries (completions, errors, aborts) for the Dock badge.
+// Remote-client connection notices are not agent work and are left out.
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+fn unread_agent_entry_count(entries: &[NotificationEntry]) -> i64 {
+    entries.iter().filter(|e| !e.read && e.kind.is_none()).count() as i64
 }
 
 fn completion_toast_enabled(settings: &Value, focused: bool) -> bool {
@@ -1313,6 +1337,19 @@ mod tests {
         assert!(completion_toast_enabled(&background_only, false));
         assert!(!completion_toast_enabled(&background_only, true));
         assert!(completion_toast_enabled(&json!({ "notifyOnlyBackground": false }), true));
+    }
+
+    #[test]
+    fn dock_badge_counts_unread_agent_entries_only() {
+        let mut read = sample_entry("read", "/a", true);
+        read.reason = "completed".into();
+        let unread = sample_entry("unread", "/b", false);
+        let mut errored = sample_entry("errored", "/c", false);
+        errored.reason = "error".into();
+        let mut client = sample_entry("client", "/d", false);
+        client.kind = Some("remote-client".into());
+        assert_eq!(unread_agent_entry_count(&[]), 0);
+        assert_eq!(unread_agent_entry_count(&[read, unread, errored, client]), 2);
     }
 
     #[test]

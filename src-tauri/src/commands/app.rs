@@ -15,6 +15,9 @@ use crate::window_registry;
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashSet;
+use std::sync::atomic::AtomicI64;
+#[cfg(feature = "desktop")]
+use std::sync::atomic::Ordering;
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(feature = "desktop")]
@@ -666,13 +669,55 @@ fn badge_count_value(count: i64) -> Option<i64> {
     }
 }
 
+// The Dock badge has two sources: pending actions (permission requests,
+// questions) that the renderer reports through `app_set_dock_badge`, and
+// unread agent completions that the host tracks in its notification list.
+// The host combines them so a completion reaches the badge even while the
+// window is in the background and its webview is throttled.
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+static DOCK_BADGE_PENDING: AtomicI64 = AtomicI64::new(0);
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+static DOCK_BADGE_COMPLETIONS: AtomicI64 = AtomicI64::new(0);
+
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+fn dock_badge_total(pending: i64, completions: i64, settings: &Value) -> i64 {
+    if settings.get("showDockBadge").and_then(Value::as_bool) == Some(false) {
+        return 0;
+    }
+    pending.max(0) + completions.max(0)
+}
+
 #[cfg(feature = "desktop")]
-#[tauri::command]
-pub fn app_set_dock_badge(app: AppHandle, count: i64) {
-    let badge = badge_count_value(count);
+fn apply_dock_badge(app: &AppHandle) {
+    let settings = HostContext::from_app(app.clone())
+        .data_dir_opt()
+        .and_then(|dir| crate::commands::settings::settings_load_impl(&dir).ok().flatten())
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .unwrap_or(Value::Null);
+    let total = dock_badge_total(
+        DOCK_BADGE_PENDING.load(Ordering::SeqCst),
+        DOCK_BADGE_COMPLETIONS.load(Ordering::SeqCst),
+        &settings,
+    );
+    let badge = badge_count_value(total);
     for window in app.webview_windows().values() {
         let _ = window.set_badge_count(badge);
     }
+}
+
+/// Called by the notification list whenever it changes.
+#[cfg(feature = "desktop")]
+pub(crate) fn set_dock_badge_completions(app: &AppHandle, count: i64) {
+    if DOCK_BADGE_COMPLETIONS.swap(count, Ordering::SeqCst) != count {
+        apply_dock_badge(app);
+    }
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub fn app_set_dock_badge(app: AppHandle, count: i64) {
+    DOCK_BADGE_PENDING.store(count, Ordering::SeqCst);
+    apply_dock_badge(&app);
 }
 
 /// OS toast for an agent completion. The renderer decides *whether* to notify
@@ -706,6 +751,45 @@ pub fn app_notify(
         let mut builder = app.notification().builder().title(title);
         if let Some(body) = body {
             builder = builder.body(body);
+        }
+        if let Err(err) = builder.show() {
+            log_tauri(&HostContext::from_app(app.clone()), &format!("[notify] OS notification failed: {err}"));
+        }
+    }
+}
+
+// Sound names understood by the notification backends: macOS maps this one to
+// the system's default notification sound; Linux uses the freedesktop sound
+// theme name for an incoming message.
+#[cfg(all(feature = "desktop", target_os = "macos"))]
+const COMPLETION_TOAST_SOUND: &str = "NSUserNotificationDefaultSoundName";
+#[cfg(all(feature = "desktop", not(windows), not(target_os = "macos")))]
+const COMPLETION_TOAST_SOUND: &str = "message-new-instant";
+
+/// Host-side completion toast (see notification::add_entry). Windows uses the
+/// WinRT path so a click can refocus the window and workspace; elsewhere the
+/// notification plugin delivers it.
+#[cfg(feature = "desktop")]
+pub(crate) fn notify_completion_toast(
+    app: AppHandle,
+    window_label: String,
+    title: String,
+    body: Option<String>,
+    workspace_id: Option<String>,
+    sound: bool,
+) {
+    #[cfg(windows)]
+    notify_windows_toast(app, window_label, title, body, workspace_id, sound);
+    #[cfg(not(windows))]
+    {
+        let _ = (window_label, workspace_id);
+        use tauri_plugin_notification::NotificationExt;
+        let mut builder = app.notification().builder().title(title);
+        if let Some(body) = body.filter(|b| !b.trim().is_empty()) {
+            builder = builder.body(body);
+        }
+        if sound {
+            builder = builder.sound(COMPLETION_TOAST_SOUND);
         }
         if let Err(err) = builder.show() {
             log_tauri(&HostContext::from_app(app.clone()), &format!("[notify] OS notification failed: {err}"));
@@ -862,6 +946,17 @@ mod tests {
         assert_eq!(badge_count_value(0), None);
         assert_eq!(badge_count_value(-1), None);
         assert_eq!(badge_count_value(42), Some(42));
+    }
+
+    #[test]
+    fn dock_badge_adds_unread_completions_to_pending_actions() {
+        let defaults = serde_json::json!({});
+        assert_eq!(dock_badge_total(0, 0, &defaults), 0);
+        assert_eq!(dock_badge_total(0, 2, &defaults), 2, "completions alone must light the badge");
+        assert_eq!(dock_badge_total(1, 2, &defaults), 3);
+        assert_eq!(dock_badge_total(-1, 1, &defaults), 1);
+        assert_eq!(dock_badge_total(0, 2, &serde_json::json!({ "showDockBadge": true })), 2);
+        assert_eq!(dock_badge_total(1, 2, &serde_json::json!({ "showDockBadge": false })), 0);
     }
 
     #[test]
