@@ -35,7 +35,6 @@ pub mod profile;
 pub mod pty;
 #[cfg(feature = "desktop")]
 pub mod remote;
-#[cfg(feature = "desktop")]
 pub mod remote_tunnel;
 pub mod runtime;
 pub mod settings;

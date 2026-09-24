@@ -6,15 +6,19 @@
 // <target>` on this machine and dial the forwarded local port instead. One
 // tunnel per profile is shared by every window viewing it; a window
 // registers itself as an owner on each ensure() and the reaper kills tunnels
-// whose owner windows have all gone away.
+// whose owners have all gone away. Mobile profile contexts hold their own
+// weak leases, independent of whether a desktop profile window is open.
 
+use crate::host_context::HostContext;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
+#[cfg(feature = "desktop")]
 use tauri::{AppHandle, Manager, State, WebviewWindow};
 
 const LOG_LINES: usize = 40;
@@ -27,8 +31,50 @@ struct Tunnel {
     child: Child,
     local_port: u16,
     log: Arc<Mutex<VecDeque<String>>>,
-    owners: HashSet<String>,
+    owners: TunnelOwners,
+    destination: (String, String, u16),
     started_at: Instant,
+}
+
+#[derive(Default)]
+struct TunnelOwners {
+    windows: HashSet<String>,
+    contexts: HashMap<String, Weak<AtomicBool>>,
+}
+
+impl TunnelOwners {
+    fn retain_live(&mut self, window_alive: impl Fn(&str) -> bool) {
+        self.windows.retain(|label| window_alive(label));
+        self.contexts.retain(|_, closed| {
+            closed
+                .upgrade()
+                .is_some_and(|closed| !closed.load(Ordering::Acquire))
+        });
+    }
+
+    fn is_empty(&self) -> bool {
+        self.windows.is_empty() && self.contexts.is_empty()
+    }
+}
+
+enum TunnelOwner {
+    #[cfg(feature = "desktop")]
+    Window(String),
+    Context(String, Weak<AtomicBool>),
+}
+
+impl TunnelOwner {
+    fn register(&self, owners: &mut TunnelOwners) {
+        match self {
+            #[cfg(feature = "desktop")]
+            Self::Window(label) => {
+                owners.windows.insert(label.clone());
+            }
+            Self::Context(id, closed) => {
+                owners.contexts.insert(id.clone(), closed.clone());
+            }
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -87,7 +133,12 @@ fn free_local_port() -> Result<u16, String> {
         .map_err(|err| format!("could not read reserved port: {err}"))
 }
 
-pub fn ssh_forward_args(local_port: u16, remote_host: &str, remote_port: u16, target: &str) -> Vec<String> {
+pub fn ssh_forward_args(
+    local_port: u16,
+    remote_host: &str,
+    remote_port: u16,
+    target: &str,
+) -> Vec<String> {
     vec![
         "-T".into(),
         "-N".into(),
@@ -125,7 +176,7 @@ fn log_text(log: &Arc<Mutex<VecDeque<String>>>) -> Option<String> {
 }
 
 fn spawn_tunnel(
-    app: &AppHandle,
+    app: &HostContext,
     key: &str,
     target: &str,
     remote_host: &str,
@@ -145,8 +196,14 @@ fn spawn_tunnel(
         .map_err(|err| format!("could not start ssh: {err}"))?;
     let log = Arc::new(Mutex::new(VecDeque::new()));
     for stream in [
-        child.stdout.take().map(|s| Box::new(s) as Box<dyn std::io::Read + Send>),
-        child.stderr.take().map(|s| Box::new(s) as Box<dyn std::io::Read + Send>),
+        child
+            .stdout
+            .take()
+            .map(|s| Box::new(s) as Box<dyn std::io::Read + Send>),
+        child
+            .stderr
+            .take()
+            .map(|s| Box::new(s) as Box<dyn std::io::Read + Send>),
     ]
     .into_iter()
     .flatten()
@@ -162,23 +219,25 @@ fn spawn_tunnel(
                 if trimmed.is_empty() {
                     continue;
                 }
-                crate::commands::app::log_tauri(
-                    &crate::host_context::HostContext::from_app(app.clone()),
-                    &format!("[remote-tunnel:{key}] {trimmed}"),
-                );
+                crate::commands::app::log_tauri(&app, &format!("[remote-tunnel:{key}] {trimmed}"));
                 push_log(&log, trimmed);
             }
         });
     }
     crate::commands::app::log_tauri(
-        &crate::host_context::HostContext::from_app(app.clone()),
-        &format!("[remote-tunnel:{key}] spawned ssh {} (pid {})", args.join(" "), child.id()),
+        app,
+        &format!(
+            "[remote-tunnel:{key}] spawned ssh {} (pid {})",
+            args.join(" "),
+            child.id()
+        ),
     );
     Ok(Tunnel {
         child,
         local_port,
         log,
-        owners: HashSet::new(),
+        owners: TunnelOwners::default(),
+        destination: (target.into(), remote_host.into(), remote_port),
         started_at: Instant::now(),
     })
 }
@@ -202,15 +261,26 @@ pub fn normalize_ssh_target(raw: &str) -> Option<String> {
 }
 
 fn tunnel_key(spec: &RemoteTunnelSpec, target: &str, host: &str, port: u16) -> String {
-    match spec.profile_id.as_deref().filter(|id| !id.trim().is_empty()) {
+    match spec
+        .profile_id
+        .as_deref()
+        .filter(|id| !id.trim().is_empty())
+    {
         Some(id) => format!("profile:{id}"),
         None => format!("adhoc:{target}|{host}:{port}"),
     }
 }
 
-fn resolve_spec(app: &AppHandle, spec: &RemoteTunnelSpec) -> Result<(Option<String>, String, u16), String> {
-    if let Some(profile_id) = spec.profile_id.as_deref().filter(|id| !id.trim().is_empty()) {
-        let profile = crate::commands::profile::profile_get(app.clone(), profile_id.to_string())
+fn resolve_spec(
+    app: &HostContext,
+    spec: &RemoteTunnelSpec,
+) -> Result<(Option<String>, String, u16), String> {
+    if let Some(profile_id) = spec
+        .profile_id
+        .as_deref()
+        .filter(|id| !id.trim().is_empty())
+    {
+        let profile = crate::commands::profile::profile_entry_for_context(app, profile_id)
             .ok_or_else(|| format!("profile {profile_id} not found"))?;
         let host = profile
             .remote_host
@@ -220,10 +290,7 @@ fn resolve_spec(app: &AppHandle, spec: &RemoteTunnelSpec) -> Result<(Option<Stri
             .remote_port
             .and_then(|p| u16::try_from(p).ok())
             .unwrap_or(9876);
-        let target = profile
-            .ssh_target
-            .as_deref()
-            .and_then(normalize_ssh_target);
+        let target = profile.ssh_target.as_deref().and_then(normalize_ssh_target);
         return Ok((target, host, port));
     }
     let host = spec
@@ -293,10 +360,10 @@ fn failed(message: &str, output: Option<String>) -> RemoteTunnelEndpoint {
     }
 }
 
-pub fn ensure_tunnel(
-    app: &AppHandle,
+fn ensure_tunnel(
+    app: &HostContext,
     state: &RemoteTunnelState,
-    owner_window: &str,
+    owner: TunnelOwner,
     spec: &RemoteTunnelSpec,
 ) -> RemoteTunnelEndpoint {
     let (target, host, port) = match resolve_spec(app, spec) {
@@ -308,28 +375,31 @@ pub fn ensure_tunnel(
     };
     let key = tunnel_key(spec, &target, &host, port);
 
-    // Reuse a live tunnel; drop a dead one so it is respawned below.
+    // Serialize creation as well as lookup: simultaneous desktop/mobile opens
+    // must not spawn competing children and orphan the losing SSH process.
     let existing_port = {
         let Ok(mut map) = state.inner.lock() else {
             return failed("tunnel state poisoned", None);
         };
-        match map.get_mut(&key) {
-            Some(tunnel) => match tunnel.child.try_wait() {
-                Ok(None) => {
-                    tunnel.owners.insert(owner_window.to_string());
-                    Some(tunnel.local_port)
-                }
-                _ => {
-                    let age = tunnel.started_at.elapsed().as_secs();
-                    crate::commands::app::log_tauri(
-                        &crate::host_context::HostContext::from_app(app.clone()),
-                        &format!("[remote-tunnel:{key}] ssh exited after {age}s; respawning"),
-                    );
-                    map.remove(&key);
-                    None
-                }
-            },
-            None => None,
+        let reusable = map.get_mut(&key).is_some_and(|tunnel| {
+            tunnel.destination == (target.clone(), host.clone(), port)
+                && matches!(tunnel.child.try_wait(), Ok(None))
+        });
+        if reusable {
+            let tunnel = map.get_mut(&key).unwrap();
+            owner.register(&mut tunnel.owners);
+            Some(tunnel.local_port)
+        } else {
+            if let Some(old) = map.remove(&key) {
+                kill_tunnel(app, &key, old, "exited or target changed");
+            }
+            let mut tunnel = match spawn_tunnel(app, &key, &target, &host, port) {
+                Ok(tunnel) => tunnel,
+                Err(err) => return failed(&err, None),
+            };
+            owner.register(&mut tunnel.owners);
+            map.insert(key.clone(), tunnel);
+            None
         }
     };
     if let Some(port) = existing_port {
@@ -348,27 +418,38 @@ pub fn ensure_tunnel(
         return wait_for_listen(state, &key);
     }
 
-    let mut tunnel = match spawn_tunnel(app, &key, &target, &host, port) {
-        Ok(tunnel) => tunnel,
-        Err(err) => return failed(&err, None),
-    };
-    tunnel.owners.insert(owner_window.to_string());
-    if let Ok(mut map) = state.inner.lock() {
-        map.insert(key.clone(), tunnel);
-    }
     wait_for_listen(state, &key)
 }
 
-fn kill_tunnel(app: &AppHandle, key: &str, mut tunnel: Tunnel, reason: &str) {
-    let _ = tunnel.child.kill();
-    let _ = tunnel.child.wait();
-    crate::commands::app::log_tauri(
-        &crate::host_context::HostContext::from_app(app.clone()),
-        &format!("[remote-tunnel:{key}] stopped ({reason})"),
-    );
+/// A phone owns a connection context, not a webview. The weak closed flag is
+/// released on profile close, failed open, socket disconnect or context drop.
+pub fn ensure_context_tunnel(
+    ctx: &HostContext,
+    context_id: &str,
+    closed: &Arc<AtomicBool>,
+    spec: &RemoteTunnelSpec,
+) -> RemoteTunnelEndpoint {
+    let Some(state) = ctx.try_state::<RemoteTunnelState>() else {
+        return failed("SSH tunnel manager unavailable", None);
+    };
+    if closed.load(Ordering::Acquire) {
+        return failed("Profile context closed", None);
+    }
+    ensure_tunnel(
+        ctx,
+        &state,
+        TunnelOwner::Context(context_id.into(), Arc::downgrade(closed)),
+        spec,
+    )
 }
 
-pub fn stop_tunnels_for_key(app: &AppHandle, state: &RemoteTunnelState, key: &str) -> bool {
+fn kill_tunnel(app: &HostContext, key: &str, mut tunnel: Tunnel, reason: &str) {
+    let _ = tunnel.child.kill();
+    let _ = tunnel.child.wait();
+    crate::commands::app::log_tauri(app, &format!("[remote-tunnel:{key}] stopped ({reason})"));
+}
+
+pub fn stop_tunnels_for_key(app: &HostContext, state: &RemoteTunnelState, key: &str) -> bool {
     let removed = state.inner.lock().ok().and_then(|mut map| map.remove(key));
     match removed {
         Some(tunnel) => {
@@ -379,7 +460,7 @@ pub fn stop_tunnels_for_key(app: &AppHandle, state: &RemoteTunnelState, key: &st
     }
 }
 
-pub fn stop_all_tunnels(app: &AppHandle, state: &RemoteTunnelState) {
+pub fn stop_all_tunnels(app: &HostContext, state: &RemoteTunnelState) {
     let drained: Vec<(String, Tunnel)> = state
         .inner
         .lock()
@@ -392,7 +473,7 @@ pub fn stop_all_tunnels(app: &AppHandle, state: &RemoteTunnelState) {
 
 /// Every few seconds: drop owner windows that no longer exist and kill
 /// tunnels nobody views (or whose ssh has exited).
-pub fn start_reaper(app: AppHandle) {
+pub fn start_reaper(app: HostContext) {
     std::thread::spawn(move || loop {
         std::thread::sleep(REAPER_INTERVAL);
         let Some(state) = app.try_state::<RemoteTunnelState>() else {
@@ -402,19 +483,28 @@ pub fn start_reaper(app: AppHandle) {
     });
 }
 
-fn reap_once(app: &AppHandle, state: &RemoteTunnelState) {
+fn reap_once(app: &HostContext, state: &RemoteTunnelState) {
     let mut doomed: Vec<(String, Tunnel, &'static str)> = Vec::new();
     if let Ok(mut map) = state.inner.lock() {
         let keys: Vec<String> = map.keys().cloned().collect();
         for key in keys {
-            let Some(tunnel) = map.get_mut(&key) else { continue };
-            tunnel
-                .owners
-                .retain(|label| app.get_webview_window(label).is_some());
+            let Some(tunnel) = map.get_mut(&key) else {
+                continue;
+            };
+            tunnel.owners.retain_live(|_label| {
+                #[cfg(feature = "desktop")]
+                {
+                    app.app().get_webview_window(_label).is_some()
+                }
+                #[cfg(not(feature = "desktop"))]
+                {
+                    false
+                }
+            });
             let exited = matches!(tunnel.child.try_wait(), Ok(Some(_)));
             if exited || tunnel.owners.is_empty() {
                 if let Some(tunnel) = map.remove(&key) {
-                    doomed.push((key, tunnel, if exited { "ssh exited" } else { "no owner windows" }));
+                    doomed.push((key, tunnel, if exited { "ssh exited" } else { "no owners" }));
                 }
             }
         }
@@ -424,6 +514,7 @@ fn reap_once(app: &AppHandle, state: &RemoteTunnelState) {
     }
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn remote_tunnel_ensure(
     app: AppHandle,
@@ -433,22 +524,38 @@ pub async fn remote_tunnel_ensure(
 ) -> Result<RemoteTunnelEndpoint, String> {
     let state = (*state).clone();
     let owner = window.label().to_string();
-    crate::async_rt::spawn_blocking(move || ensure_tunnel(&app, &state, &owner, &spec))
-        .await
-        .map_err(|err| format!("remote_tunnel_ensure worker failed: {err}"))
+    crate::async_rt::spawn_blocking(move || {
+        ensure_tunnel(
+            &HostContext::from_app(app),
+            &state,
+            TunnelOwner::Window(owner),
+            &spec,
+        )
+    })
+    .await
+    .map_err(|err| format!("remote_tunnel_ensure worker failed: {err}"))
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 pub fn remote_tunnel_stop(
     app: AppHandle,
     state: State<'_, RemoteTunnelState>,
     profile_id: String,
 ) -> bool {
-    stop_tunnels_for_key(&app, &state, &format!("profile:{profile_id}"))
+    stop_tunnels_for_key(
+        &HostContext::from_app(app),
+        &state,
+        &format!("profile:{profile_id}"),
+    )
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
-pub fn remote_tunnel_status(state: State<'_, RemoteTunnelState>, profile_id: String) -> serde_json::Value {
+pub fn remote_tunnel_status(
+    state: State<'_, RemoteTunnelState>,
+    profile_id: String,
+) -> serde_json::Value {
     let key = format!("profile:{profile_id}");
     let Ok(mut map) = state.inner.lock() else {
         return serde_json::json!({ "running": false });
@@ -472,6 +579,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn closing_desktop_window_keeps_mobile_owned_tunnel_alive() {
+        let closed = Arc::new(AtomicBool::new(false));
+        let mut owners = TunnelOwners::default();
+        owners.windows.insert("desktop-window".into());
+        TunnelOwner::Context("phone".into(), Arc::downgrade(&closed)).register(&mut owners);
+        owners.retain_live(|_| false);
+        assert!(owners.windows.is_empty());
+        assert!(!owners.is_empty());
+        closed.store(true, Ordering::Release);
+        owners.retain_live(|_| false);
+        assert!(owners.is_empty());
+    }
+
+    #[test]
+    fn closing_one_phone_never_releases_other_phone_or_desktop_owners() {
+        let first = Arc::new(AtomicBool::new(false));
+        let second = Arc::new(AtomicBool::new(false));
+        let mut owners = TunnelOwners::default();
+        owners.windows.insert("desktop-window".into());
+        TunnelOwner::Context("first".into(), Arc::downgrade(&first)).register(&mut owners);
+        let owner = TunnelOwner::Context("second".into(), Arc::downgrade(&second));
+        owner.register(&mut owners);
+        owner.register(&mut owners); // reconnect refreshes the same lease
+        assert_eq!(owners.contexts.len(), 2);
+        drop(first); // failed open / dropped context also releases its lease
+        owners.retain_live(|_| true);
+        assert_eq!(owners.contexts.len(), 1);
+        second.store(true, Ordering::Release);
+        owners.retain_live(|_| true);
+        assert!(owners.contexts.is_empty());
+        assert!(!owners.is_empty());
+        owners.retain_live(|_| false);
+        assert!(owners.is_empty());
+    }
+
+    #[test]
     fn forward_args_bind_loopback_only_and_never_prompt() {
         let args = ssh_forward_args(23456, "127.0.0.1", 9876, "ap01");
         assert_eq!(args.last().map(String::as_str), Some("ap01"));
@@ -484,7 +627,10 @@ mod tests {
     #[test]
     fn ssh_target_drops_leading_ssh_word() {
         assert_eq!(normalize_ssh_target("ssh ap01").as_deref(), Some("ap01"));
-        assert_eq!(normalize_ssh_target("  SSH  user@host ").as_deref(), Some("user@host"));
+        assert_eq!(
+            normalize_ssh_target("  SSH  user@host ").as_deref(),
+            Some("user@host")
+        );
         assert_eq!(normalize_ssh_target("ap01").as_deref(), Some("ap01"));
         assert_eq!(normalize_ssh_target("ssh"), None);
         assert_eq!(normalize_ssh_target("   "), None);
@@ -505,7 +651,10 @@ mod tests {
             remote_host: Some("127.0.0.1".into()),
             remote_port: Some(9876),
         };
-        assert_eq!(tunnel_key(&adhoc, "ap01", "127.0.0.1", 9876), "adhoc:ap01|127.0.0.1:9876");
+        assert_eq!(
+            tunnel_key(&adhoc, "ap01", "127.0.0.1", 9876),
+            "adhoc:ap01|127.0.0.1:9876"
+        );
     }
 
     #[test]

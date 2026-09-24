@@ -166,7 +166,10 @@ pub fn run(context: tauri::Context<tauri::Wry>) {
             // ssh children outlive the app otherwise (Windows does not kill
             // them with the parent); no window is left to own them.
             if let Some(state) = app_handle.try_state::<remote_tunnel_cmd::RemoteTunnelState>() {
-                remote_tunnel_cmd::stop_all_tunnels(app_handle, &state);
+                remote_tunnel_cmd::stop_all_tunnels(
+                    &host_context::HostContext::from_app(app_handle.clone()),
+                    &state,
+                );
             }
         }
     });
@@ -201,7 +204,9 @@ fn app_builder(headless: bool) -> tauri::Builder<tauri::Wry> {
             if let Some(data_dir) = app_data::app_data_dir_opt(app.handle()) {
                 panic_log::install(data_dir);
             }
-            remote_tunnel_cmd::start_reaper(app.handle().clone());
+            remote_tunnel_cmd::start_reaper(host_context::HostContext::from_app(
+                app.handle().clone(),
+            ));
             if !headless {
                 // Tier 2 is the default: recover from an interrupted swap and
                 // auto-migrate legacy multi-HOME Codex accounts into the unified
@@ -518,9 +523,11 @@ fn run_headless_server(args: HeadlessServerArgs) -> Result<(), String> {
     host.manage(crate::commands::worktree::WorktreeState::default());
     host.manage(event_hub::RuntimeEventHubState::default());
     host.manage(remote_client::RustRemoteClientState::default());
+    host.manage(crate::commands::remote_tunnel::RemoteTunnelState::default());
     host.manage(codex_app_server::CodexAppServerState::default());
 
     let ctx = HostContext::from_headless(std::sync::Arc::new(host));
+    crate::commands::remote_tunnel::start_reaper(ctx.clone());
 
     // Usage is host-owned state, and a remote client paired with a headless host
     // expects 5h/7d numbers here exactly as it would from a desktop host. Started
