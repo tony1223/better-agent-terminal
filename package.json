@@ -47,6 +47,7 @@
     "test:attention-list": "tsx tests/attention-list.test.ts",
     "test:notification-delivery": "tsx tests/notification-delivery.test.ts",
     "test:interrupted-turn": "tsx tests/interrupted-turn.test.ts",
+    "test:turn-resync": "tsx tests/turn-resync.test.ts",
     "test:latency-stats": "tsx tests/latency-stats.test.ts",
     "test:slash-commands": "tsx tests/slash-commands.test.ts",
     "test:tool-row-density": "tsx tests/tool-row-density.test.ts",
