@@ -2225,8 +2225,12 @@ fn codex_history_items_from_content(session_id: &str, content: &str) -> Vec<Valu
                         .get("call_id")
                         .and_then(Value::as_str)
                         .unwrap_or("hist-patch");
-                    let input =
-                        history_tool_input_for_call(&items, call_id).unwrap_or_else(|| json!({}));
+                    let mut input =
+                        file_change_input(payload.get("changes").unwrap_or(&Value::Null));
+                    if input["changes"].as_array().is_some_and(Vec::is_empty) {
+                        input = history_tool_input_for_call(&items, call_id)
+                            .unwrap_or_else(|| json!({}));
+                    }
                     upsert_history_tool_call(
                         &mut items,
                         json!({
@@ -2345,6 +2349,15 @@ fn codex_history_items_from_content(session_id: &str, content: &str) -> Vec<Valu
                             .get("name")
                             .and_then(Value::as_str)
                             .unwrap_or("Tool");
+                        if name == "apply_patch"
+                            && items.iter().any(|item| {
+                                item["id"] == call_id
+                                    && item["toolName"] == "apply_patch"
+                                    && item["status"] != "running"
+                            })
+                        {
+                            continue;
+                        }
                         upsert_history_tool_call(
                             &mut items,
                             json!({
@@ -2468,6 +2481,86 @@ fn history_tool_input_for_call(items: &[Value], call_id: &str) -> Option<Value> 
         .iter()
         .find(|item| item.get("id").and_then(Value::as_str) == Some(call_id))
         .and_then(|item| item.get("input").cloned())
+}
+
+// Codex app-server items use an array, while legacy rollout events use a map
+// from path to FileChange ({type, content/unified_diff, move_path}). Keep one
+// renderer-facing shape for live items, approvals, and replay.
+fn file_change_input(changes: &Value) -> Value {
+    let normalized: Vec<Value> = if let Some(items) = changes.as_array() {
+        items
+            .iter()
+            .filter_map(|change| {
+                let path = change.get("path").and_then(Value::as_str)?;
+                let kind_value = change.get("kind").unwrap_or(&Value::Null);
+                let kind = kind_value
+                    .as_str()
+                    .or_else(|| kind_value.get("type").and_then(Value::as_str))
+                    .unwrap_or("update");
+                let raw_diff = change.get("diff").and_then(Value::as_str).unwrap_or("");
+                let diff = file_change_diff(kind, raw_diff);
+                Some(json!({
+                    "path": path,
+                    "kind": kind,
+                    "diff": diff,
+                    "move_path": kind_value.get("move_path"),
+                }))
+            })
+            .collect()
+    } else if let Some(files) = changes.as_object() {
+        let mut files: Vec<_> = files.iter().collect();
+        files.sort_by(|(left, _), (right, _)| left.cmp(right));
+        files
+            .into_iter()
+            .map(|(path, change)| {
+                let kind = change.get("type").and_then(Value::as_str).unwrap_or("update");
+                let diff = change
+                    .get("unified_diff")
+                    .or_else(|| change.get("diff"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .or_else(|| {
+                        change.get("content").and_then(Value::as_str)
+                            .map(|content| file_change_diff(kind, content))
+                    })
+                    .unwrap_or_default();
+                json!({ "path": path, "kind": kind, "diff": diff, "move_path": change.get("move_path") })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let path = normalized
+        .first()
+        .and_then(|change| change.get("path"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    json!({ "file_path": path, "changes": normalized })
+}
+
+fn file_change_diff(kind: &str, content: &str) -> String {
+    let prefix = match kind {
+        "add" => '+',
+        "delete" => '-',
+        _ => return content.to_string(),
+    };
+    content
+        .lines()
+        .map(|line| format!("{prefix}{line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn file_change_approval_input(params: &Value, saved_input: Option<Value>) -> Value {
+    let changes = params.get("changes").or_else(|| params.get("fileChanges"));
+    let mut input = changes.map(file_change_input).unwrap_or_else(|| json!({}));
+    if input["changes"].as_array().is_none_or(Vec::is_empty) {
+        input = saved_input.unwrap_or(input);
+    }
+    if let Some(grant_root) = params.get("grantRoot").and_then(Value::as_str) {
+        input["grantRoot"] = json!(grant_root);
+    }
+    input
 }
 
 fn history_command_from_event(payload: &Value) -> String {
@@ -6208,11 +6301,22 @@ impl CodexAppServerState {
             }
         );
         let (tool_name, input) = if method == "item/fileChange/requestApproval" {
-            let mut input = serde_json::Map::new();
-            if let Some(grant_root) = params.get("grantRoot").and_then(Value::as_str) {
-                input.insert("grantRoot".to_string(), json!(grant_root));
-            }
-            ("Edit", Value::Object(input))
+            let saved_input = params
+                .get("itemId")
+                .and_then(Value::as_str)
+                .and_then(|item_id| {
+                    self.inner
+                        .sessions
+                        .lock()
+                        .expect("codex sessions lock")
+                        .get(&session_id)
+                        .and_then(|session| {
+                            session.messages.iter().find(|item| item["id"] == item_id)
+                        })
+                        .and_then(|item| item.get("input"))
+                        .cloned()
+                });
+            ("Edit", file_change_approval_input(&params, saved_input))
         } else {
             let mut input = serde_json::Map::new();
             if let Some(command) = params.get("command") {
@@ -7024,19 +7128,11 @@ fn handle_item_started(
             emit(app, "claude:tool-use", session_id, "toolCall", tool_call);
         }
         Some("fileChange") => {
-            let changes = item.get("changes").cloned().unwrap_or_else(|| json!([]));
-            let path = item
-                .get("changes")
-                .and_then(Value::as_array)
-                .and_then(|items| items.first())
-                .and_then(|v| v.get("path"))
-                .and_then(Value::as_str)
-                .unwrap_or("");
             let tool_call = json!({
                 "id": item_id(item),
                 "sessionId": session_id,
                 "toolName": "Edit",
-                "input": { "file_path": path, "changes": changes },
+                "input": file_change_input(item.get("changes").unwrap_or(&Value::Null)),
                 "status": tool_status(item),
                 "timestamp": now_millis(),
             });
@@ -7331,7 +7427,24 @@ fn handle_item_completed(
             }
             emit(app, "claude:tool-result", session_id, "result", tool_result);
         }
-        Some("fileChange" | "mcpToolCall" | "webSearch") => {
+        Some("fileChange") => {
+            let mut tool_result = completed_tool_result(item);
+            let input = file_change_input(item.get("changes").unwrap_or(&Value::Null));
+            if input["changes"].as_array().is_some_and(|changes| !changes.is_empty()) {
+                tool_result["input"] = input;
+            }
+            if let Some(session) = state
+                .inner
+                .sessions
+                .lock()
+                .expect("codex sessions lock")
+                .get_mut(session_id)
+            {
+                update_session_tool_call(session, &item_id(item), tool_result.clone());
+            }
+            emit(app, "claude:tool-result", session_id, "result", tool_result);
+        }
+        Some("mcpToolCall" | "webSearch") => {
             let tool_result = completed_tool_result(item);
             if let Some(session) = state
                 .inner
@@ -8796,7 +8909,7 @@ invalid json
 {"timestamp":"2026-05-11T00:00:01Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"ls -la\",\"workdir\":\"/tmp\"}","call_id":"call-1"}}
 {"timestamp":"2026-05-11T00:00:02Z","type":"event_msg","payload":{"type":"exec_command_end","call_id":"call-1","command":["/bin/zsh","-lc","ls -la"],"aggregated_output":"total 0","exit_code":0,"status":"completed"}}
 {"timestamp":"2026-05-11T00:00:03Z","type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","input":"*** Begin Patch","call_id":"call-2"}}
-{"timestamp":"2026-05-11T00:00:04Z","type":"event_msg","payload":{"type":"patch_apply_end","call_id":"call-2","stdout":"Success","success":true,"status":"completed"}}
+{"timestamp":"2026-05-11T00:00:04Z","type":"event_msg","payload":{"type":"patch_apply_end","call_id":"call-2","stdout":"Success","success":true,"status":"completed","changes":{"/tmp/added.txt":{"type":"add","content":"hello\nworld\n"},"/tmp/changed.txt":{"type":"update","unified_diff":"@@ -1 +1 @@\n-old\n+new","move_path":null},"/tmp/deleted.txt":{"type":"delete","content":"gone\n"}}}}
 "#;
         let items = codex_history_items_from_content("s-1", content);
         assert_eq!(items.len(), 2);
@@ -8808,8 +8921,49 @@ invalid json
         assert_eq!(items[0]["result"], "total 0");
         assert_eq!(items[1]["id"], "call-2");
         assert_eq!(items[1]["toolName"], "apply_patch");
-        assert_eq!(items[1]["input"]["input"], "*** Begin Patch");
+        assert_eq!(items[1]["input"]["file_path"], "/tmp/added.txt");
+        assert_eq!(items[1]["input"]["changes"][0], json!({
+            "path": "/tmp/added.txt", "kind": "add", "diff": "+hello\n+world", "move_path": null
+        }));
+        assert_eq!(items[1]["input"]["changes"][1]["diff"], "@@ -1 +1 @@\n-old\n+new");
+        assert_eq!(items[1]["input"]["changes"][2]["diff"], "-gone");
         assert_eq!(items[1]["result"], "Success");
+    }
+
+    #[test]
+    fn file_change_input_normalizes_app_server_changes() {
+        let input = file_change_input(&json!([
+            {"path":"new.txt","kind":{"type":"add"},"diff":"first\nsecond"},
+            {"path":"old.txt","kind":{"type":"delete"},"diff":"removed"},
+            {"path":"moved.txt","kind":{"type":"update","move_path":"renamed.txt"},"diff":"@@ -1 +1 @@\n-old\n+new"}
+        ]));
+        assert_eq!(input["file_path"], "new.txt");
+        assert_eq!(input["changes"][0]["kind"], "add");
+        assert_eq!(input["changes"][0]["diff"], "+first\n+second");
+        assert_eq!(input["changes"][1]["diff"], "-removed");
+        assert_eq!(input["changes"][2]["move_path"], "renamed.txt");
+        assert_eq!(input["changes"][2]["diff"], "@@ -1 +1 @@\n-old\n+new");
+    }
+
+    #[test]
+    fn file_change_approval_reuses_started_item_changes() {
+        let saved = file_change_input(&json!([{
+            "path": "src/main.rs", "kind": {"type": "update"}, "diff": "@@ -1 +1 @@\n-old\n+new"
+        }]));
+        let input = file_change_approval_input(
+            &json!({"itemId": "patch-1", "grantRoot": "/repo"}),
+            Some(saved.clone()),
+        );
+        assert_eq!(input["changes"], saved["changes"]);
+        assert_eq!(input["grantRoot"], "/repo");
+    }
+
+    #[test]
+    fn codex_history_loader_keeps_older_patch_without_changes() {
+        let content = r#"{"type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","input":"*** Begin Patch","call_id":"old-patch"}}
+{"type":"event_msg","payload":{"type":"patch_apply_end","call_id":"old-patch","stdout":"Success","success":true}}"#;
+        let items = codex_history_items_from_content("s-1", content);
+        assert_eq!(items[0]["input"]["input"], "*** Begin Patch");
     }
 
     #[test]

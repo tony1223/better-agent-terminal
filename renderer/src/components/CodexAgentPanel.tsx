@@ -38,6 +38,7 @@ import { dispatchWorkerCommand, parseWorkerSlashCommand } from '../utils/worker-
 import { buildAskUserQnA, normalizePendingAskUser, wrapPreviewHtml } from './AskUserQuestion.helpers'
 import { AgentAskUserQnA } from './AgentAskUserQnA'
 import { autoContinueTurnEndKey, buildCollapsedOutputPreview, formatContentSize, formatElapsed, formatFullTimestamp, formatTimestamp, parseContentBlocks, parseShellInvocation, shouldAutoContinueForTrigger, shouldShowTimeDivider, splitSystemReminders, stringifyToolResult, summarizeToolSearchResult, toolDescription, toolInputContent, toolInputSummary, truncateMiddle } from './CodexAgentPanel.helpers'
+import { codexChangeDiffText, codexDiffLineClass, isCodexDiffChangeLine } from './CodexFileDiff.helpers'
 import { formatToolElapsed, toolRowLayout } from './CodexAgentPanel.helpers'
 import type { AutoContinueTrigger } from './CodexAgentPanel.helpers'
 import { AgentToolRow } from './AgentToolRow'
@@ -335,29 +336,6 @@ function codexChangesSummary(changes: CodexFileChange[], fallbackPath: string): 
   if (changes.length === 1) return codexChangeSummaryLine(changes[0])
   const firstPath = codexChangePath(changes[0]) || fallbackPath
   return `${changes.length} files${firstPath ? `, first: ${firstPath}` : ''}`
-}
-
-function codexChangeDiffText(changes: CodexFileChange[]): string {
-  const diffKeys = ['diff', 'patch', 'unified_diff', 'unifiedDiff']
-  return changes
-    .map(change => firstStringValue(change, diffKeys))
-    .filter(Boolean)
-    .join('\n')
-}
-
-function codexDiffLineClass(line: string): string {
-  if (line.startsWith('+') && !line.startsWith('+++')) return 'claude-diff-line claude-diff-add'
-  if (line.startsWith('-') && !line.startsWith('---')) return 'claude-diff-line claude-diff-del'
-  if (line.startsWith('@@')) return 'claude-diff-line claude-diff-hunk'
-  if (line.startsWith('diff ') || line.startsWith('index ') || line.startsWith('---') || line.startsWith('+++')) {
-    return 'claude-diff-line claude-diff-file'
-  }
-  return 'claude-diff-line'
-}
-
-function isCodexDiffChangeLine(line: string): boolean {
-  return (line.startsWith('+') && !line.startsWith('+++'))
-    || (line.startsWith('-') && !line.startsWith('---'))
 }
 
 type CodexAgentPanelContentProps = Omit<CodexAgentPanelProps, 'isActive'> & {
@@ -4214,8 +4192,9 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
       }
 
       // Edit tool: show diff/change view
-      const editChanges = item.toolName === 'Edit' ? codexFileChanges(item.input) : []
-      if (item.toolName === 'Edit' && (item.input.old_string !== undefined || editChanges.length > 0)) {
+      const isPatch = item.toolName === 'apply_patch' || item.toolName === 'fileChange'
+      const editChanges = item.toolName === 'Edit' || isPatch ? codexFileChanges(item.input) : []
+      if ((item.toolName === 'Edit' && (item.input.old_string !== undefined || editChanges.length > 0)) || isPatch) {
         const filePath = String(item.input.file_path || '')
         const oldStr = String(item.input.old_string || '')
         const newStr = String(item.input.new_string || '')
@@ -4235,10 +4214,16 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
             <div className={`tl-dot ${dotClass}`} />
             <div className="tl-content">
               <div className="claude-tool-header" onClick={() => toggleTool(item.id)}>
-                <span className="claude-tool-name">Edit</span>
-                <span className="claude-tool-desc"><LinkedText text={codexChangesSummary(editChanges, filePath)} /></span>
+                <span className="claude-tool-name">{isPatch ? 'apply_patch' : 'Edit'}</span>
+                <span className="claude-tool-desc"><LinkedText text={codexChangesSummary(editChanges, filePath) || 'Patch details unavailable'} /></span>
                 {item.timestamp > 0 && <span className="claude-tool-time" title={formatFullTimestamp(item.timestamp)}>{formatTimestamp(item.timestamp)}</span>}
               </div>
+              {editChanges.length > 1 && (
+                <div className="claude-tool-blocks"><div className="claude-tool-row">
+                  <span className="claude-tool-row-label">FILES</span>
+                  <span className="claude-tool-row-content"><LinkedText text={changeSummaryLines.join('\n')} /></span>
+                </div></div>
+              )}
               {hasOldNewDiff ? (
                 <div className="claude-diff-block">
                   {(isDiffExpanded || !isLongDiff ? oldLines : oldLines.slice(0, 3)).map((line, i) => (
@@ -4278,7 +4263,7 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
                   <div className="claude-tool-row">
                     <span className="claude-tool-row-label">EDIT</span>
                     <span className="claude-tool-row-content">
-                      {changeSummaryLines.length > 0 ? <LinkedText text={changeSummaryLines.join('\n')} /> : <LinkedText text={filePath} />}
+                      {changeSummaryLines.length > 0 ? <LinkedText text={changeSummaryLines.join('\n')} /> : <LinkedText text={filePath || 'Patch details unavailable'} />}
                     </span>
                   </div>
                 </div>
@@ -4958,6 +4943,9 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
       {/* Permission Request Card — vertical list */}
       {pendingPermission && (() => {
         const planContent = planFileContent
+        const approvalDiff = pendingPermission.toolName === 'Edit'
+          ? codexChangeDiffText(codexFileChanges(pendingPermission.input)) : ''
+        const approvalDiffLines = approvalDiff.split(/\r?\n/)
         return (
         <div
           ref={permissionCardRef}
@@ -4972,6 +4960,21 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
           <div className="claude-permission-command">
             {toolInputSummary(pendingPermission.toolName, pendingPermission.input)}
           </div>
+          {approvalDiff && (
+            <div className="claude-diff-block">
+              {approvalDiffLines.slice(0, 16).map((line, i) => (
+                <div key={i} className={codexDiffLineClass(line)}>
+                  <span className="claude-diff-sign">{isCodexDiffChangeLine(line) ? line[0] : ' '}</span>
+                  <span className="claude-diff-text">{isCodexDiffChangeLine(line) ? line.slice(1) : line}</span>
+                </div>
+              ))}
+              {approvalDiffLines.length > 16 && (
+                <div className="claude-diff-toggle" onClick={() => setContentModal({ title: 'Proposed file changes', content: approvalDiff })}>
+                  Show all {approvalDiffLines.length} lines...
+                </div>
+              )}
+            </div>
+          )}
           {planContent && (
             <div className="claude-plan-block">
               <pre className="claude-plan-content">{planContent.split('\n').slice(0, 3).join('\n')}{planContent.split('\n').length > 3 ? '\n...' : ''}</pre>
