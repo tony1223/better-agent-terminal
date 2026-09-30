@@ -20,6 +20,7 @@ import { WorktreeMergedChip } from './WorktreeMergedChip'
 import { buildMessageStream } from './messageSkip'
 import { InterruptedTurnCard } from './InterruptedTurnCard'
 import { summarizeInterruptedTurn } from '../utils/interrupted-turn'
+import { decideTurnResync, mergeMissedHostMessages, shouldIgnoreStreamingStatus, TURN_RESYNC_MIN_INTERVAL_MS, TURN_RESYNC_MIN_QUIET_MS, TURN_RESYNC_POLL_MAX_MS, TURN_RESYNC_POLL_MS } from '../utils/turn-resync'
 import { filenameForPastedImage, maybeResizeImageDataUrl, readFileAsDataUrl } from '../utils/file-data-url'
 import { extractInterruptedContinuation } from '../utils/interrupted-prompt'
 import { dedupeMessagesById } from '../utils/message-dedupe'
@@ -332,8 +333,14 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
   const [turnStartedAt, setTurnStartedAt] = useState<number | null>(null)
   const lastAgentEventAtRef = useRef<number>(Date.now())
   const [turnNow, setTurnNow] = useState(() => Date.now())
+  // Bumped on every host event and local turn-state change, so an in-flight
+  // host resync (resyncWithHost) can tell its snapshot went stale meanwhile.
+  const hostEventSeqRef = useRef(0)
+  // When this panel last processed a turn end; see shouldIgnoreStreamingStatus.
+  const lastTurnEndAtRef = useRef<number | null>(null)
   const noteAgentEvent = useCallback(() => {
     lastAgentEventAtRef.current = Date.now()
+    hostEventSeqRef.current += 1
   }, [])
   const lastEscRef = useRef(0)
   const streamingTextStore = useRafBatchedString('', { activation })
@@ -586,6 +593,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
   // Track turn start + tick once a second while a turn is in flight so the
   // elapsed / quiet-time readouts stay current.
   useEffect(() => {
+    hostEventSeqRef.current += 1
     if (isStreaming) {
       setTurnStartedAt(Date.now())
       lastAgentEventAtRef.current = Date.now()
@@ -1260,6 +1268,59 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
     return () => clearInterval(interval)
   }, [isStreaming, sessionId])
 
+  // Local UI side of a finished turn. Shared by the claude:turn-end handler
+  // and resyncWithHost, which applies it when a turn-end was never delivered.
+  // Only setters, refs and stable callbacks: safe to capture once per session.
+  const applyTurnEndState = useCallback((reason: string | undefined) => {
+    lastTurnEndAtRef.current = Date.now()
+    setIsStreaming(false)
+    setSessionMeta(prev => clearRuntimeStatusMeta(prev))
+    setStreamingText('')
+    setStreamingThinking('')
+    if (reason === 'interrupted') {
+      // Soft interrupt: the turn ended but the subprocess + any
+      // background workflow stay alive. Keep the interrupted state
+      // (so the next Esc hard-stops) and leave running tools as-is.
+      markInterruptedTurn()
+      setIsInterrupted(true)
+      return
+    }
+    setIsInterrupted(false)
+    if (reason === 'aborted' || reason === 'error') {
+      markInterruptedTurn()
+      // Hard stop / failure: the subprocess is gone.
+      setPendingPermission(null)
+      setPendingQuestion(null)
+      setMessages(prev => prev.map(m => {
+        if ('toolName' in m && (m as ClaudeToolCall).status === 'running') {
+          return { ...m, status: 'error', denied: true } as ClaudeToolCall
+        }
+        return m
+      }))
+      // The sidecar drops its activeTasks map when the subprocess dies
+      // (closeLiveQuery) without emitting terminal task events — mirror
+      // that here or still-running lifecycle entries tick forever.
+      setTaskLifecycle(prev => terminateLifecycleEntries(prev, () => true, 'killed'))
+    } else {
+      // Normal completion: a turn cannot end while foreground tasks are
+      // still running, so any leftover running lifecycle entry is a
+      // ghost (the SDK's terminal task_updated is best-effort and often
+      // missing, e.g. for shell-tool tasks). Only background tasks
+      // legitimately outlive the turn — leave those alone.
+      const bgToolIds = new Set(allMessagesRef.current
+        .filter(m => isToolCall(m) && m.input?.run_in_background === true)
+        .map(m => m.id))
+      setTaskLifecycle(prev => terminateLifecycleEntries(
+        prev,
+        life => life.isBackground !== true && !(life.toolUseId && bgToolIds.has(life.toolUseId)),
+        'completed'))
+    }
+  }, [markInterruptedTurn])
+
+  // Assigned below once resyncWithHost exists; the IPC subscriptions (bound
+  // once per session) call through this ref.
+  const resyncWithHostRef = useRef<(trigger: string, force?: boolean) => Promise<void>>(async () => {})
+
   // Subscribe to IPC events
   useEffect(() => {
     const api = host.claude
@@ -1528,6 +1589,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
 
       api.onTurnEnd((sid: string, payload: { reason?: string } | null | undefined) => {
         if (sid !== sessionId) return
+        hostEventSeqRef.current += 1
         const reason = payload?.reason
         // Barge-in hand-off: when the user sent a new message that cancelled
         // this turn, a replacement turn is already starting. Consume the flag
@@ -1539,52 +1601,13 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
           setStreamingThinking('')
           return
         }
-        setIsStreaming(false)
-        setSessionMeta(prev => clearRuntimeStatusMeta(prev))
-        setStreamingText('')
-        setStreamingThinking('')
-        if (reason === 'interrupted') {
-          // Soft interrupt: the turn ended but the subprocess + any
-          // background workflow stay alive. Keep the interrupted state
-          // (so the next Esc hard-stops) and leave running tools as-is.
-          markInterruptedTurn()
-          setIsInterrupted(true)
-          return
-        }
-        setIsInterrupted(false)
-        if (reason === 'aborted' || reason === 'error') {
-          markInterruptedTurn()
-          // Hard stop / failure: the subprocess is gone.
-          setPendingPermission(null)
-          setPendingQuestion(null)
-          setMessages(prev => prev.map(m => {
-            if ('toolName' in m && (m as ClaudeToolCall).status === 'running') {
-              return { ...m, status: 'error', denied: true } as ClaudeToolCall
-            }
-            return m
-          }))
-          // The sidecar drops its activeTasks map when the subprocess dies
-          // (closeLiveQuery) without emitting terminal task events — mirror
-          // that here or still-running lifecycle entries tick forever.
-          setTaskLifecycle(prev => terminateLifecycleEntries(prev, () => true, 'killed'))
-        } else {
-          // Normal completion: a turn cannot end while foreground tasks are
-          // still running, so any leftover running lifecycle entry is a
-          // ghost (the SDK's terminal task_updated is best-effort and often
-          // missing, e.g. for shell-tool tasks). Only background tasks
-          // legitimately outlive the turn — leave those alone.
-          const bgToolIds = new Set(allMessagesRef.current
-            .filter(m => isToolCall(m) && m.input?.run_in_background === true)
-            .map(m => m.id))
-          setTaskLifecycle(prev => terminateLifecycleEntries(
-            prev,
-            life => life.isBackground !== true && !(life.toolUseId && bgToolIds.has(life.toolUseId)),
-            'completed'))
-        }
+        applyTurnEndState(reason)
       }),
 
       api.onResult((sid: string, resultData: unknown) => {
         if (sid !== sessionId) return
+        hostEventSeqRef.current += 1
+        lastTurnEndAtRef.current = Date.now()
         setIsStreaming(false)
         setIsInterrupted(false)
         setSessionMeta(prev => clearRuntimeStatusMeta(prev))
@@ -1624,6 +1647,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
 
       api.onError((sid: string, error: string) => {
         if (sid !== sessionId) return
+        hostEventSeqRef.current += 1
         setMessages(prev => [...prev, {
           id: `err-${Date.now()}`,
           sessionId: sid,
@@ -1679,8 +1703,16 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
         } else if (host.debug.isDebugMode === true) {
           host.debug.log(`${tag} onStatus sdkSessionId=${(m.sdkSessionId || '').slice(0, 8)}`)
         }
+        if (m.runtimeStatus) lastTurnEndAtRef.current = null
         if (typeof m.isStreaming === 'boolean') {
-          setIsStreaming(m.isStreaming)
+          // The host drops its streaming flag only after it has emitted the
+          // result, so a status sent in that gap would put "Thinking" back up
+          // for a turn this panel already closed.
+          if (shouldIgnoreStreamingStatus({ isStreaming: m.isStreaming, runtimeStatus: m.runtimeStatus, lastTurnEndAt: lastTurnEndAtRef.current, now: Date.now() })) {
+            host.debug.log(`${tag} onStatus ignored isStreaming=true right after turn end`)
+          } else {
+            setIsStreaming(m.isStreaming)
+          }
         } else if (m.runtimeStatus) {
           setIsStreaming(true)
         }
@@ -1750,6 +1782,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
 
       api.onPermissionRequest((sid: string, data: unknown) => {
         if (sid !== sessionId) return
+        hostEventSeqRef.current += 1
         setPendingPermission(data as PendingPermission)
         setPermissionFocus(0)
         setPermissionCustomText('')
@@ -1757,6 +1790,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
 
       api.onAskUser((sid: string, data: unknown) => {
         if (sid !== sessionId) return
+        hostEventSeqRef.current += 1
         setPendingQuestion(normalizePendingAskUser(data) as PendingAskUser)
         setAskAnswers({})
         setAskOtherText({})
@@ -1785,6 +1819,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
 
       api.onSessionReset((sid: string) => {
         if (sid !== sessionId) return
+        hostEventSeqRef.current += 1
         setMessages([])
         setStreamingText('')
         setStreamingThinking('')
@@ -1810,6 +1845,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
       api.onHistory((sid: string, items: unknown[]) => {
         if (sid !== sessionId) return
         archiveDlog(`${tag} onHistory items=${(items as unknown[]).length} pendingPromptSent=${pendingPromptSentRef.current}`)
+        hostEventSeqRef.current += 1
         historyLoadedRef.current = true
         setIsResumingHistory(false)
         // Partition history items: main timeline vs subagent buckets
@@ -1915,6 +1951,10 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
         } else {
           archiveDlog(`${tag} onHistory setting messages (history only, no pending prompt)`)
           setMessages(liveHistoryItems)
+          // A replay (e.g. another client's clientResume) proves the host has
+          // moved on; make sure a turn-end this panel missed does not leave
+          // "Thinking" up underneath the fresh transcript.
+          window.setTimeout(() => { void resyncWithHostRef.current('history', true) }, 0)
         }
       }),
 
@@ -1994,6 +2034,121 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
       })
     }
   }, [])
+
+  // Self-heal a turn whose end this panel never saw (GH #136): a stalled
+  // WebView or a dropped claude:turn-end leaves "Thinking…" up for hours while
+  // the host has long gone idle. Ask the host, and when it is idle (and the
+  // panel has been quiet long enough that this is not a just-sent prompt the
+  // host has not registered yet) close the turn the same way turn-end does,
+  // append the transcript rows the panel missed, and adopt any prompt the host
+  // is blocked on. Streaming panels only: an idle panel has nothing to heal.
+  const sessionIdRef = useRef(sessionId)
+  sessionIdRef.current = sessionId
+  const resyncInFlightRef = useRef(false)
+  const resyncQueuedRef = useRef(false)
+  const lastResyncAtRef = useRef(0)
+  const awaitingUserRef = useRef(awaitingUser)
+  awaitingUserRef.current = awaitingUser
+  const resyncWithHost = useCallback(async (trigger: string, force = false) => {
+    if (isCodexSession || !streamingRef.current) return
+    if (Date.now() - lastAgentEventAtRef.current < TURN_RESYNC_MIN_QUIET_MS) return
+    if (resyncInFlightRef.current) {
+      if (force) resyncQueuedRef.current = true
+      return
+    }
+    if (!force && Date.now() - lastResyncAtRef.current < TURN_RESYNC_MIN_INTERVAL_MS) return
+    const sid = sessionId
+    const tag = `[Claude:${sid.slice(0, 8)}]`
+    const seqAtStart = hostEventSeqRef.current
+    resyncInFlightRef.current = true
+    lastResyncAtRef.current = Date.now()
+    try {
+      const state = await host.claude.getSessionState(sid).catch(() => null)
+      // Anything that happened meanwhile is newer than this snapshot.
+      if (sessionIdRef.current !== sid || hostEventSeqRef.current !== seqAtStart || !state) return
+      adoptHostPendingPrompts(state as unknown as ClaudeSessionState)
+      const quietMs = Date.now() - lastAgentEventAtRef.current
+      const decision = decideTurnResync({
+        isStreaming: streamingRef.current,
+        awaitingUser: awaitingUserRef.current,
+        bargeInPending: bargeInPendingRef.current,
+        quietMs,
+      }, state)
+      if (!decision.clearStreaming) {
+        if (host.debug.isDebugMode === true) host.debug.log(`${tag} resync(${trigger}) no-op reason=${decision.reason}`)
+        return
+      }
+      const hostItems = normalizeMessageItems(state.messages)
+      const knownIds = new Set(allMessagesRef.current.map(m => m.id))
+      // Counts for the log line only; the update itself merges into the live
+      // window (archived rows are in knownIds, so they are never re-added).
+      const { appended, updated } = mergeMissedHostMessages(allMessagesRef.current, knownIds, hostItems)
+      if (appended > 0 || updated > 0) {
+        setMessages(prev => mergeMissedHostMessages(prev, knownIds, hostItems).messages)
+      }
+      for (const item of hostItems) {
+        const parentId = item.parentToolUseId
+        if (!parentId) continue
+        const bucket = subagentMessagesRef.current.get(parentId) || []
+        const idx = bucket.findIndex(m => m.id === item.id)
+        if (idx < 0) subagentMessagesRef.current.set(parentId, [...bucket, item])
+        else if (isToolCall(bucket[idx]) && isToolCall(item) && (bucket[idx] as ClaudeToolCall).status === 'running' && item.status !== 'running') {
+          subagentMessagesRef.current.set(parentId, bucket.map((m, i) => (i === idx ? { ...m, ...item } : m)))
+        }
+      }
+      applyTurnEndState('completed')
+      host.debug.log(`${tag} resync(${trigger}) cleared stale streaming: host idle, panel quiet ${Math.round(quietMs / 1000)}s; host messages=${hostItems.length} appended=${appended} completedTools=${updated}`)
+    } catch (err) {
+      // Callers fire and forget; a failed resync must only leave the panel as it was.
+      host.debug.log(`${tag} resync(${trigger}) failed: ${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      resyncInFlightRef.current = false
+      if (resyncQueuedRef.current) {
+        resyncQueuedRef.current = false
+        void resyncWithHostRef.current('queued', true)
+      }
+    }
+  }, [isCodexSession, sessionId, adoptHostPendingPrompts, applyTurnEndState])
+  resyncWithHostRef.current = resyncWithHost
+
+  // Triggers: the window becoming visible / focused again (the stalled-WebView
+  // case), the host API's resume approximation, and — only while a turn is
+  // quiet — a backing-off poll, since a long silent tool run (e.g. delegated
+  // Codex work) is legitimate and the host will keep saying "streaming".
+  useEffect(() => {
+    if (isCodexSession) return
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') void resyncWithHostRef.current('visible')
+    }
+    const onFocus = () => { void resyncWithHostRef.current('focus') }
+    document.addEventListener('visibilitychange', onVisibility)
+    window.addEventListener('focus', onFocus)
+    const unsubResume = host.system.onResume(() => { void resyncWithHostRef.current('resume') })
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility)
+      window.removeEventListener('focus', onFocus)
+      unsubResume()
+    }
+  }, [isCodexSession])
+  useEffect(() => {
+    if (isCodexSession || !isStreaming) return
+    let disposed = false
+    let delay = TURN_RESYNC_POLL_MS
+    let timer = 0
+    const tick = async () => {
+      if (disposed) return
+      const quiet = Date.now() - lastAgentEventAtRef.current >= TURN_RESYNC_MIN_QUIET_MS
+      if (quiet) await resyncWithHostRef.current('stall-poll')
+      if (disposed) return
+      delay = quiet ? Math.min(delay * 2, TURN_RESYNC_POLL_MAX_MS) : TURN_RESYNC_POLL_MS
+      timer = window.setTimeout(() => { void tick() }, delay)
+    }
+    timer = window.setTimeout(() => { void tick() }, delay)
+    return () => {
+      disposed = true
+      window.clearTimeout(timer)
+    }
+  }, [isCodexSession, isStreaming])
 
   const previousRemoteConnectedRef = useRef(isRemoteConnected)
   useEffect(() => {
