@@ -147,7 +147,7 @@
     "accountSwitchingError": "错误：{{error}}",
     "notifications": "通知",
     "showDockBadge": "Dock 图标显示待处理数量",
-    "showDockBadgeHint": "有待处理的操作（权限请求、用户问题）时，在 Dock 图标上显示数字徽章。",
+    "showDockBadgeHint": "有待处理的操作（权限请求、用户问题）或未读的代理完成通知时，在 Dock 图标上显示数字徽章。",
     "notifyOnComplete": "Agent 完成时发送系统通知",
     "notifyOnCompleteHint": "Agent 完成任务时发送系统通知。",
     "notifySound": "播放通知音效",
