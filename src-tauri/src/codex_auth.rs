@@ -4,7 +4,7 @@
 // Codex still accepts OPENAI_API_KEY, a previously stored key, or a Codex
 // OAuth token, so keep this as an internal Rust helper rather than a host API.
 
-use keyring::use_native_store;
+use crate::native_keyring::use_native_store;
 use keyring_core::Entry;
 #[cfg(test)]
 use serde_json::Value;
@@ -25,7 +25,7 @@ static SAFE_STORE_INIT: OnceLock<Result<(), String>> = OnceLock::new();
 
 fn ensure_safe_store() -> Result<(), String> {
     SAFE_STORE_INIT
-        .get_or_init(|| use_native_store(false).map_err(|err| format!("{err:?}")))
+        .get_or_init(|| use_native_store().map_err(|err| format!("{err:?}")))
         .clone()
 }
 

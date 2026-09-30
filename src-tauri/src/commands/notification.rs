@@ -267,18 +267,27 @@ async fn remote_notification_invoke(
 
 #[cfg(feature = "desktop")]
 #[tauri::command]
-pub async fn notification_list(app: AppHandle, window: WebviewWindow) -> Vec<NotificationEntry> {
+pub async fn notification_list(
+    app: AppHandle,
+    window: WebviewWindow,
+) -> Result<Vec<NotificationEntry>, String> {
     let label = window.label().to_string();
     if let Some(result) = remote_notification_invoke(&app, &label, "notification:list", Vec::new()).await {
+        // A remote window's bell mounts while the link is still dialing, so
+        // this call routinely fails with "not connected". That must surface as
+        // an error: an empty Ok list would become the renderer's "already seen"
+        // baseline, and the host's first notification:update would then toast
+        // every unread entry it has kept, however old.
         return match result {
-            Ok(value) => serde_json::from_value(value).unwrap_or_default(),
+            Ok(value) => serde_json::from_value(value)
+                .map_err(|err| format!("remote notification list is malformed: {err}")),
             Err(err) => {
                 log_tauri(&HostContext::from_app(app.clone()), &format!("[notification] remote list failed: {err}"));
-                Vec::new()
+                Err(err)
             }
         };
     }
-    notification_list_core(&HostContext::from_app(app))
+    Ok(notification_list_core(&HostContext::from_app(app)))
 }
 
 #[cfg(feature = "desktop")]

@@ -37,7 +37,7 @@ import { agentSendResultError, isMissingSessionCwdError } from '../utils/agent-s
 import { dispatchWorkerCommand, parseWorkerSlashCommand } from '../utils/worker-command'
 import { buildAskUserQnA, normalizePendingAskUser, wrapPreviewHtml } from './AskUserQuestion.helpers'
 import { AgentAskUserQnA } from './AgentAskUserQnA'
-import { autoContinueTurnEndKey, buildCollapsedOutputPreview, formatContentSize, formatElapsed, formatFullTimestamp, formatTimestamp, parseContentBlocks, parseShellInvocation, shouldAutoContinueForTrigger, shouldShowTimeDivider, splitSystemReminders, stringifyToolResult, summarizeToolSearchResult, toolDescription, toolInputContent, toolInputSummary, truncateMiddle } from './CodexAgentPanel.helpers'
+import { autoContinueTurnEndKey, buildCollapsedOutputPreview, clampToolOutputText, formatContentSize, formatElapsed, formatFullTimestamp, formatTimestamp, parseContentBlocks, parseShellInvocation, shouldAutoContinueForTrigger, shouldShowTimeDivider, splitSystemReminders, stringifyToolResult, summarizeToolSearchResult, toolDescription, toolInputContent, toolInputSummary, truncateMiddle } from './CodexAgentPanel.helpers'
 import { codexChangeDiffText, codexDiffLineClass, isCodexDiffChangeLine } from './CodexFileDiff.helpers'
 import { formatToolElapsed, toolRowLayout } from './CodexAgentPanel.helpers'
 import type { AutoContinueTrigger } from './CodexAgentPanel.helpers'
@@ -4454,7 +4454,7 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
             item.id,
             item.result,
             () => {
-              const raw = stringifyToolResult(item.result)
+              const raw = clampToolOutputText(stringifyToolResult(item.result))
               const normalizedRaw = parseContentBlocks(raw)
               const split = splitSystemReminders(normalizedRaw)
               return {

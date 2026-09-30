@@ -16,12 +16,21 @@ import { info as logInfo, warn as logWarn, error as logError } from '../lib/logg
 import { activeWorktrees, worktreeCreate, worktreeRehydrate, worktreeGetBranch, worktreeStatus, worktreeRemove } from './worktree.mjs'
 
 const CODEX_MODELS = [
+  { value: 'gpt-6.1-sol', displayName: 'GPT-6.1 Sol', description: 'Latest workhorse - coding and everyday work' },
+  { value: 'gpt-6.1-sol:272k', displayName: 'GPT-6.1 Sol (272K)', description: 'GPT-6.1 Sol - 272K context window' },
+  { value: 'gpt-6.1-sol:872k', displayName: 'GPT-6.1 Sol (872K)', description: 'GPT-6.1 Sol - 872K context window' },
   { value: 'gpt-6-astra', displayName: 'GPT-6 Astra', description: 'Most capable - complex, demanding work' },
   { value: 'gpt-6-astra:272k', displayName: 'GPT-6 Astra (272K)', description: 'GPT-6 Astra - 272K context window' },
   { value: 'gpt-6-astra:872k', displayName: 'GPT-6 Astra (872K)', description: 'GPT-6 Astra - 872K context window' },
-  { value: 'gpt-5.6-sol', displayName: 'GPT-5.6 Sol', description: 'Flagship - complex, open-ended work' },
-  { value: 'gpt-5.6-terra', displayName: 'GPT-5.6 Terra', description: 'Balanced - everyday workhorse' },
-  { value: 'gpt-5.6-luna', displayName: 'GPT-5.6 Luna', description: 'Fast - clear, repeatable work' },
+  { value: 'gpt-6-sol', displayName: 'GPT-6 Sol', description: 'Workhorse - near-Astra quality at lower cost' },
+  { value: 'gpt-6-sol:272k', displayName: 'GPT-6 Sol (272K)', description: 'GPT-6 Sol - 272K context window' },
+  { value: 'gpt-6-sol:872k', displayName: 'GPT-6 Sol (872K)', description: 'GPT-6 Sol - 872K context window' },
+  { value: 'gpt-6-luna', displayName: 'GPT-6 Luna', description: 'Fast and affordable - focused, high-volume tasks' },
+  { value: 'gpt-6-luna:272k', displayName: 'GPT-6 Luna (272K)', description: 'GPT-6 Luna - 272K context window' },
+  { value: 'gpt-6-luna:872k', displayName: 'GPT-6 Luna (872K)', description: 'GPT-6 Luna - 872K context window' },
+  { value: 'gpt-5.6-sol', displayName: 'GPT-5.6 Sol', description: 'Older generation - upgrade path is GPT-6 Sol' },
+  { value: 'gpt-5.6-terra', displayName: 'GPT-5.6 Terra', description: 'Older generation - balanced workhorse' },
+  { value: 'gpt-5.6-luna', displayName: 'GPT-5.6 Luna', description: 'Older generation - fast, repeatable work' },
   { value: 'gpt-5.3-codex-spark', displayName: 'GPT-5.3 Codex Spark', description: 'Research preview - near-instant coding' },
   { value: 'gpt-5.5', displayName: 'GPT-5.5', description: 'Previous frontier GPT-5.5' },
   { value: 'gpt-5.4', displayName: 'GPT-5.4', description: 'Legacy - API-key authentication only' },
@@ -32,7 +41,7 @@ const CODEX_MODELS = [
   { value: 'o3', displayName: 'o3', description: 'OpenAI o3 - reasoning model' },
   { value: 'gpt-4.1', displayName: 'GPT-4.1', description: 'OpenAI GPT-4.1' },
 ]
-const DEFAULT_CODEX_MODEL = 'gpt-5.6-sol'
+const DEFAULT_CODEX_MODEL = 'gpt-6-sol'
 
 // `<model>:<N>k` is a Better Agent Terminal preset (same shape as the Claude
 // picker). The Tauri host translates it into the app-server's per-thread
@@ -187,7 +196,7 @@ function stringifyCodexError(error, fallback = 'Unknown error') {
     }
   }
   if (/The model `[^`]+` does not exist or you do not have access to it/i.test(message)) {
-    return `${message}\n\nHint: try upgrading codex CLI (npm i -g @openai/codex) - new models like gpt-5.6-sol need a recent CLI.`
+    return `${message}\n\nHint: try upgrading codex CLI (npm i -g @openai/codex) - new models like gpt-6.1-sol need a recent CLI.`
   }
   return message
 }

@@ -8,8 +8,8 @@
 // per-turn API roundtrip — first send still pays init cost.
 //
 // Streaming-input also unlocks the SDK's control methods: `stopTask`,
-// `interrupt`, `setPermissionMode`, `setModel`. None of these work on
-// single-shot generators per the SDK contract (sdk.d.ts:2025-2049):
+// `interrupt`, `setPermissionMode`, `setModel`, `applyFlagSettings`. None of
+// these work on single-shot generators per the SDK contract (sdk.d.ts:2025-2049):
 // "only supported when streaming input/output is used."
 //
 // This module is unwired in the slice that introduced it — the sendMessage
@@ -148,6 +148,14 @@ export class LiveQuery {
       throw new Error('setModel not supported by this SDK build')
     }
     return this.generator.setModel(model)
+  }
+
+  async applyFlagSettings(settings) {
+    if (this._closed) throw new Error('LiveQuery is closed')
+    if (typeof this.generator?.applyFlagSettings !== 'function') {
+      throw new Error('applyFlagSettings not supported by this SDK build')
+    }
+    return this.generator.applyFlagSettings(settings)
   }
 
   close() {

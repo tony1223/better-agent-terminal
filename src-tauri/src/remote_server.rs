@@ -1,7 +1,7 @@
 use crate::account_store;
 use crate::app_data;
 use crate::claude_usage;
-use crate::codex_app_server::{should_handle_codex, CodexAppServerState};
+use crate::codex_app_server::{is_codex_agent_preset_id, should_handle_codex, CodexAppServerState};
 #[cfg(feature = "desktop")]
 use crate::commands::update as update_cmd;
 use crate::commands::{
@@ -2511,6 +2511,27 @@ fn codex_for_remote_session(
     Some(Ok((codex, session_id)))
 }
 
+// Catalog reads (models / efforts / sandbox modes / approval policies) happen
+// before a fresh Codex tab has started its session, so ownership alone would
+// answer with the Claude catalog. The client sends the tab's agent preset and
+// that routes the read to Codex as well.
+fn codex_for_remote_catalog(
+    ctx: &HostContext,
+    channel: &str,
+    params: &Value,
+) -> Option<Result<CodexAppServerState, String>> {
+    let session_id = match string_param(params, "sessionId", channel) {
+        Ok(value) => value,
+        Err(err) => return Some(Err(err)),
+    };
+    let codex = ctx.state::<CodexAppServerState>();
+    let preset = params.get("agentPreset").and_then(Value::as_str);
+    if !codex.is_owned(&session_id) && !is_codex_agent_preset_id(preset) {
+        return None;
+    }
+    Some(Ok(codex))
+}
+
 fn invoke_rust_for_remote(
     ctx: &HostContext,
     channel: &str,
@@ -2649,23 +2670,23 @@ fn invoke_rust_for_remote(
             };
             route.map(|(codex, session_id)| codex.stop_session(session_id))
         }
-        "claude:get-supported-models" => match codex_for_remote_session(ctx, channel, params) {
-            Some(route) => route.map(|(codex, _)| codex.supported_models()),
+        "claude:get-supported-models" => match codex_for_remote_catalog(ctx, channel, params) {
+            Some(route) => route.map(|codex| codex.supported_models()),
             None => Ok(claude_cmd::claude_builtin_models_native()),
         },
-        "claude:get-supported-efforts" => match codex_for_remote_session(ctx, channel, params) {
-            Some(route) => route.map(|(codex, _)| codex.supported_efforts()),
+        "claude:get-supported-efforts" => match codex_for_remote_catalog(ctx, channel, params) {
+            Some(route) => route.map(|codex| codex.supported_efforts()),
             None => Ok(claude_cmd::claude_supported_efforts_native()),
         },
         "claude:get-supported-codex-sandbox-modes" => {
-            match codex_for_remote_session(ctx, channel, params) {
-                Some(route) => route.map(|(codex, _)| codex.supported_sandbox_modes()),
+            match codex_for_remote_catalog(ctx, channel, params) {
+                Some(route) => route.map(|codex| codex.supported_sandbox_modes()),
                 None => Ok(claude_cmd::codex_supported_sandbox_modes_native()),
             }
         }
         "claude:get-supported-codex-approval-policies" => {
-            match codex_for_remote_session(ctx, channel, params) {
-                Some(route) => route.map(|(codex, _)| codex.supported_approval_policies()),
+            match codex_for_remote_catalog(ctx, channel, params) {
+                Some(route) => route.map(|codex| codex.supported_approval_policies()),
                 None => Ok(claude_cmd::codex_supported_approval_policies_native()),
             }
         }

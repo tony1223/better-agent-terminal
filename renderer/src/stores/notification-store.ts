@@ -27,6 +27,9 @@ export interface NotificationEntry {
 
 type Listener = () => void
 
+const BASELINE_RETRY_INTERVAL_MS = 2_000
+const BASELINE_RETRY_LIMIT = 30
+
 class NotificationStore {
   private entries: NotificationEntry[] = []
   private listeners: Set<Listener> = new Set()
@@ -36,6 +39,7 @@ class NotificationStore {
   // Ids already seen by this window. Null until the first list() so entries
   // that existed before this window opened never produce a toast.
   private knownIds: Set<string> | null = null
+  private baselineRetry: number | undefined
 
   getEntries(): NotificationEntry[] {
     return this.entries
@@ -57,11 +61,10 @@ class NotificationStore {
   async init(): Promise<void> {
     if (this.subscribed) return
     this.subscribed = true
-    try {
-      this.entries = await host.notification.list()
-      this.knownIds = new Set(this.entries.map(e => e.id))
-      this.emit()
-    } catch { /* ignore */ }
+    // A remote window's list call fails while the link is still dialing.
+    // Keep retrying briefly so the baseline comes from the host's list rather
+    // than from its first change, which would otherwise go unannounced.
+    if (!(await this.loadBaseline())) this.scheduleBaselineRetry(0)
     this.unsubscribePush = host.notification.onUpdate((entries) => {
       this.announceNew(entries)
       this.entries = entries
@@ -78,7 +81,31 @@ class NotificationStore {
     })
   }
 
+  private async loadBaseline(): Promise<boolean> {
+    try {
+      const entries = await host.notification.list()
+      const ids = entries.map(e => e.id)
+      this.knownIds = new Set(this.knownIds ? [...this.knownIds, ...ids] : ids)
+      this.entries = entries
+      this.emit()
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  private scheduleBaselineRetry(attempt: number): void {
+    if (attempt >= BASELINE_RETRY_LIMIT) return
+    this.baselineRetry = window.setTimeout(async () => {
+      this.baselineRetry = undefined
+      if (!this.subscribed || this.knownIds) return
+      if (!(await this.loadBaseline())) this.scheduleBaselineRetry(attempt + 1)
+    }, BASELINE_RETRY_INTERVAL_MS)
+  }
+
   dispose(): void {
+    if (this.baselineRetry !== undefined) window.clearTimeout(this.baselineRetry)
+    this.baselineRetry = undefined
     this.unsubscribePush?.()
     this.unsubscribePush = undefined
     this.unsubscribeActivate?.()
@@ -119,12 +146,16 @@ class NotificationStore {
   // this window has focus), notifySound (short beep alongside the toast).
   private announceNew(entries: NotificationEntry[]): void {
     const known = this.knownIds
-    this.knownIds = new Set(entries.map(e => e.id))
+    // Accumulate rather than replace: ids are unique per host process, and an
+    // update that momentarily lacks an entry (a different list, a partial
+    // replay) must not turn everything seen before into "new" again.
+    this.knownIds = new Set(known ? [...known, ...entries.map(e => e.id)] : entries.map(e => e.id))
     if (!known) return
     const isRemote = !!workspaceStore.getViewedRemoteProfileId()
     const now = Date.now()
+    const hostLatest = entries.reduce((max, e) => (Number.isFinite(e.timestamp) && e.timestamp > max ? e.timestamp : max), 0)
     const fresh = entries.filter(e => !known.has(e.id) && !e.read && e.kind !== 'remote-client' && this.isMine(e)
-      && shouldAnnounceNotification(e, isRemote, now))
+      && shouldAnnounceNotification(e, isRemote, now, hostLatest))
     if (fresh.length === 0) return
     const settings = settingsStore.getSettings()
     if (settings.notifyOnComplete === false) return

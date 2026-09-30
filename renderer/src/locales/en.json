@@ -396,6 +396,7 @@
 
   "terminal": {
     "doubleClickToRename": "Double-click to rename",
+    "rename": "Rename",
     "hidePromptBox": "Hide prompt box",
     "showPromptBox": "Show prompt box",
     "restartTerminal": "Restart terminal",

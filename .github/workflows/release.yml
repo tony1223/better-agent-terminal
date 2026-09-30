@@ -378,6 +378,12 @@ jobs:
           set -euo pipefail
           git clean -ffdx -e src-tauri/target
           git reset --hard HEAD
+          # Keep the compiled crates, but never the previous leg's installers.
+          # The two Windows legs share this target dir back to back, and the
+          # lightweight leg's renamed .exe made the all-in-one leg's
+          # normalize-release-asset-names fail with "target already exists"
+          # (first seen on v3.2.14-pre.2). Bundles are cheap to regenerate.
+          rm -rf src-tauri/target/release/bundle
           # Deliberately not `du -sh`: sizing 60k files on Windows costs more than
           # the line is worth. Existence is the only thing worth reporting, since
           # it is the difference between a ~10s and a ~200s cargo step.

@@ -393,10 +393,6 @@ fn legacy_v1_param_keys(channel: &str) -> Option<&'static [&'static str]> {
         | "claude:abort-session"
         | "claude:get-auto-continue"
         | "claude:reset-session"
-        | "claude:get-supported-models"
-        | "claude:get-supported-efforts"
-        | "claude:get-supported-codex-sandbox-modes"
-        | "claude:get-supported-codex-approval-policies"
         | "claude:get-account-info"
         | "claude:get-supported-commands"
         | "claude:get-supported-agents"
@@ -410,6 +406,12 @@ fn legacy_v1_param_keys(channel: &str) -> Option<&'static [&'static str]> {
         | "claude:is-resting"
         | "claude:clear-archive"
         | "worktree:status" => Some(&["sessionId"]),
+        // A fresh Codex tab asks for its catalogs before the host owns the
+        // session, so the tab's agent preset rides along to pick the runtime.
+        "claude:get-supported-models"
+        | "claude:get-supported-efforts"
+        | "claude:get-supported-codex-sandbox-modes"
+        | "claude:get-supported-codex-approval-policies" => Some(&["sessionId", "agentPreset"]),
         "claude:set-auto-continue" => Some(&["sessionId", "opts"]),
         "claude:set-permission-mode" => Some(&["sessionId", "mode"]),
         "claude:set-codex-sandbox-mode" => Some(&["sessionId", "mode"]),
@@ -838,6 +840,23 @@ mod tests {
         );
         assert_eq!(negotiate_remote_protocol(&["unknown".into()]), None);
         assert_eq!(RemoteProtocol::V2.as_str(), REMOTE_PROTOCOL_V2);
+    }
+
+    #[test]
+    fn catalog_reads_carry_the_agent_preset() {
+        // A fresh Codex tab reads its catalogs before the host owns the
+        // session, so the preset must survive the legacy arg mapping.
+        assert_eq!(
+            legacy_v1_args_to_params(
+                "agent:get-supported-models",
+                &[json!("session-1"), json!("codex-agent")]
+            ),
+            json!({ "sessionId": "session-1", "agentPreset": "codex-agent" })
+        );
+        assert_eq!(
+            legacy_v1_args_to_params("agent:get-supported-efforts", &[json!("session-1")]),
+            json!({ "sessionId": "session-1" })
+        );
     }
 
     #[test]

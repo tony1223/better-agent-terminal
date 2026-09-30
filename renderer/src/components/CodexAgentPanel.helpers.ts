@@ -308,6 +308,22 @@ export function parseContentBlocks(text: string): string {
   }
 }
 
+/**
+ * Upper bound on tool output the timeline will parse and lay out. The host
+ * already bounds Codex command output; this is the renderer's own guard so a
+ * multi-megabyte result from any backend cannot stall the main thread in
+ * content-block parsing, reminder splitting and link detection every render.
+ */
+export const TOOL_OUTPUT_RENDER_LIMIT = 256 * 1024
+
+export function clampToolOutputText(text: string, limit = TOOL_OUTPUT_RENDER_LIMIT): string {
+  if (text.length <= limit) return text
+  const head = Math.floor(limit / 4)
+  const tail = limit - head
+  const omitted = text.length - head - tail
+  return `${text.slice(0, head)}\n[... ${omitted} characters omitted by BAT ...]\n${text.slice(text.length - tail)}`
+}
+
 export function stringifyToolResult(result: unknown): string {
   if (typeof result === 'string') return result
   if (result == null) return ''

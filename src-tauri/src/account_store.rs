@@ -1,4 +1,4 @@
-use keyring::use_native_store;
+use crate::native_keyring::use_native_store;
 use keyring_core::Entry;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -119,7 +119,7 @@ static SAFE_STORE_INIT: OnceLock<Result<(), String>> = OnceLock::new();
 
 fn ensure_safe_store() -> Result<(), AccountStoreError> {
     let result =
-        SAFE_STORE_INIT.get_or_init(|| use_native_store(false).map_err(|err| format!("{err:?}")));
+        SAFE_STORE_INIT.get_or_init(|| use_native_store().map_err(|err| format!("{err:?}")));
     result.clone().map_err(AccountStoreError::SafeStorage)
 }
 

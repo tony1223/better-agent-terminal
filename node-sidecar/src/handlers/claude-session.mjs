@@ -17,7 +17,7 @@ import {
   clearSessionStream,
   resetSessionTranscript,
 } from '../lib/state.mjs'
-import { normalizeClaudeEffortMode, isUltracodeMode } from '../lib/claude-effort.mjs'
+import { normalizeClaudeEffortMode, isUltracodeMode, runtimeEffortForMode } from '../lib/claude-effort.mjs'
 import { autoCompactWindowForClaudeSelection, expectedContextWindowForModel, sdkModelForClaudeSelection } from '../lib/models.mjs'
 import { closeLiveQuery } from './claude-send.mjs'
 
@@ -524,7 +524,31 @@ registerHandler('claude.setEffort', async (params) => {
   if (typeof sessionId !== 'string' || !sessionId) return false
   if (isCodexSession(sessionId)) return setCodexEffort(params)
   const s = ensureSession(sessionId)
+  const prevEffort = s.effort
+  const wasUltracode = isUltracodeMode(s.effort) || s.ultracode === true
   applyEffortOptions(s, params)
+  if (s.effort === prevEffort) return true
+  // Effort is passed to the CLI when the query is built, so a running query
+  // keeps its old level unless it is told about the change. Apply it live
+  // through the flag-settings control method; toggling ultracode changes the
+  // query's settings layer (see buildQueryOptions), so that rebuilds instead.
+  const controlTarget = (s.liveQuery && !s.liveQuery.isClosed)
+    ? s.liveQuery
+    : (s.streaming ? s.currentQuery : null)
+  if (controlTarget) {
+    const isUltracode = isUltracodeMode(s.effort) || s.ultracode === true
+    if (isUltracode !== wasUltracode) {
+      closeLiveQuery(s)
+    } else if (typeof controlTarget.applyFlagSettings === 'function') {
+      try { await controlTarget.applyFlagSettings({ effortLevel: runtimeEffortForMode(s.effort) }) }
+      catch (err) {
+        logWarn(`setEffort control failed for ${sessionId}: ${err?.message || err}`)
+        closeLiveQuery(s)
+      }
+    } else {
+      closeLiveQuery(s)
+    }
+  }
   return true
 })
 

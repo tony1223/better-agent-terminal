@@ -16,11 +16,17 @@ import {
 } from '../renderer/src/utils/codex-models'
 
 function main() {
-  assert.equal(DEFAULT_CODEX_MODEL, 'gpt-5.6-sol')
+  assert.equal(DEFAULT_CODEX_MODEL, 'gpt-6-sol')
   assert.deepEqual(
-    CODEX_MODELS.slice(0, 5).map(model => model.value),
-    ['gpt-6-astra', 'gpt-6-astra:272k', 'gpt-6-astra:872k', 'gpt-5.6-sol', 'gpt-5.6-terra'],
-    'the Codex picker should lead with GPT-6 Astra and its context-window presets, then the GPT-5.6 family',
+    CODEX_MODELS.slice(0, 13).map(model => model.value),
+    [
+      'gpt-6.1-sol', 'gpt-6.1-sol:272k', 'gpt-6.1-sol:872k',
+      'gpt-6-astra', 'gpt-6-astra:272k', 'gpt-6-astra:872k',
+      'gpt-6-sol', 'gpt-6-sol:272k', 'gpt-6-sol:872k',
+      'gpt-6-luna', 'gpt-6-luna:272k', 'gpt-6-luna:872k',
+      'gpt-5.6-sol',
+    ],
+    'the Codex picker should follow the Codex catalog priority: GPT-6.1 Sol, Astra, GPT-6 Sol, Luna, then the GPT-5.6 family',
   )
   assert.ok(CODEX_MODELS.every(model => typeof model.description === 'string' && model.description.length > 0))
 
@@ -28,25 +34,27 @@ function main() {
   assert.deepEqual(splitCodexModelSelection('gpt-6-astra'), { model: 'gpt-6-astra', contextWindow: null })
   assert.deepEqual(splitCodexModelSelection('vendor:model'), { model: 'vendor:model', contextWindow: null })
 
-  // Codex rows: Astra collapses to one row with Default / 272K / 872K pills,
-  // everything from Sol down stays a plain single row.
+  // Codex rows: each GPT-6 model collapses to one row with Default / 272K /
+  // 872K pills, everything from GPT-5.6 Sol down stays a plain single row.
   const codexRows = groupCodexModelRows(CODEX_MODELS.map(model => ({ ...model, source: 'builtin' })))
-  assert.equal(codexRows[0].key, 'gpt-6-astra')
-  assert.equal(codexRows[0].label, 'GPT-6 Astra')
+  assert.deepEqual(codexRows.slice(0, 5).map(row => row.key), ['gpt-6.1-sol', 'gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol'])
+  assert.equal(codexRows[0].label, 'GPT-6.1 Sol')
+  assert.equal(codexRows[1].label, 'GPT-6 Astra')
   assert.deepEqual(
-    codexRows[0].options.map(option => [option.label, option.value, option.contextWindow]),
+    codexRows[1].options.map(option => [option.label, option.value, option.contextWindow]),
     [['Default', 'gpt-6-astra', null], ['272K', 'gpt-6-astra:272k', 272_000], ['872K', 'gpt-6-astra:872k', 872_000]],
   )
-  assert.equal(codexRows[1].key, 'gpt-5.6-sol')
-  assert.deepEqual(codexRows.slice(1).map(row => row.options.length), codexRows.slice(1).map(() => 0),
-    'only the Astra row carries window pills')
-  assert.equal(codexRows.length, CODEX_MODELS.length - 2, 'Astra presets collapse into a single row')
+  assert.deepEqual(codexRows.slice(0, 4).map(row => row.options.length), [3, 3, 3, 3], 'every GPT-6 row carries window pills')
+  assert.deepEqual(codexRows.slice(4).map(row => row.options.length), codexRows.slice(4).map(() => 0),
+    'rows from GPT-5.6 Sol down carry no window pills')
+  assert.equal(codexRows.length, CODEX_MODELS.length - 8, 'four GPT-6 preset pairs collapse into their rows')
   const codexGrouped = codexRows.flatMap(row => (row.options.length > 0 ? row.options.map(o => o.value) : [row.key]))
   assert.deepEqual([...codexGrouped].sort(), [...CODEX_MODELS.map(m => m.value)].sort(), 'grouping must preserve every Codex id')
-  assert.equal(codexModelValueForRow(codexRows[0], 872_000), 'gpt-6-astra:872k', 'carry the window when the row offers it')
-  assert.equal(codexModelValueForRow(codexRows[0], undefined), 'gpt-6-astra', 'no carried window → Default pill')
-  assert.equal(codexModelValueForRow(codexRows[0], null), 'gpt-6-astra')
-  assert.equal(codexModelValueForRow(codexRows[1], 872_000), 'gpt-5.6-sol', 'plain rows ignore the carried window')
+  assert.equal(codexModelValueForRow(codexRows[1], 872_000), 'gpt-6-astra:872k', 'carry the window when the row offers it')
+  assert.equal(codexModelValueForRow(codexRows[1], undefined), 'gpt-6-astra', 'no carried window → Default pill')
+  assert.equal(codexModelValueForRow(codexRows[1], null), 'gpt-6-astra')
+  assert.equal(codexModelValueForRow(codexRows[0], 872_000), 'gpt-6.1-sol:872k', 'GPT-6.1 Sol carries the window too')
+  assert.equal(codexModelValueForRow(codexRows[4], 872_000), 'gpt-5.6-sol', 'plain rows ignore the carried window')
 
   const rows = groupClaudeModelRows(CLAUDE_BUILTIN_MODELS)
 
@@ -99,6 +107,15 @@ function main() {
     'Fable 5.1 should use the published $10/$50 pricing and $0.25 cache-read price',
   )
   assert.match(panelSource, /'sonnet-5':\s+P\(2, 10\)/, 'Sonnet 5 pricing should be $2/$10 per MTok')
+  assert.match(panelSource, /'sonnet-5-5':\s+P\(2, 10\)/, 'Sonnet 5.5 keeps the Sonnet 5 price of $2/$10 per MTok')
+  assert.ok(
+    panelSource.indexOf("includes('sonnet-5-5')") < panelSource.indexOf("includes('sonnet-5')"),
+    'the Sonnet 5.5 pricing branch must be checked before the broader Sonnet 5 branch',
+  )
+  const sonnet55 = rows.find(r => r.key === 'claude-sonnet-5-5')
+  assert.ok(sonnet55, 'Sonnet 5.5 row should exist')
+  assert.deepEqual(sonnet55!.options.map(o => o.label), ['200K', '300K', '1M'])
+  assert.equal(rows.indexOf(sonnet55!) + 1, rows.findIndex(r => r.key === 'claude-sonnet-5'), 'Sonnet 5.5 sits directly above Sonnet 5')
 
   // Opus 4.7 is the widest model today (200K/300K/400K/1M).
   const opus47 = rows.find(r => r.key === 'claude-opus-4-7')

@@ -64,7 +64,11 @@ flate2 = "1"
 pbkdf2 = "0.12"
 sha1 = "0.10"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
-keyring = "4.0.0"
+# keyring-core plus the one native store each platform actually uses. The
+# `keyring` 4.x meta-crate that used to sit here also pulled in db-keystore
+# (turso, a SQLite reimplementation, and tantivy, a full-text search engine),
+# clap, rpassword and friends -- about 200 crates we never called, only to
+# expose `use_native_store`. See src/native_keyring.rs for the replacement.
 keyring-core = "1.0.0"
 notify = "8"
 get_if_addrs = "0.5"
@@ -83,8 +87,15 @@ rustls-pki-types = "1.14.1"
 [target.'cfg(windows)'.dependencies]
 # Direct WinRT toasts on Windows so a click can bring the BAT window back
 # (tauri-plugin-notification's desktop path has no activation callback).
+windows-native-keyring-store = "1.0.0"
 tauri-winrt-notification = "0.7"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Memory", "Win32_System_SystemInformation", "Wdk_System_SystemServices"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { version = "1.0.0", features = ["keychain"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+linux-keyutils-keyring-store = "1.0.0"
 
 [dev-dependencies]
 # portable-pty exposes anyhow::Result in its public mockable traits. Keep this
@@ -134,6 +145,17 @@ headless = []
 # ~4 seconds thereafter. Drop the line and take the default the next time the
 # caches are being invalidated anyway — a Cargo.lock change or a toolchain bump.
 codegen-units = 256
+# Abort on panic instead of unwinding. Measured on this crate alone (release,
+# -j 4 to match a 4-vCPU CI runner, deps already built, incremental off):
+#   unwind (default)   lib 153.0s   bin+link 51.7s   total 204.7s
+#   abort              lib  95.6s   bin+link 24.6s   total 120.2s   (-41%)
+# The crate has ~230 async fns, and every await point needs a landing pad and
+# unwind table under `unwind`; `abort` drops all of that. Behavioural change:
+# a panic now terminates the process instead of only the panicking task or
+# command. Nothing here relies on catch_unwind, and the panic hook in
+# panic_log.rs still runs (hooks fire before the abort), so the crash is
+# still logged.
+panic = "abort"
 # Drop debug symbols from the shipped binary. Smaller .exe / .dmg, no
 # compile-time cost.
 strip = "symbols"

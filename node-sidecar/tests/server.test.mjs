@@ -40,9 +40,15 @@ async function inProcess() {
   const { getCodexSupportedModels, splitCodexModelSelection } = await import('../src/handlers/codex.mjs')
   const codexModels = getCodexSupportedModels()
   assert.deepEqual(
-    codexModels.slice(0, 5).map(model => model.value),
-    ['gpt-6-astra', 'gpt-6-astra:272k', 'gpt-6-astra:872k', 'gpt-5.6-sol', 'gpt-5.6-terra'],
-    'Codex sidecar model catalog should lead with GPT-6 Astra and its context-window presets',
+    codexModels.slice(0, 13).map(model => model.value),
+    [
+      'gpt-6.1-sol', 'gpt-6.1-sol:272k', 'gpt-6.1-sol:872k',
+      'gpt-6-astra', 'gpt-6-astra:272k', 'gpt-6-astra:872k',
+      'gpt-6-sol', 'gpt-6-sol:272k', 'gpt-6-sol:872k',
+      'gpt-6-luna', 'gpt-6-luna:272k', 'gpt-6-luna:872k',
+      'gpt-5.6-sol',
+    ],
+    'Codex sidecar model catalog should follow the Codex catalog priority with GPT-6 context-window presets',
   )
   assert.deepEqual(splitCodexModelSelection('gpt-6-astra:872k'), { model: 'gpt-6-astra', contextWindow: 872_000 })
   assert.deepEqual(splitCodexModelSelection('gpt-6-astra'), { model: 'gpt-6-astra', contextWindow: null })
@@ -1726,7 +1732,7 @@ async function inProcess() {
   // setPermissionMode + setModel forward to the active query's control
   // methods when one is open. autoCompactWindow closes the current query
   // because it is applied through queryOptions.env on the next turn.
-  const ctrlCalls = { permissionMode: [], model: [], close: 0 }
+  const ctrlCalls = { permissionMode: [], model: [], flagSettings: [], close: 0 }
   let releaseCtrlResult
   let ctrlTurnStartedResolve
   const ctrlTurnStarted = new Promise(resolve => { ctrlTurnStartedResolve = resolve })
@@ -1744,6 +1750,7 @@ async function inProcess() {
       })()
       gen.setPermissionMode = async (m) => { ctrlCalls.permissionMode.push(m) }
       gen.setModel = async (m) => { ctrlCalls.model.push(m) }
+      gen.applyFlagSettings = async (settings) => { ctrlCalls.flagSettings.push(settings) }
       gen.close = () => { ctrlCalls.close++; releaseCtrlResult?.() }
       return gen
     },
@@ -1768,6 +1775,18 @@ async function inProcess() {
     await dispatch({ jsonrpc: '2.0', id: 238, method: 'claude.setModel',
       params: { sessionId: 'ctrl-1', model: 'claude-opus-4-7' } })
     assert.deepEqual(ctrlCalls.model, ['claude-opus-4-7[1m]'])
+    // Effort change applies live through the flag-settings layer and keeps
+    // the running query; legacy levels are translated like on a fresh build.
+    await dispatch({ jsonrpc: '2.0', id: 2381, method: 'claude.setEffort',
+      params: { sessionId: 'ctrl-1', effort: 'low' } })
+    await dispatch({ jsonrpc: '2.0', id: 2382, method: 'claude.setEffort',
+      params: { sessionId: 'ctrl-1', effort: 'xhigh' } })
+    // Re-selecting the current level is a no-op.
+    await dispatch({ jsonrpc: '2.0', id: 2383, method: 'claude.setEffort',
+      params: { sessionId: 'ctrl-1', effort: 'xhigh' } })
+    assert.deepEqual(ctrlCalls.flagSettings, [{ effortLevel: 'low' }, { effortLevel: 'max' }])
+    assert.equal(ctrlCalls.close, 0, 'a live effort change must not close the query')
+    assert.ok(mod.sessions.get('ctrl-1').currentQuery, 'query stays open after a live effort change')
     // autoCompactWindow change closes the current query (env var requires rebuild).
     await dispatch({ jsonrpc: '2.0', id: 239, method: 'claude.setModel',
       params: { sessionId: 'ctrl-1', autoCompactWindow: 200000 } })
@@ -1860,7 +1879,7 @@ async function inProcess() {
     // Control methods (stopTask / interrupt / setPermissionMode /
     // setModel / close) are also stubbed so we can assert call counts.
     function makeStreamingFakeSdk({ failOnFirstTurn = false } = {}) {
-      const calls = { query: 0, stopTask: [], interrupt: 0, setPermissionMode: [], setModel: [], close: 0 }
+      const calls = { query: 0, stopTask: [], interrupt: 0, setPermissionMode: [], setModel: [], applyFlagSettings: [], close: 0 }
       let turnIdx = 0
       const sdk = {
         query({ prompt, options }) {
@@ -1888,6 +1907,7 @@ async function inProcess() {
           gen.interrupt = async () => { calls.interrupt++ }
           gen.setPermissionMode = async (m) => { calls.setPermissionMode.push(m) }
           gen.setModel = async (m) => { calls.setModel.push(m) }
+          gen.applyFlagSettings = async (settings) => { calls.applyFlagSettings.push(settings) }
           gen.close = () => { calls.close++ }
           return gen
         },
@@ -1964,6 +1984,8 @@ async function inProcess() {
         assert.deepEqual(calls.setPermissionMode, ['plan'])
         await lq.setModel('claude-opus-4-7')
         assert.deepEqual(calls.setModel, ['claude-opus-4-7'])
+        await lq.applyFlagSettings({ effortLevel: 'low' })
+        assert.deepEqual(calls.applyFlagSettings, [{ effortLevel: 'low' }])
       } finally { lq.close() }
 
       // After close, control methods reject — they'd hit a dead generator
@@ -1972,6 +1994,7 @@ async function inProcess() {
       await assert.rejects(lq.interrupt(), /closed/)
       await assert.rejects(lq.setPermissionMode('default'), /closed/)
       await assert.rejects(lq.setModel('x'), /closed/)
+      await assert.rejects(lq.applyFlagSettings({ effortLevel: 'low' }), /closed/)
       await assert.rejects(lq.push({ type: 'user', message: { role: 'user', content: 'late' } }), /closed/)
     }
 

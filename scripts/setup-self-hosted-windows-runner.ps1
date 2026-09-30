@@ -156,6 +156,22 @@ if (Get-Command git -ErrorAction SilentlyContinue) {
 git config --system core.longpaths true
 Ok 'git core.longpaths = true'
 
+# The workflow's `shell: bash` steps resolve `bash` from PATH. A default Git for
+# Windows install only puts Git\cmd on PATH (git.exe, no bash.exe), so without
+# this the very first bash step fails with "bash: command not found".
+$gitRoot = Split-Path (Split-Path (Get-Command git).Source -Parent) -Parent
+$gitBin = Join-Path $gitRoot 'bin'
+if (-not (Test-Path (Join-Path $gitBin 'bash.exe'))) {
+  throw "bash.exe not found under $gitBin. Reinstall Git for Windows with Git Bash."
+}
+$machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+if (($machinePath -split ';') -notcontains $gitBin) {
+  [Environment]::SetEnvironmentVariable('Path', "$machinePath;$gitBin", 'Machine')
+  Ok "added $gitBin to the machine PATH"
+} else {
+  Ok "$gitBin already on the machine PATH"
+}
+
 # --------------------------------------------------------------- build tools
 # The msvc Rust target links with link.exe. rustup will happily install the
 # toolchain without it and then fail at the link step with "linker `link.exe` not
@@ -259,6 +275,18 @@ if (Test-Path (Join-Path $RunnerDir '.runner')) {
   Ok "registered as $env:COMPUTERNAME with labels: self-hosted,Windows,X64,$labelList"
 }
 
+# ------------------------------------------------------------------ job PATH
+# A service's environment is fixed when services.exe starts, so a PATH edited
+# above is invisible to the runner until a reboot. The runner reads `.path` in
+# its root instead when present, which makes the job PATH explicit and current.
+Step 'Runner job PATH'
+$jobPath = @(
+  ([Environment]::GetEnvironmentVariable('Path', 'Machine') -split ';') +
+  ([Environment]::GetEnvironmentVariable('Path', 'User') -split ';')
+) | Where-Object { $_ } | Select-Object -Unique
+Set-Content -Path (Join-Path $RunnerDir '.path') -Value ($jobPath -join ';') -NoNewline -Encoding ascii
+Ok "wrote $(Join-Path $RunnerDir '.path') ($($jobPath.Count) entries)"
+
 # -------------------------------------------------------------------- service
 Step 'Runner service'
 $svc = Get-Service -Name 'actions.runner.*' -ErrorAction SilentlyContinue
@@ -266,7 +294,8 @@ if (-not $svc) {
   Warn 'no runner service found. If config.cmd was skipped above this is expected.'
 } else {
   foreach ($s in $svc) {
-    if ($s.Status -ne 'Running') { Start-Service $s.Name }
+    # Restart rather than start, so an existing service picks up a new .path.
+    if ($s.Status -eq 'Running') { Restart-Service $s.Name -Force } else { Start-Service $s.Name }
     Set-Service -Name $s.Name -StartupType Automatic
     Ok "$($s.Name): $((Get-Service $s.Name).Status), startup Automatic"
   }

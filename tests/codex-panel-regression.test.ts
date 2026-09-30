@@ -10,6 +10,7 @@ import {
   normalizeClaudeModelSelection,
   sdkModelForClaudeSelection,
 } from '../renderer/src/utils/claude-model-presets'
+import { clampToolOutputText, TOOL_OUTPUT_RENDER_LIMIT } from '../renderer/src/components/CodexAgentPanel.helpers'
 
 async function main() {
   const source = await readFile('renderer/src/components/CodexAgentPanel.tsx', 'utf8')
@@ -530,6 +531,23 @@ async function main() {
       `${panel} should no longer coerce an absent isStreaming to false`,
     )
   }
+
+  // A runaway tool output must never reach content-block parsing and link
+  // detection at full size: both panels clamp the raw result before the
+  // per-(id, result) render cache computes anything from it.
+  for (const panelSource of [source, claudeSource]) {
+    assert.ok(panelSource.includes('const raw = clampToolOutputText(stringifyToolResult(item.result))'),
+      'tool render cache must clamp the raw result before parsing it')
+  }
+  assert.equal(clampToolOutputText('short'), 'short')
+  const exact = 'x'.repeat(TOOL_OUTPUT_RENDER_LIMIT)
+  assert.equal(clampToolOutputText(exact), exact, 'at the limit stays verbatim')
+  const huge = 'H'.repeat(1000) + 'M'.repeat(5_000_000) + 'T'.repeat(1000)
+  const clamped = clampToolOutputText(huge)
+  assert.ok(clamped.length <= TOOL_OUTPUT_RENDER_LIMIT + 80, 'clamped output is bounded')
+  assert.ok(clamped.startsWith('H'.repeat(1000)), 'head kept')
+  assert.ok(clamped.endsWith('T'.repeat(1000)), 'tail kept')
+  assert.match(clamped, /\[\.\.\. \d+ characters omitted by BAT \.\.\.\]/)
 
   console.log('Codex panel regression: passed')
 }

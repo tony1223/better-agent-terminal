@@ -380,6 +380,7 @@
 
   "terminal": {
     "doubleClickToRename": "双击以重命名",
+    "rename": "重命名",
     "hidePromptBox": "隐藏提示输入框",
     "showPromptBox": "显示提示输入框",
     "restartTerminal": "重新启动终端",

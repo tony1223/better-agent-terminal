@@ -14,7 +14,7 @@ use crate::host_context::HostContext;
 #[cfg(feature = "desktop")]
 use crate::window_registry;
 #[cfg(not(test))]
-use keyring::use_native_store;
+use crate::native_keyring::use_native_store;
 use keyring_core::Entry as KeyringEntry;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -312,7 +312,7 @@ fn forget_cached_remote_token(profile_id: &str) {
 #[cfg(not(test))]
 fn ensure_profile_safe_store() -> Result<(), String> {
     PROFILE_SAFE_STORE_INIT
-        .get_or_init(|| use_native_store(false).map_err(|err| format!("{err:?}")))
+        .get_or_init(|| use_native_store().map_err(|err| format!("{err:?}")))
         .clone()
 }
 

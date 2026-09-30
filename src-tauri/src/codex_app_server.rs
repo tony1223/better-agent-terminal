@@ -32,7 +32,9 @@ use tauri::Manager;
 
 use crate::host_context::HostContext;
 
-const DEFAULT_CODEX_MODEL: &str = "gpt-5.6-sol";
+// Codex's catalog marks the GPT-5.6 tier "older generation" with an upgrade
+// pointer to gpt-6-sol; new sessions without an explicit choice follow it.
+const DEFAULT_CODEX_MODEL: &str = "gpt-6-sol";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const TURN_START_TIMEOUT: Duration = Duration::from_secs(60);
 const PENDING_TURN_INTERRUPT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -40,12 +42,20 @@ const PENDING_TURN_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const MSG_BUFFER_CAP: usize = 300;
 const DEFAULT_CODEX_CONTEXT_WINDOW: u64 = 1_000_000;
 const GPT_5_6_CONTEXT_WINDOW_FALLBACK: u64 = 353_400;
-// Codex CLI 0.153.x bundled catalog value for gpt-6-astra. The API model page
-// advertises 1,050,000 but Codex itself runs the model on this window; the
-// app-server reports the authoritative number in token usage updates.
-const GPT_6_ASTRA_CONTEXT_WINDOW_FALLBACK: u64 = 272_000;
+// Codex CLI 0.159.x bundled catalog value for the whole GPT-6 family (Astra,
+// 6.1 Sol, Sol, Luna). The API model pages advertise 1,050,000 but Codex itself
+// runs them on this window; the app-server reports the authoritative number in
+// token usage updates.
+const GPT_6_CONTEXT_WINDOW_FALLBACK: u64 = 272_000;
 const DEFAULT_CODEX_REASONING_SUMMARY: &str = "auto";
 const COMMAND_OUTPUT_EMIT_INTERVAL: Duration = Duration::from_millis(100);
+/// Per-command output kept for the live tool row: the first bytes plus a
+/// sliding window of the latest ones. Everything in between is dropped and
+/// counted. Without a bound, a chatty command made every 100ms snapshot below
+/// clone, serialise and post the entire output to the webview, which is how a
+/// long-running Bash tool took the host past 90 GiB and froze every window.
+const COMMAND_OUTPUT_HEAD_LIMIT: usize = 16 * 1024;
+const COMMAND_OUTPUT_TAIL_LIMIT: usize = 48 * 1024;
 const CODEX_CONNECTION_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const CODEX_IDLE_REAPER_INTERVAL: Duration = Duration::from_secs(30);
 const CODEX_ACCOUNT_STATE_FILE: &str = "codex-account-state.json";
@@ -55,6 +65,79 @@ static CODEX_TEMP_IMAGE_COUNTER: AtomicU64 = AtomicU64::new(0);
 static CODEX_HOME_PROBE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 type ReplySender = Sender<Result<Value, String>>;
+
+/// Output of one command execution, bounded to head + tail (see the limits above).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct BoundedCommandOutput {
+    head: String,
+    tail: String,
+    dropped_bytes: usize,
+}
+
+impl BoundedCommandOutput {
+    fn from_text(text: &str) -> Self {
+        let mut output = Self::default();
+        output.push_str(text);
+        output
+    }
+
+    fn push_str(&mut self, delta: &str) {
+        let mut rest = delta;
+        if self.head.len() < COMMAND_OUTPUT_HEAD_LIMIT {
+            let cut = floor_char_boundary(rest, COMMAND_OUTPUT_HEAD_LIMIT - self.head.len());
+            self.head.push_str(&rest[..cut]);
+            rest = &rest[cut..];
+        }
+        if rest.is_empty() {
+            return;
+        }
+        if rest.len() >= COMMAND_OUTPUT_TAIL_LIMIT {
+            // The delta alone fills the window: nothing already buffered survives.
+            let start = ceil_char_boundary(rest, rest.len() - COMMAND_OUTPUT_TAIL_LIMIT);
+            self.dropped_bytes += self.tail.len() + start;
+            self.tail.clear();
+            self.tail.push_str(&rest[start..]);
+            return;
+        }
+        self.tail.push_str(rest);
+        if self.tail.len() > COMMAND_OUTPUT_TAIL_LIMIT {
+            let cut = ceil_char_boundary(&self.tail, self.tail.len() - COMMAND_OUTPUT_TAIL_LIMIT);
+            self.tail.drain(..cut);
+            self.dropped_bytes += cut;
+        }
+    }
+
+    fn snapshot(&self) -> String {
+        if self.dropped_bytes == 0 {
+            let mut text = String::with_capacity(self.head.len() + self.tail.len());
+            text.push_str(&self.head);
+            text.push_str(&self.tail);
+            return text;
+        }
+        format!(
+            "{}\n[... {} bytes of output omitted by BAT ...]\n{}",
+            self.head, self.dropped_bytes, self.tail
+        )
+    }
+}
+
+/// Largest `i <= index` that is a char boundary of `text`.
+fn floor_char_boundary(text: &str, index: usize) -> usize {
+    let mut i = index.min(text.len());
+    while !text.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// Smallest `i >= index` that is a char boundary of `text`.
+fn ceil_char_boundary(text: &str, index: usize) -> usize {
+    let mut i = index.min(text.len());
+    while !text.is_char_boundary(i) {
+        i += 1;
+    }
+    i
+}
 
 fn should_reap_codex_connection(
     idle_for: Duration,
@@ -366,7 +449,7 @@ struct CodexSession {
     last_turn_duration_ms: Option<u64>,
     messages: Vec<Value>,
     temporary_image_paths: Vec<PathBuf>,
-    command_outputs: HashMap<String, String>,
+    command_outputs: HashMap<String, BoundedCommandOutput>,
     command_output_last_emit: HashMap<String, Instant>,
     runtime_status: Option<String>,
     runtime_message: Option<String>,
@@ -537,7 +620,7 @@ fn codex_context_window_for_model(model: &str) -> u64 {
     match codex_base_model(model) {
         // The app-server reports the authoritative value in token usage updates.
         // Keep this fallback accurate before the first update arrives.
-        "gpt-6-astra" => GPT_6_ASTRA_CONTEXT_WINDOW_FALLBACK,
+        "gpt-6.1-sol" | "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna" => GPT_6_CONTEXT_WINDOW_FALLBACK,
         "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna" => GPT_5_6_CONTEXT_WINDOW_FALLBACK,
         "gpt-5.5"
         | "gpt-5.4"
@@ -2880,13 +2963,24 @@ impl CodexAppServerState {
     }
 
     pub fn supported_models(&self) -> Value {
+        // Order follows the Codex 0.159 catalog priority; the GPT-6 family shares
+        // one API window, so every member gets the 272K / 872K presets Astra had.
         let mut models = vec![
+            json!({ "value": "gpt-6.1-sol", "displayName": "GPT-6.1 Sol", "description": "Latest workhorse - coding and everyday work", "source": "builtin" }),
+            json!({ "value": "gpt-6.1-sol:272k", "displayName": "GPT-6.1 Sol (272K)", "description": "GPT-6.1 Sol - 272K context window", "source": "builtin" }),
+            json!({ "value": "gpt-6.1-sol:872k", "displayName": "GPT-6.1 Sol (872K)", "description": "GPT-6.1 Sol - 872K context window", "source": "builtin" }),
             json!({ "value": "gpt-6-astra", "displayName": "GPT-6 Astra", "description": "Most capable - complex, demanding work", "source": "builtin" }),
             json!({ "value": "gpt-6-astra:272k", "displayName": "GPT-6 Astra (272K)", "description": "GPT-6 Astra - 272K context window", "source": "builtin" }),
             json!({ "value": "gpt-6-astra:872k", "displayName": "GPT-6 Astra (872K)", "description": "GPT-6 Astra - 872K context window", "source": "builtin" }),
-            json!({ "value": "gpt-5.6-sol", "displayName": "GPT-5.6 Sol", "description": "Flagship - complex, open-ended work", "source": "builtin" }),
-            json!({ "value": "gpt-5.6-terra", "displayName": "GPT-5.6 Terra", "description": "Balanced - everyday workhorse", "source": "builtin" }),
-            json!({ "value": "gpt-5.6-luna", "displayName": "GPT-5.6 Luna", "description": "Fast - clear, repeatable work", "source": "builtin" }),
+            json!({ "value": "gpt-6-sol", "displayName": "GPT-6 Sol", "description": "Workhorse - near-Astra quality at lower cost", "source": "builtin" }),
+            json!({ "value": "gpt-6-sol:272k", "displayName": "GPT-6 Sol (272K)", "description": "GPT-6 Sol - 272K context window", "source": "builtin" }),
+            json!({ "value": "gpt-6-sol:872k", "displayName": "GPT-6 Sol (872K)", "description": "GPT-6 Sol - 872K context window", "source": "builtin" }),
+            json!({ "value": "gpt-6-luna", "displayName": "GPT-6 Luna", "description": "Fast and affordable - focused, high-volume tasks", "source": "builtin" }),
+            json!({ "value": "gpt-6-luna:272k", "displayName": "GPT-6 Luna (272K)", "description": "GPT-6 Luna - 272K context window", "source": "builtin" }),
+            json!({ "value": "gpt-6-luna:872k", "displayName": "GPT-6 Luna (872K)", "description": "GPT-6 Luna - 872K context window", "source": "builtin" }),
+            json!({ "value": "gpt-5.6-sol", "displayName": "GPT-5.6 Sol", "description": "Older generation - upgrade path is GPT-6 Sol", "source": "builtin" }),
+            json!({ "value": "gpt-5.6-terra", "displayName": "GPT-5.6 Terra", "description": "Older generation - balanced workhorse", "source": "builtin" }),
+            json!({ "value": "gpt-5.6-luna", "displayName": "GPT-5.6 Luna", "description": "Older generation - fast, repeatable work", "source": "builtin" }),
             json!({ "value": "gpt-5.3-codex-spark", "displayName": "GPT-5.3 Codex Spark", "description": "Research preview - near-instant coding", "source": "builtin" }),
             json!({ "value": "gpt-5.5", "displayName": "GPT-5.5", "description": "Previous frontier GPT-5.5", "source": "builtin" }),
             json!({ "value": "gpt-5.4", "displayName": "GPT-5.4", "description": "Legacy - API-key authentication only", "source": "builtin" }),
@@ -7029,7 +7123,7 @@ fn handle_command_execution_output_delta(
         session
             .command_output_last_emit
             .insert(item_id.to_string(), now);
-        let output_snapshot = output.clone();
+        let output_snapshot = output.snapshot();
         update_session_tool_call(
             session,
             item_id,
@@ -7072,8 +7166,11 @@ fn completed_command_execution_result(
             session.command_outputs.remove(&item_id)
         })
     };
-    raw.or(accumulated)
-        .map(|value| sanitize_terminal_output(&value))
+    // The app-server's aggregatedOutput is the whole thing; bound it the same
+    // way as the streamed buffer so a completed tool row cannot carry megabytes
+    // into session state, the webview and every remote client.
+    raw.map(|value| BoundedCommandOutput::from_text(&sanitize_terminal_output(&value)).snapshot())
+        .or_else(|| accumulated.map(|output| output.snapshot()))
 }
 
 fn handle_item_started(
@@ -7762,6 +7859,82 @@ mod tests {
     use std::env;
 
     #[test]
+    fn bounded_command_output_keeps_small_output_verbatim() {
+        let mut output = BoundedCommandOutput::default();
+        output.push_str("hello ");
+        output.push_str("world");
+        assert_eq!(output.snapshot(), "hello world");
+        assert_eq!(output.dropped_bytes, 0);
+    }
+
+    #[test]
+    fn bounded_command_output_keeps_head_and_latest_tail() {
+        let mut output = BoundedCommandOutput::default();
+        let total = 4 * 1024 * 1024;
+        let mut last_chunk = String::new();
+        for i in 0..(total / 1024) {
+            let chunk = format!("{i:07}") + &"x".repeat(1024 - 8) + "\n";
+            assert_eq!(chunk.len(), 1024);
+            output.push_str(&chunk);
+            last_chunk = chunk;
+        }
+        let snapshot = output.snapshot();
+        assert!(snapshot.starts_with("0000000xxx"), "head kept");
+        assert!(snapshot.ends_with(&last_chunk), "latest output kept");
+        assert!(snapshot.contains("bytes of output omitted by BAT"));
+        assert_eq!(output.head.len(), COMMAND_OUTPUT_HEAD_LIMIT);
+        assert_eq!(output.tail.len(), COMMAND_OUTPUT_TAIL_LIMIT);
+        assert_eq!(
+            output.head.len() + output.tail.len() + output.dropped_bytes,
+            total
+        );
+        assert!(snapshot.len() < COMMAND_OUTPUT_HEAD_LIMIT + COMMAND_OUTPUT_TAIL_LIMIT + 128);
+    }
+
+    #[test]
+    fn bounded_command_output_single_huge_delta_keeps_only_the_end() {
+        let mut output = BoundedCommandOutput::default();
+        output.push_str("old tail");
+        let huge = "a".repeat(COMMAND_OUTPUT_HEAD_LIMIT)
+            + &"b".repeat(COMMAND_OUTPUT_TAIL_LIMIT * 3)
+            + "END";
+        output.push_str(&huge);
+        let snapshot = output.snapshot();
+        assert!(snapshot.starts_with("old tail"));
+        assert!(snapshot.ends_with("END"));
+        assert_eq!(output.tail.len(), COMMAND_OUTPUT_TAIL_LIMIT);
+        assert_eq!(
+            output.head.len() + output.tail.len() + output.dropped_bytes,
+            8 + huge.len()
+        );
+    }
+
+    #[test]
+    fn bounded_command_output_never_splits_a_multibyte_char() {
+        let mut output = BoundedCommandOutput::default();
+        // 3-byte chars whose count is not aligned to either limit.
+        let chunk = "\u{4e2d}".repeat(1000);
+        for _ in 0..40 {
+            output.push_str(&chunk);
+        }
+        let snapshot = output.snapshot();
+        assert!(output.head.len() <= COMMAND_OUTPUT_HEAD_LIMIT);
+        assert!(output.tail.len() <= COMMAND_OUTPUT_TAIL_LIMIT);
+        assert!(snapshot.chars().all(|c| c == '\u{4e2d}' || c.is_ascii()));
+    }
+
+    #[test]
+    fn bounded_command_output_from_text_bounds_completed_results() {
+        let text = "h".repeat(COMMAND_OUTPUT_HEAD_LIMIT)
+            + &"m".repeat(1_000_000)
+            + &"t".repeat(COMMAND_OUTPUT_TAIL_LIMIT);
+        let snapshot = BoundedCommandOutput::from_text(&text).snapshot();
+        assert!(snapshot.starts_with(&"h".repeat(COMMAND_OUTPUT_HEAD_LIMIT)));
+        assert!(snapshot.ends_with(&"t".repeat(COMMAND_OUTPUT_TAIL_LIMIT)));
+        assert!(snapshot.contains("[... 1000000 bytes of output omitted by BAT ...]"));
+    }
+
+    #[test]
     fn reasoning_part_separator_only_between_parts() {
         assert_eq!(reasoning_part_separator(""), None);
         assert_eq!(reasoning_part_separator("   "), None);
@@ -8108,9 +8281,15 @@ mod tests {
             .iter()
             .filter_map(|model| model.get("value").and_then(Value::as_str))
             .collect::<Vec<_>>();
-        assert!(values.contains(&"gpt-6-astra"));
-        assert!(values.contains(&"gpt-6-astra:272k"));
-        assert!(values.contains(&"gpt-6-astra:872k"));
+        assert_eq!(values[0], "gpt-6.1-sol", "catalog priority 1 leads the picker");
+        for base in ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna"] {
+            assert!(values.contains(&base), "{base} missing");
+            let k272 = format!("{base}:272k");
+            let k872 = format!("{base}:872k");
+            assert!(values.contains(&k272.as_str()), "{k272} missing");
+            assert!(values.contains(&k872.as_str()), "{k872} missing");
+        }
+        assert!(!values.iter().any(|value| value.starts_with("gpt-6-pro")));
         assert!(!values.iter().any(|value| value.starts_with("gpt-5.6-sol:")));
         assert!(values.contains(&"gpt-5.6-sol"));
         assert!(values.contains(&"gpt-5.6-terra"));
@@ -8189,9 +8368,12 @@ mod tests {
         assert_eq!(split_codex_model_selection("vendor:model"), ("vendor:model", None));
         assert_eq!(split_codex_model_selection("gpt-6-astra:0k"), ("gpt-6-astra:0k", None));
         assert_eq!(codex_context_window_for_model("gpt-6-astra:872k"), 872_000);
+        assert_eq!(codex_context_window_for_model("gpt-6.1-sol:872k"), 872_000);
+        assert_eq!(codex_context_window_for_model("gpt-6-sol"), GPT_6_CONTEXT_WINDOW_FALLBACK);
+        assert_eq!(codex_context_window_for_model("gpt-6-luna"), GPT_6_CONTEXT_WINDOW_FALLBACK);
         assert_eq!(
             codex_context_window_for_model("gpt-6-astra"),
-            GPT_6_ASTRA_CONTEXT_WINDOW_FALLBACK
+            GPT_6_CONTEXT_WINDOW_FALLBACK
         );
     }
 

@@ -25,6 +25,7 @@ mod host_context;
 mod latency_store;
 mod linux_wayland;
 mod log_file;
+mod native_keyring;
 mod network_addresses;
 mod panic_log;
 mod path_guard;
