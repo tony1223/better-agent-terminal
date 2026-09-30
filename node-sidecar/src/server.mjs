@@ -38,8 +38,8 @@ import {
   expectedContextWindowForModel,
   sdkModelForClaudeSelection,
 } from './lib/models.mjs'
-import { dataUrlToContentBlock, loadInstalledPlugins, __setPluginsPathOverrideForTests } from './lib/plugins.mjs'
-import { scanSkills, parseSkillFrontmatter } from './lib/skills.mjs'
+import { dataUrlToContentBlock, loadInstalledPlugins, loadInstalledPluginEntries, __setPluginsPathOverrideForTests } from './lib/plugins.mjs'
+import { scanSkills, scanPluginSkills, parseSkillFrontmatter } from './lib/skills.mjs'
 
 const CLAUDE_HANDLER_MODULES = [
   './handlers/claude-auth.mjs',
@@ -149,9 +149,11 @@ export {
   // plugins / images
   dataUrlToContentBlock,
   loadInstalledPlugins,
+  loadInstalledPluginEntries,
   __setPluginsPathOverrideForTests,
   // skills
   scanSkills,
+  scanPluginSkills,
   parseSkillFrontmatter,
 }
 

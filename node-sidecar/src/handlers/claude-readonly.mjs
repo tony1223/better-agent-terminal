@@ -12,7 +12,8 @@ import { registerHandler, sendEvent } from '../lib/protocol.mjs'
 import { loadAnthropicSdk } from '../lib/sdk-loader.mjs'
 import { sessions, buildSessionMeta } from '../lib/state.mjs'
 import { CLAUDE_BUILTIN_MODELS, CLAUDE_BUILTIN_DEDUP_KEYS } from '../lib/models.mjs'
-import { scanSkills } from '../lib/skills.mjs'
+import { scanSkills, scanPluginSkills } from '../lib/skills.mjs'
+import { loadInstalledPluginEntries } from '../lib/plugins.mjs'
 import { stripTaskNotifications, isHarnessNoiseUserText } from '../lib/harness-noise.mjs'
 import { activeWorktrees, worktreeStatus, worktreeRemove } from './worktree.mjs'
 import {
@@ -353,6 +354,49 @@ registerHandler('claude.getAccountInfo', async (params) =>
   })
 )
 
+// Live MCP server status from the running Query. NOT cached — status flips
+// after reconnect/toggle and we want the panel to reflect it immediately.
+// Returns [] when there's no live query yet (no session / pre-first-message).
+registerHandler('claude.getMcpServerStatus', async (params) => {
+  if (isCodexSession(String(params?.sessionId ?? ''))) return []
+  const result = await readFromLiveQuery(params?.sessionId, 'mcpServerStatus', [])
+  return Array.isArray(result) ? result : []
+})
+
+// Invoke a method with arguments on the live Query. Unlike readFromLiveQuery
+// this rejects (rather than returning a fallback) when no live query exists,
+// so the renderer can surface "start a session first" to the user.
+function callLiveQuery(sessionId, method, args) {
+  if (typeof sessionId !== 'string' || !sessionId) {
+    return Promise.reject(new Error('MCP control requires an active session'))
+  }
+  const session = sessions.get(sessionId)
+  const q = session?.currentQuery
+  if (!q || typeof q[method] !== 'function') {
+    return Promise.reject(new Error('MCP control unavailable: no live session — send a message first'))
+  }
+  return Promise.resolve(q[method](...args))
+}
+
+// Reconnect a single MCP server by name on the live session.
+registerHandler('claude.reconnectMcpServer', async (params) => {
+  if (isCodexSession(String(params?.sessionId ?? ''))) return { ok: false, error: 'codex session' }
+  const name = String(params?.name ?? '')
+  if (!name) throw new Error('claude.reconnectMcpServer: missing name')
+  await callLiveQuery(params?.sessionId, 'reconnectMcpServer', [name])
+  return { ok: true }
+})
+
+// Enable/disable a single MCP server by name on the live session (runtime).
+registerHandler('claude.toggleMcpServer', async (params) => {
+  if (isCodexSession(String(params?.sessionId ?? ''))) return { ok: false, error: 'codex session' }
+  const name = String(params?.name ?? '')
+  if (!name) throw new Error('claude.toggleMcpServer: missing name')
+  const enabled = params?.enabled === true
+  await callLiveQuery(params?.sessionId, 'toggleMcpServer', [name, enabled])
+  return { ok: true, enabled }
+})
+
 registerHandler('claude.getWorktreeStatus', async (params) => {
   const sessionId = String(params?.sessionId ?? '')
   if (!sessionId) return null
@@ -362,8 +406,10 @@ registerHandler('claude.getWorktreeStatus', async (params) => {
   return worktreeStatus(sessionId)
 })
 // claude.scanSkills walks <cwd>/.claude/skills + ~/.claude/skills and
-// returns SkillMeta entries. No SDK dep — pure fs walk + YAML
-// frontmatter parsing.
+// returns SkillMeta entries. It also walks each installed plugin's
+// commands/ + skills/ dirs (namespaced "<plugin>:<name>", scope 'plugin')
+// so plugin-provided commands surface in the sidebar without a live SDK
+// query. No SDK dep — pure fs walk + YAML frontmatter parsing.
 function restoreSessionCwdAfterWorktreeCleanup(sessionId, info) {
   const session = sessions.get(sessionId)
   if (!session?.options || typeof session.options !== 'object') return
@@ -400,6 +446,16 @@ registerHandler('claude.cleanupWorktree', async (params) => {
 })
 registerHandler('claude.scanSkills', async (params) => {
   const cwd = typeof params?.cwd === 'string' ? params.cwd : ''
-  if (!cwd) return []
-  return scanSkills(cwd)
+  const [local, plugin] = await Promise.all([
+    cwd ? scanSkills(cwd) : Promise.resolve([]),
+    loadInstalledPluginEntries().then(scanPluginSkills),
+  ])
+  const seen = new Set()
+  const out = []
+  for (const s of [...local, ...plugin]) {
+    if (seen.has(s.name)) continue
+    seen.add(s.name)
+    out.push(s)
+  }
+  return out
 })

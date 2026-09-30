@@ -470,6 +470,7 @@
     "projectCommands": "專案",
     "globalCommands": "全域",
     "customCommands": "自訂",
+    "pluginCommands": "外掛命令",
     "bundledCommands": "內建",
     "waitingForUpdate": "等待對話更新中... 在 Agent 對話框送出任意訊息（如 ping）即可載入 skills。",
     "noSession": "啟動 Agent 對話後即可查看可用 skills。",
@@ -483,6 +484,27 @@
     "waitingForUpdate": "等待 session 更新... 在 Agent 聊天中傳送任何訊息以載入 agents。",
     "noSession": "啟動 Agent session 以查看可用的 agents。",
     "noMatchingAgents": "沒有符合的 agents"
+  },
+
+  "mcp": {
+    "title": "MCP",
+    "searchServers": "搜尋 MCP 伺服器...",
+    "noServers": "未設定 MCP 伺服器",
+    "noWorkspace": "開啟工作區以查看 MCP 伺服器",
+    "noMatching": "沒有符合的 MCP 伺服器",
+    "statusConfigured": "已設定",
+    "tools": "工具",
+    "reconnect": "重新連線",
+    "enable": "啟用",
+    "disable": "停用",
+    "controlHint": "啟用/停用會跨工作階段保留。即時狀態與重新連線需要使用中的工作階段。",
+    "status": {
+      "connected": "已連線",
+      "failed": "失敗",
+      "needs-auth": "需要驗證",
+      "pending": "連線中",
+      "disabled": "已停用"
+    }
   },
 
   "about": {

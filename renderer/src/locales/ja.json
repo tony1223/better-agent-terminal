@@ -458,6 +458,7 @@
     "projectCommands": "プロジェクト",
     "globalCommands": "グローバル",
     "customCommands": "カスタム",
+    "pluginCommands": "プラグインのコマンド",
     "bundledCommands": "組み込み",
     "waitingForUpdate": "セッションの更新を待っています... エージェントチャットでメッセージ（例: ping）を送信するとスキルを読み込めます。",
     "noSession": "エージェントセッションを開始すると、利用可能なスキルが表示されます。",
@@ -471,6 +472,27 @@
     "noSession": "利用可能なエージェントを表示するには、エージェントセッションを開始してください。",
     "noMatchingAgents": "一致するエージェントがありません"
   },
+  "mcp": {
+    "title": "MCP",
+    "searchServers": "MCP サーバーを検索...",
+    "noServers": "MCP サーバーが設定されていません",
+    "noWorkspace": "MCP サーバーを表示するにはワークスペースを開いてください",
+    "noMatching": "一致する MCP サーバーがありません",
+    "statusConfigured": "設定済み",
+    "tools": "ツール",
+    "reconnect": "再接続",
+    "enable": "有効化",
+    "disable": "無効化",
+    "controlHint": "有効/無効の設定はセッションをまたいで保持されます。ライブステータスと再接続にはアクティブなセッションが必要です。",
+    "status": {
+      "connected": "接続済み",
+      "failed": "失敗",
+      "needs-auth": "要認証",
+      "pending": "接続中",
+      "disabled": "無効"
+    }
+  },
+
   "about": {
     "title": "このアプリについて",
     "appName": "Better Agent Terminal",

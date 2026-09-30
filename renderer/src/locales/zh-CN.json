@@ -451,6 +451,7 @@
     "projectCommands": "项目",
     "globalCommands": "全局",
     "customCommands": "自定义",
+    "pluginCommands": "插件命令",
     "bundledCommands": "内置",
     "waitingForUpdate": "等待对话更新中... 在 Agent 对话框发送任意消息（如 ping）即可加载 skills。",
     "noSession": "启动 Agent 对话后即可查看可用 skills。",
@@ -464,6 +465,27 @@
     "waitingForUpdate": "等待 session 更新... 在 Agent 聊天中发送任何消息以加载 agents。",
     "noSession": "启动 Agent session 以查看可用的 agents。",
     "noMatchingAgents": "没有匹配的 agents"
+  },
+
+  "mcp": {
+    "title": "MCP",
+    "searchServers": "搜索 MCP 服务器...",
+    "noServers": "未配置 MCP 服务器",
+    "noWorkspace": "打开工作区以查看 MCP 服务器",
+    "noMatching": "没有匹配的 MCP 服务器",
+    "statusConfigured": "已配置",
+    "tools": "工具",
+    "reconnect": "重新连接",
+    "enable": "启用",
+    "disable": "禁用",
+    "controlHint": "启用/禁用会跨会话保留。实时状态与重新连接需要活动会话。",
+    "status": {
+      "connected": "已连接",
+      "failed": "失败",
+      "needs-auth": "需要认证",
+      "pending": "连接中",
+      "disabled": "已禁用"
+    }
   },
 
   "about": {

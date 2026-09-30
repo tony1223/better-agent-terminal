@@ -471,6 +471,7 @@
     "projectCommands": "Project",
     "globalCommands": "Global",
     "customCommands": "Custom",
+    "pluginCommands": "Plugin commands",
     "bundledCommands": "Built-in",
     "waitingForUpdate": "Waiting for session update... Send any message in the Agent chat (e.g. ping) to load skills.",
     "noSession": "Start an Agent session to see available skills.",
@@ -484,6 +485,27 @@
     "waitingForUpdate": "Waiting for session update... Send any message in the Agent chat to load agents.",
     "noSession": "Start an Agent session to see available agents.",
     "noMatchingAgents": "No matching agents"
+  },
+
+  "mcp": {
+    "title": "MCP",
+    "searchServers": "Search MCP servers...",
+    "noServers": "No MCP servers configured",
+    "noWorkspace": "Open a workspace to see MCP servers",
+    "noMatching": "No matching MCP servers",
+    "statusConfigured": "configured",
+    "tools": "tools",
+    "reconnect": "Reconnect",
+    "enable": "Enable",
+    "disable": "Disable",
+    "controlHint": "Enable/disable persists across sessions. Live status & reconnect need an active session.",
+    "status": {
+      "connected": "connected",
+      "failed": "failed",
+      "needs-auth": "needs auth",
+      "pending": "connecting",
+      "disabled": "disabled"
+    }
   },
 
   "about": {

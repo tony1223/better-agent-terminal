@@ -14,6 +14,7 @@ import { SettingsPanel } from './components/SettingsPanel'
 import { SnippetSidebar } from './components/SnippetPanel'
 import { SkillsPanel } from './components/SkillsPanel'
 import { AgentsPanel } from './components/AgentsPanel'
+import { McpPanel } from './components/McpPanel'
 import { MarkdownPreviewPanel } from './components/MarkdownPreviewPanel'
 import { WorkspaceEnvDialog } from './components/WorkspaceEnvDialog'
 import { ResizeHandle } from './components/ResizeHandle'
@@ -165,8 +166,8 @@ export default function App() {
   const [envDialogWorkspaceId, setEnvDialogWorkspaceId] = useState<string | null>(null)
   // Right sidebar tabs
   const [showSnippetSidebar] = useState(true)
-  const [rightPanelTab, setRightPanelTab] = useState<'snippets' | 'skills' | 'agents'>(() => {
-    return (localStorage.getItem('bat-right-panel-tab') as 'snippets' | 'skills' | 'agents') || 'snippets'
+  const [rightPanelTab, setRightPanelTab] = useState<'snippets' | 'skills' | 'agents' | 'mcp'>(() => {
+    return (localStorage.getItem('bat-right-panel-tab') as 'snippets' | 'skills' | 'agents' | 'mcp') || 'snippets'
   })
   // Markdown preview in right panel
   const [previewMarkdown, setPreviewMarkdown] = useState<{
@@ -330,7 +331,7 @@ export default function App() {
     })
   }, [])
 
-  const handleRightPanelTabChange = useCallback((tab: 'snippets' | 'skills' | 'agents') => {
+  const handleRightPanelTabChange = useCallback((tab: 'snippets' | 'skills' | 'agents' | 'mcp') => {
     setRightPanelTab(tab)
     localStorage.setItem('bat-right-panel-tab', tab)
     // If collapsed, expand when switching tabs
@@ -1406,6 +1407,9 @@ export default function App() {
                   <button className={`right-sidebar-tab${effectiveTab === 'agents' ? ' active' : ''}`} onClick={() => handleRightPanelTabChange('agents')}>
                     {t('agents.title')}
                   </button>
+                  <button className={`right-sidebar-tab${effectiveTab === 'mcp' ? ' active' : ''}`} onClick={() => handleRightPanelTabChange('mcp')}>
+                    {t('mcp.title', 'MCP')}
+                  </button>
                 </>
               )}
               <button className="right-sidebar-collapse" onClick={handleSnippetCollapse} title={t('snippets.collapsePanel')}>&raquo;</button>
@@ -1423,6 +1427,12 @@ export default function App() {
               ) : effectiveTab === 'agents' ? (
                 <AgentsPanel
                   isVisible={true}
+                  activeSessionId={state.focusedTerminalId ?? null}
+                />
+              ) : effectiveTab === 'mcp' ? (
+                <McpPanel
+                  isVisible={true}
+                  activeCwd={state.activeWorkspaceId ? state.workspaces.find(w => w.id === state.activeWorkspaceId)?.folderPath ?? null : null}
                   activeSessionId={state.focusedTerminalId ?? null}
                 />
               ) : (

@@ -16,13 +16,19 @@ import { join } from 'node:path'
 let _pluginsPathOverrideForTests = null
 export function __setPluginsPathOverrideForTests(p) { _pluginsPathOverrideForTests = p }
 
+// Shared on-disk read for both the SDK loader and the entry loader.
+// Throws on missing file / bad JSON — callers swallow and return empty.
+async function readInstalledPluginsData() {
+  const path = _pluginsPathOverrideForTests
+    || join(homedir(), '.claude', 'plugins', 'installed_plugins.json')
+  const raw = await readFile(path, 'utf-8')
+  return JSON.parse(raw)
+}
+
 export async function loadInstalledPlugins() {
   const installedPlugins = []
   try {
-    const path = _pluginsPathOverrideForTests
-      || join(homedir(), '.claude', 'plugins', 'installed_plugins.json')
-    const raw = await readFile(path, 'utf-8')
-    const data = JSON.parse(raw)
+    const data = await readInstalledPluginsData()
     if (data && data.plugins && typeof data.plugins === 'object') {
       for (const entries of Object.values(data.plugins)) {
         if (!Array.isArray(entries)) continue
@@ -37,6 +43,33 @@ export async function loadInstalledPlugins() {
     // Missing file / parse error — fine, no plugins installed.
   }
   return installedPlugins
+}
+
+// Like loadInstalledPlugins, but preserves each plugin's namespace name
+// alongside its install path. The namespace is the key before '@' in
+// installed_plugins.json (e.g. "everything-claude-code@everything-claude-code"
+// → "everything-claude-code"), matching the SDK's "<plugin>:<command>"
+// command naming. Used to scan plugin-provided commands/skills for the
+// sidebar. Returns [{ name, path }]; [] on any read/parse failure.
+export async function loadInstalledPluginEntries() {
+  const out = []
+  try {
+    const data = await readInstalledPluginsData()
+    if (data && data.plugins && typeof data.plugins === 'object') {
+      for (const [key, entries] of Object.entries(data.plugins)) {
+        if (!Array.isArray(entries)) continue
+        const name = String(key).split('@')[0] || String(key)
+        for (const entry of entries) {
+          if (entry && typeof entry.installPath === 'string') {
+            out.push({ name, path: entry.installPath })
+          }
+        }
+      }
+    }
+  } catch {
+    // Missing file / parse error — no plugins installed.
+  }
+  return out
 }
 
 // Mirror of electron/claude-agent-manager.ts dataUrlToContentBlock — parse
