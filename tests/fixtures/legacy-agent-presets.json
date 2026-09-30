@@ -1,0 +1,120 @@
+{
+  "presets": [
+    {
+      "id": "claude-code",
+      "name": "Claude Agent",
+      "icon": "✦",
+      "color": "#d97706",
+      "command": "claude --continue",
+      "suggested": true,
+      "backend": "sdk"
+    },
+    {
+      "id": "claude-code-v2",
+      "name": "Claude Agent V2",
+      "icon": "✦",
+      "color": "#eab308",
+      "debug": true,
+      "backend": "sdk"
+    },
+    {
+      "id": "claude-channel",
+      "name": "Claude Channel Agent",
+      "icon": "◉",
+      "color": "#f97316",
+      "debug": true,
+      "backend": "channel"
+    },
+    {
+      "id": "claude-cli-agent",
+      "name": "Claude CLI Agent (Subscription)",
+      "icon": "◈",
+      "color": "#d97706",
+      "debug": true,
+      "backend": "cli"
+    },
+    {
+      "id": "claude-code-worktree",
+      "name": "Claude Agent (Worktree)",
+      "icon": "✦",
+      "color": "#22c55e",
+      "backend": "sdk",
+      "needsGitRepo": true
+    },
+    {
+      "id": "claude-cli",
+      "name": "Claude CLI",
+      "icon": "▶",
+      "color": "#d97706",
+      "suggested": true,
+      "backend": "cli"
+    },
+    {
+      "id": "claude-cli-worktree",
+      "name": "Claude CLI (Worktree)",
+      "icon": "▶",
+      "color": "#22c55e",
+      "backend": "cli",
+      "needsGitRepo": true
+    },
+    {
+      "id": "codex-agent",
+      "name": "Codex Agent",
+      "icon": "⬡",
+      "color": "#10a37f",
+      "backend": "sdk"
+    },
+    {
+      "id": "codex-agent-worktree",
+      "name": "Codex Agent (Worktree)",
+      "icon": "⬡",
+      "color": "#10a37f",
+      "backend": "sdk",
+      "needsGitRepo": true
+    },
+    {
+      "id": "codex-fugu",
+      "name": "Codex Fugu Agent",
+      "icon": "🐡",
+      "color": "#06b6d4",
+      "backend": "sdk",
+      "debug": true
+    },
+    {
+      "id": "codex-cli",
+      "name": "Codex CLI",
+      "icon": "▶",
+      "color": "#10a37f",
+      "backend": "pty"
+    },
+    {
+      "id": "none",
+      "name": "Terminal",
+      "icon": "⌘",
+      "color": "#888888"
+    }
+  ],
+  "visible": [
+    "claude-code",
+    "claude-code-worktree",
+    "claude-cli",
+    "claude-cli-worktree",
+    "codex-agent",
+    "codex-agent-worktree",
+    "codex-cli",
+    "none"
+  ],
+  "visibleDebug": [
+    "claude-code",
+    "claude-channel",
+    "claude-cli-agent",
+    "claude-code-worktree",
+    "claude-cli",
+    "claude-cli-worktree",
+    "codex-agent",
+    "codex-agent-worktree",
+    "codex-fugu",
+    "codex-cli",
+    "none"
+  ]
+}

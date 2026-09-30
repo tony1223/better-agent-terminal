@@ -3,6 +3,8 @@
  * 定義支援的 AI Agent CLI 工具及其屬性
  */
 
+import { listPresets, type PanelKind, type ProviderId } from '../../../shared/providers.mjs';
+
 export interface AgentPreset {
   id: string;
   name: string;
@@ -13,108 +15,15 @@ export interface AgentPreset {
   suggested?: boolean;    // 標記為推薦選項
   backend?: 'sdk' | 'channel' | 'cli' | 'pty';  // sdk = ClaudeAgentPanel, channel = Claude Channel Agent, cli = bundled CLI PTY, pty = generic PTY
   needsGitRepo?: boolean; // 需要 git repo（worktree 類）
+  provider?: ProviderId | null; // shared/providers.json provider id; null = plain terminal
+  panel?: PanelKind;      // which panel renders the session
+  hidden?: boolean;       // kept for lookups of persisted sessions, never offered in pickers
 }
 
 export type AgentPresetId = 'claude-code' | 'claude-channel' | 'claude-cli-agent' | 'claude-code-v2' | 'claude-code-worktree' | 'claude-cli' | 'claude-cli-worktree' | 'codex-agent' | 'codex-agent-worktree' | 'codex-fugu' | 'codex-cli' | 'none';
 
-export const AGENT_PRESETS: AgentPreset[] = [
-  {
-    id: 'claude-code',
-    name: 'Claude Agent',
-    icon: '✦',
-    color: '#d97706',
-    command: 'claude --continue',
-    suggested: true,
-    backend: 'sdk',
-  },
-  {
-    id: 'claude-code-v2',
-    name: 'Claude Agent V2',
-    icon: '✦',
-    color: '#eab308',
-    debug: true,
-    backend: 'sdk',
-  },
-  {
-    id: 'claude-channel',
-    name: 'Claude Channel Agent',
-    icon: '◉',
-    color: '#f97316',
-    debug: true,
-    backend: 'channel',
-  },
-  {
-    id: 'claude-cli-agent',
-    name: 'Claude CLI Agent (Subscription)',
-    icon: '◈',
-    color: '#d97706',
-    debug: true,
-    backend: 'cli',
-  },
-  {
-    id: 'claude-code-worktree',
-    name: 'Claude Agent (Worktree)',
-    icon: '✦',
-    color: '#22c55e',
-    backend: 'sdk',
-    needsGitRepo: true,
-  },
-  {
-    id: 'claude-cli',
-    name: 'Claude CLI',
-    icon: '▶',
-    color: '#d97706',
-    suggested: true,
-    backend: 'cli',
-  },
-  {
-    id: 'claude-cli-worktree',
-    name: 'Claude CLI (Worktree)',
-    icon: '▶',
-    color: '#22c55e',
-    backend: 'cli',
-    needsGitRepo: true,
-  },
-  {
-    id: 'codex-agent',
-    name: 'Codex Agent',
-    icon: '⬡',
-    color: '#10a37f',
-    backend: 'sdk',
-  },
-  {
-    id: 'codex-agent-worktree',
-    name: 'Codex Agent (Worktree)',
-    icon: '⬡',
-    color: '#10a37f',
-    backend: 'sdk',
-    needsGitRepo: true,
-  },
-  {
-    // Experimental Sakana Fugu provider via the Codex app-server (BAT_DEBUG
-    // only). Same SDK runtime as Codex Agent; defaults to the "fugu" model
-    // which routes thread/start through provider "sakana".
-    id: 'codex-fugu',
-    name: 'Codex Fugu Agent',
-    icon: '🐡',
-    color: '#06b6d4',
-    backend: 'sdk',
-    debug: true,
-  },
-  {
-    id: 'codex-cli',
-    name: 'Codex CLI',
-    icon: '▶',
-    color: '#10a37f',
-    backend: 'pty',
-  },
-  {
-    id: 'none',
-    name: 'Terminal',
-    icon: '⌘',
-    color: '#888888',
-  },
-];
+// Presets are declared in shared/providers.json (see docs/providers.md).
+export const AGENT_PRESETS: AgentPreset[] = listPresets();
 
 export function getAgentPreset(id: string): AgentPreset | undefined {
   return AGENT_PRESETS.find(p => p.id === id);
@@ -130,5 +39,5 @@ export function getVisiblePresets(isDebugOverride?: boolean): AgentPreset[] {
     ? isDebugOverride
     : typeof window !== 'undefined'
       && (window as unknown as { batAppAPI?: { debug?: { isDebugMode?: boolean } } }).batAppAPI?.debug?.isDebugMode === true
-  return AGENT_PRESETS.filter(p => p.id !== 'claude-code-v2' && (!p.debug || isDebug))
+  return AGENT_PRESETS.filter(p => !p.hidden && (!p.debug || isDebug))
 }

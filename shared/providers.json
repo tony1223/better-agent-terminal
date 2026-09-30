@@ -1,0 +1,147 @@
+{
+  "schemaVersion": 1,
+  "providers": [
+    {
+      "id": "claude",
+      "label": "Claude",
+      "auth": "claude-oauth",
+      "usage": "anthropic-oauth",
+      "defaultEnabled": true
+    },
+    {
+      "id": "codex",
+      "label": "Codex",
+      "auth": "codex-oauth",
+      "usage": "codex-rate-limits",
+      "defaultEnabled": true
+    },
+    {
+      "id": "fugu",
+      "label": "Fugu (Sakana)",
+      "auth": "api-key",
+      "usage": "none",
+      "defaultEnabled": true,
+      "debugOnly": true
+    }
+  ],
+  "presets": [
+    {
+      "id": "claude-code",
+      "provider": "claude",
+      "panel": "claude-agent",
+      "name": "Claude Agent",
+      "icon": "✦",
+      "color": "#d97706",
+      "command": "claude --continue",
+      "suggested": true,
+      "backend": "sdk"
+    },
+    {
+      "id": "claude-code-v2",
+      "provider": "claude",
+      "panel": "claude-agent",
+      "hidden": true,
+      "name": "Claude Agent V2",
+      "icon": "✦",
+      "color": "#eab308",
+      "debug": true,
+      "backend": "sdk"
+    },
+    {
+      "id": "claude-channel",
+      "provider": "claude",
+      "panel": "claude-channel",
+      "name": "Claude Channel Agent",
+      "icon": "◉",
+      "color": "#f97316",
+      "debug": true,
+      "backend": "channel"
+    },
+    {
+      "id": "claude-cli-agent",
+      "provider": "claude",
+      "panel": "claude-cli-agent",
+      "name": "Claude CLI Agent (Subscription)",
+      "icon": "◈",
+      "color": "#d97706",
+      "debug": true,
+      "backend": "cli"
+    },
+    {
+      "id": "claude-code-worktree",
+      "provider": "claude",
+      "panel": "claude-agent",
+      "name": "Claude Agent (Worktree)",
+      "icon": "✦",
+      "color": "#22c55e",
+      "backend": "sdk",
+      "needsGitRepo": true
+    },
+    {
+      "id": "claude-cli",
+      "provider": "claude",
+      "panel": "claude-cli",
+      "name": "Claude CLI",
+      "icon": "▶",
+      "color": "#d97706",
+      "suggested": true,
+      "backend": "cli"
+    },
+    {
+      "id": "claude-cli-worktree",
+      "provider": "claude",
+      "panel": "claude-cli",
+      "name": "Claude CLI (Worktree)",
+      "icon": "▶",
+      "color": "#22c55e",
+      "backend": "cli",
+      "needsGitRepo": true
+    },
+    {
+      "id": "codex-agent",
+      "provider": "codex",
+      "panel": "codex-agent",
+      "name": "Codex Agent",
+      "icon": "⬡",
+      "color": "#10a37f",
+      "backend": "sdk"
+    },
+    {
+      "id": "codex-agent-worktree",
+      "provider": "codex",
+      "panel": "codex-agent",
+      "name": "Codex Agent (Worktree)",
+      "icon": "⬡",
+      "color": "#10a37f",
+      "backend": "sdk",
+      "needsGitRepo": true
+    },
+    {
+      "id": "codex-fugu",
+      "provider": "fugu",
+      "panel": "codex-agent",
+      "name": "Codex Fugu Agent",
+      "icon": "🐡",
+      "color": "#06b6d4",
+      "backend": "sdk",
+      "debug": true
+    },
+    {
+      "id": "codex-cli",
+      "provider": "codex",
+      "panel": "terminal",
+      "name": "Codex CLI",
+      "icon": "▶",
+      "color": "#10a37f",
+      "backend": "pty"
+    },
+    {
+      "id": "none",
+      "provider": null,
+      "panel": "terminal",
+      "name": "Terminal",
+      "icon": "⌘",
+      "color": "#888888"
+    }
+  ]
+}
