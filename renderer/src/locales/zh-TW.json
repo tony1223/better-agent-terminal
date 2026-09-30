@@ -266,6 +266,20 @@
     "closeWorkspace": "關閉工作區"
   },
 
+  "projects": {
+    "title": "專案",
+    "repoCount_other": "{{count}} 個儲存庫",
+    "sessionCount_other": "{{count}} 個 Claude 工作階段",
+    "rescan": "重新掃描",
+    "scanning": "掃描中…",
+    "empty": "在工作區所在目錄中找不到 Git 儲存庫。",
+    "scanFailed": "無法掃描專案：{{error}}",
+    "startSession": "啟動 Claude 工作階段",
+    "startSessionInWorktree": "在此 worktree 中啟動 Claude 工作階段",
+    "detached": "（分離 HEAD）",
+    "worktreeFallback": "worktree"
+  },
+
   "profiles": {
     "title": "設定檔",
     "saveCurrent": "儲存目前狀態",
