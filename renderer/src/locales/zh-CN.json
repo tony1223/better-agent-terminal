@@ -331,6 +331,7 @@
     "accountRemoteLoginAction": "在 {{host}} 上登录…",
     "accountRemoteLoginChecking": "正在确认远程登录支持…",
     "accountRemoteLoginUnsupported": "此主机版本不支持远程登录。请更新主机上的 Better Agent Terminal，或直接从主机终端登录。",
+    "accountApiKeyHint": "此提供方使用 API 密钥，请在设置中配置。",
     "accountLoggingIn": "登录中…请在浏览器完成登录",
     "accountCancelLogin": "取消",
     "remoteHostFallback": "远程主机",

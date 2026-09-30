@@ -3,6 +3,7 @@ import { workspaceStore } from './workspace-store'
 import { settingsStore } from './settings-store'
 import { summarizeResult } from '../utils/attention'
 import { shouldAnnounceNotification } from '../utils/notification-delivery'
+import { type SdkRuntimeFamily } from '../../../shared/providers.mjs'
 
 export interface NotificationEntry {
   id: string
@@ -17,7 +18,7 @@ export interface NotificationEntry {
   error?: string
   timestamp: number
   read: boolean
-  agentKind?: 'claude' | 'codex'
+  agentKind?: SdkRuntimeFamily
   // Absent = agent completion (default). 'remote-client' = a new remote
   // client connected to the host; rendered from `title`, not workspace.
   kind?: 'remote-client'

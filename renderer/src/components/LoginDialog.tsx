@@ -3,12 +3,12 @@ import { useTranslation } from 'react-i18next'
 
 import { host } from '../host-api'
 import { formatAuthErrorMessage } from '../utils/error-message'
+import { getProvider, type ProviderId } from '../../../shared/providers.mjs'
 
-type LoginKind = 'claude' | 'codex'
 type LoginTarget = 'local' | 'remote'
 
 interface LoginDialogProps {
-  kind: LoginKind
+  provider: ProviderId
   target?: LoginTarget
   hostLabel?: string
   onClose: () => void
@@ -17,19 +17,21 @@ interface LoginDialogProps {
 
 type Phase = 'starting' | 'awaiting-code' | 'awaiting-approval' | 'submitting' | 'error'
 
-// Sign-in flows that drive the agent CLI and surface its sign-in URL.
+// Sign-in flows that drive the agent CLI and surface its sign-in URL, chosen by
+// the provider's auth kind (shared/providers.json):
 //
-// - claude: `claude auth login` redirects to a hosted callback rather than a
+// - claude-oauth: `claude auth login` redirects to a hosted callback rather than a
 //   localhost port, so nothing local can observe completion — the user signs
 //   in, copies the code the page shows, and pastes it back here. That makes
 //   this the only workable flow for BOTH local and remote; on local the host
 //   also opens the browser for you (see claude_auth_login_start). See
 //   node-sidecar/src/handlers/claude-auth-login.mjs.
-// - codex: the host app-server returns a structured URL + one-time code and
+// - codex-oauth: the host app-server returns a structured URL + one-time code and
 //   notifies completion after browser approval. No paste-back is required. See
 //   codex_app_server::account_login_device_start / _poll. Local codex login has
 //   its own browser OAuth and does not come through here.
-export function LoginDialog({ kind, target = 'remote', hostLabel, onClose, onSuccess }: Readonly<LoginDialogProps>) {
+export function LoginDialog({ provider, target = 'remote', hostLabel, onClose, onSuccess }: Readonly<LoginDialogProps>) {
+  const kind = getProvider(provider)?.auth
   const { t } = useTranslation()
   const [phase, setPhase] = useState<Phase>('starting')
   const [url, setUrl] = useState<string>('')
@@ -45,7 +47,7 @@ export function LoginDialog({ kind, target = 'remote', hostLabel, onClose, onSuc
   const loginIdRef = useRef<string>('')
   const pollTimerRef = useRef<number | null>(null)
 
-  const label = kind === 'codex' ? 'Codex' : 'Claude'
+  const label = getProvider(provider)?.label ?? provider
   const isLocal = target === 'local'
   const displayHost = hostLabel || t('workspace.remoteHostFallback')
   const title = isLocal
@@ -65,14 +67,14 @@ export function LoginDialog({ kind, target = 'remote', hostLabel, onClose, onSuc
     return message
   }
   const logLoginFailure = (stage: string, message: string) => {
-    void host.debug.log(`[LoginDialog] ${target} ${kind} ${stage} failed: ${message}`)
+    void host.debug.log(`[LoginDialog] ${target} ${provider} ${stage} failed: ${message}`)
   }
 
   const cancelLogin = useCallback(() => {
     if (cancelSentRef.current || completedRef.current || !ownsLoginRef.current) return
     cancelSentRef.current = true
     const loginId = loginIdRef.current || undefined
-    if (kind === 'codex') {
+    if (kind === 'codex-oauth') {
       void host.codex.authLoginDeviceCancel?.(loginId).catch(() => { /* best effort */ })
     } else {
       void (host.claude as { authLoginCancel?: (loginId?: string) => Promise<unknown> }).authLoginCancel?.(loginId)
@@ -127,7 +129,7 @@ export function LoginDialog({ kind, target = 'remote', hostLabel, onClose, onSuc
     startedRef.current = true
     stoppedRef.current = false
 
-    if (kind === 'codex') {
+    if (kind === 'codex-oauth') {
       // Device-code flow: get URL + code, then poll until the user approves.
       ;(async () => {
         try {
@@ -266,7 +268,7 @@ export function LoginDialog({ kind, target = 'remote', hostLabel, onClose, onSuc
         )}
 
         {/* codex device-code flow */}
-        {kind === 'codex' && phase === 'awaiting-approval' && (
+        {kind === 'codex-oauth' && phase === 'awaiting-approval' && (
           <>
             <p>{t('workspace.remoteLoginCodexSteps')}</p>
             {urlBox}
@@ -291,7 +293,7 @@ export function LoginDialog({ kind, target = 'remote', hostLabel, onClose, onSuc
         )}
 
         {/* claude paste-code flow */}
-        {kind === 'claude' && (phase === 'awaiting-code' || phase === 'submitting') && (
+        {kind === 'claude-oauth' && (phase === 'awaiting-code' || phase === 'submitting') && (
           <>
             <p>{claudeStepsText}</p>
             {urlBox}
@@ -320,7 +322,7 @@ export function LoginDialog({ kind, target = 'remote', hostLabel, onClose, onSuc
 
         <div className="dialog-actions">
           <button className="dialog-btn cancel" onClick={cancel} type="button">{t('workspace.accountCancelLogin')}</button>
-          {kind === 'claude' && (phase === 'awaiting-code' || phase === 'submitting') && (
+          {kind === 'claude-oauth' && (phase === 'awaiting-code' || phase === 'submitting') && (
             <button
               className="dialog-btn confirm"
               onClick={() => void submit()}

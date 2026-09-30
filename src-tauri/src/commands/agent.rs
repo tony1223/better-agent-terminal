@@ -15,22 +15,6 @@ use std::time::Duration;
 #[cfg(feature = "desktop")]
 use tauri::{AppHandle, Manager, WebviewWindow};
 
-pub const AGENT_PRESET_IDS: &[&str] = &[
-    "claude-code",
-    "claude-channel",
-    "claude-cli-agent",
-    "claude-code-worktree",
-    "claude-cli",
-    "claude-cli-worktree",
-    "codex-agent",
-    "codex-agent-worktree",
-    "codex-fugu",
-    "codex-cli",
-    "none",
-];
-
-const DEBUG_ONLY_AGENT_PRESET_IDS: &[&str] = &["claude-channel", "claude-cli-agent", "codex-fugu"];
-
 fn bat_debug_enabled() -> bool {
     matches!(
         std::env::var("BAT_DEBUG").as_deref(),
@@ -152,110 +136,14 @@ pub fn agent_supported_session_presets() -> Value {
 }
 
 fn agent_supported_session_type_ids_for_debug(debug_enabled: bool) -> Vec<&'static str> {
-    AGENT_PRESET_IDS
-        .iter()
-        .copied()
-        .filter(|id| debug_enabled || !DEBUG_ONLY_AGENT_PRESET_IDS.contains(id))
-        .collect()
+    crate::providers::offered_preset_ids(debug_enabled)
 }
 
 fn agent_supported_session_presets_for_debug(debug_enabled: bool) -> Vec<Value> {
     agent_supported_session_type_ids_for_debug(debug_enabled)
         .into_iter()
-        .filter_map(agent_preset_metadata)
+        .filter_map(crate::providers::preset_metadata)
         .collect()
-}
-
-fn agent_preset_metadata(id: &str) -> Option<Value> {
-    let preset = match id {
-        "claude-code" => json!({
-            "id": "claude-code",
-            "name": "Claude Agent",
-            "icon": "✦",
-            "color": "#d97706",
-            "command": "claude --continue",
-            "suggested": true,
-            "backend": "sdk",
-        }),
-        "claude-channel" => json!({
-            "id": "claude-channel",
-            "name": "Claude Channel Agent",
-            "icon": "◉",
-            "color": "#f97316",
-            "debug": true,
-            "backend": "channel",
-        }),
-        "claude-cli-agent" => json!({
-            "id": "claude-cli-agent",
-            "name": "Claude CLI Agent (Subscription)",
-            "icon": "◈",
-            "color": "#d97706",
-            "debug": true,
-            "backend": "cli",
-        }),
-        "claude-code-worktree" => json!({
-            "id": "claude-code-worktree",
-            "name": "Claude Agent (Worktree)",
-            "icon": "✦",
-            "color": "#22c55e",
-            "backend": "sdk",
-            "needsGitRepo": true,
-        }),
-        "claude-cli" => json!({
-            "id": "claude-cli",
-            "name": "Claude CLI",
-            "icon": "▶",
-            "color": "#d97706",
-            "suggested": true,
-            "backend": "cli",
-        }),
-        "claude-cli-worktree" => json!({
-            "id": "claude-cli-worktree",
-            "name": "Claude CLI (Worktree)",
-            "icon": "▶",
-            "color": "#22c55e",
-            "backend": "cli",
-            "needsGitRepo": true,
-        }),
-        "codex-agent" => json!({
-            "id": "codex-agent",
-            "name": "Codex Agent",
-            "icon": "⬡",
-            "color": "#10a37f",
-            "backend": "sdk",
-        }),
-        "codex-agent-worktree" => json!({
-            "id": "codex-agent-worktree",
-            "name": "Codex Agent (Worktree)",
-            "icon": "⬡",
-            "color": "#10a37f",
-            "backend": "sdk",
-            "needsGitRepo": true,
-        }),
-        "codex-fugu" => json!({
-            "id": "codex-fugu",
-            "name": "Codex Fugu Agent",
-            "icon": "🐡",
-            "color": "#06b6d4",
-            "backend": "sdk",
-            "debug": true,
-        }),
-        "codex-cli" => json!({
-            "id": "codex-cli",
-            "name": "Codex CLI",
-            "icon": "▶",
-            "color": "#10a37f",
-            "backend": "pty",
-        }),
-        "none" => json!({
-            "id": "none",
-            "name": "Terminal",
-            "icon": "⌘",
-            "color": "#888888",
-        }),
-        _ => return None,
-    };
-    Some(preset)
 }
 
 #[cfg(test)]
@@ -264,12 +152,13 @@ mod tests {
 
     #[test]
     fn preset_list_matches_supported_runtime_ids() {
-        assert!(AGENT_PRESET_IDS.contains(&"claude-code"));
-        assert!(AGENT_PRESET_IDS.contains(&"claude-channel"));
-        assert!(!AGENT_PRESET_IDS.contains(&"claude-code-v2"));
-        assert!(AGENT_PRESET_IDS.contains(&"codex-agent"));
-        assert!(AGENT_PRESET_IDS.contains(&"codex-agent-worktree"));
-        assert!(!AGENT_PRESET_IDS.contains(&"openai-agent"));
+        let all = agent_supported_session_type_ids_for_debug(true);
+        assert!(all.contains(&"claude-code"));
+        assert!(all.contains(&"claude-channel"));
+        assert!(!all.contains(&"claude-code-v2"));
+        assert!(all.contains(&"codex-agent"));
+        assert!(all.contains(&"codex-agent-worktree"));
+        assert!(!all.contains(&"openai-agent"));
     }
 
     #[test]
@@ -291,6 +180,46 @@ mod tests {
             preset.get("id").and_then(Value::as_str) == Some("claude-cli-agent")
                 && preset.get("backend").and_then(Value::as_str) == Some("cli")
         }));
+    }
+
+    /// Golden list captured from the renderer's AGENT_PRESETS before presets
+    /// moved to shared/providers.json. The host must keep serving exactly
+    /// these objects (minus the hidden claude-code-v2) to remote clients.
+    fn legacy_fixture() -> Value {
+        serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../tests/fixtures/legacy-agent-presets.json"
+        )))
+        .expect("legacy preset fixture parses")
+    }
+
+    fn legacy_presets_for(ids: &Value) -> Vec<Value> {
+        let fixture = legacy_fixture();
+        let presets = fixture["presets"].as_array().unwrap();
+        ids.as_array()
+            .unwrap()
+            .iter()
+            .map(|id| {
+                presets
+                    .iter()
+                    .find(|preset| preset["id"] == *id)
+                    .cloned()
+                    .unwrap()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn preset_metadata_matches_legacy_fixture() {
+        let fixture = legacy_fixture();
+        assert_eq!(
+            agent_supported_session_presets_for_debug(false),
+            legacy_presets_for(&fixture["visible"])
+        );
+        assert_eq!(
+            agent_supported_session_presets_for_debug(true),
+            legacy_presets_for(&fixture["visibleDebug"])
+        );
     }
 
     #[test]

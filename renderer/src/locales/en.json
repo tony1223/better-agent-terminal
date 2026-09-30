@@ -341,6 +341,7 @@
     "accountRemoteLoginAction": "Sign in on {{host}}…",
     "accountRemoteLoginChecking": "Checking remote sign-in support…",
     "accountRemoteLoginUnsupported": "This host version does not support remote sign-in. Update Better Agent Terminal on the host, or sign in from its terminal.",
+    "accountApiKeyHint": "This provider uses an API key. Set it in Settings.",
     "accountLoggingIn": "Signing in… complete it in your browser",
     "accountCancelLogin": "Cancel",
     "remoteHostFallback": "remote host",

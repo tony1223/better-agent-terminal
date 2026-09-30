@@ -1,4 +1,5 @@
 import type { TerminalInstance } from '../types'
+import { panelOfPreset } from '../../../shared/providers.mjs'
 
 export function rememberMountedWorkspace(
   previous: ReadonlySet<string>,
@@ -20,6 +21,6 @@ export function shouldKeepTerminalPanelMounted(terminal: TerminalMountState): bo
     || terminal.isAgentRunning === true
     || terminal.hasPendingAction === true
     || Boolean(terminal.procfilePath)
-    || terminal.agentPreset === 'claude-channel'
-    || terminal.agentPreset === 'claude-cli-agent'
+    || panelOfPreset(terminal.agentPreset) === 'claude-channel'
+    || panelOfPreset(terminal.agentPreset) === 'claude-cli-agent'
 }

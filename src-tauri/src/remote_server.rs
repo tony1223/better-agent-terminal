@@ -2498,7 +2498,8 @@ fn workspace_summary(ctx: &HostContext, sidecar: &SidecarState, params: &Value) 
                     total += 1;
                     if !inspect { continue; }
                     let preset = terminal["agentPreset"].as_str().unwrap_or_default();
-                    if !(preset.starts_with("codex-agent") || preset.starts_with("claude-code") || preset == "openai-agent") { continue; }
+                    // SDK agent sessions only (Claude or Codex runtime), per shared/providers.json.
+                    if crate::providers::sdk_runtime_family(crate::providers::resolve_preset_alias(preset)).is_none() { continue; }
                     match call("claude:get-session-meta", json!({"sessionId":terminal["id"]})) {
                         Ok(meta) if meta.is_null() => {},
                         Ok(meta) => {

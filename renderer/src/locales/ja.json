@@ -333,6 +333,7 @@
     "accountRemoteLoginAction": "{{host}} でログイン…",
     "accountRemoteLoginChecking": "リモートログイン対応を確認中…",
     "accountRemoteLoginUnsupported": "このホストのバージョンはリモートログインに対応していません。ホストの Better Agent Terminal を更新するか、ホストのターミナルからログインしてください。",
+    "accountApiKeyHint": "このプロバイダーは API キーを使用します。設定で API キーを設定してください。",
     "accountLoggingIn": "ログインしています… ブラウザで完了してください",
     "accountCancelLogin": "キャンセル",
     "remoteHostFallback": "リモートホスト",

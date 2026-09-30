@@ -47,6 +47,8 @@ import { CodexTodoChecklist } from './CodexTodoChecklist'
 import { ReasoningSummary } from './ReasoningSummary'
 import { bindPanelActiveEvent, usePanelActivation, usePanelActiveEffect, type PanelActivation } from '../utils/panel-activation'
 import { prepareFilePickerResults, type FilePickerSearchEntry } from '../utils/file-picker-search'
+import { apiVersionOfPreset, defaultModelOfPreset, defaultPresetForRuntime, isWorktreePreset, providerOfPreset } from '../../../shared/providers.mjs'
+import { sessionUsageProvider } from '../providers/account-routing'
 
 function clearRuntimeStatusMeta(meta: SessionMeta | null): SessionMeta | null {
   if (!meta?.runtimeStatus && !meta?.runtimeMessage && !meta?.runtimeStatusStartedAt) return meta
@@ -351,8 +353,8 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
   const { t, i18n } = useTranslation()
   const terminal = workspaceStore.getState().terminals.find(t => t.id === sessionId)
   const isCodexSession = true
-  const isV2Session = terminal?.agentPreset === 'claude-code-v2'
-  const isWorktreeSession = terminal?.agentPreset === 'codex-agent-worktree'
+  const isV2Session = apiVersionOfPreset(terminal?.agentPreset) === 'v2'
+  const isWorktreeSession = isWorktreePreset(terminal?.agentPreset)
   const normalizedAgentParams = normalizeAgentParams(terminal?.agentPreset, terminal?.agentParams)
   const [messages, setMessages] = useState<MessageItem[]>([])
   // Per-tool render-helper cache. Avoids rerunning regex/split over large
@@ -409,9 +411,9 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
   const [currentModel, setCurrentModel] = useState<string>(() => {
     const t = workspaceStore.getState().terminals.find(t => t.id === sessionId)
     if (isCodexSession) {
-      // The Codex Fugu Agent preset defaults to the "fugu" model (provider
-      // sakana); everything else uses the configured default Codex model.
-      const codexFallback = t?.agentPreset === 'codex-fugu' ? 'fugu' : settingsStore.getSettings().defaultCodexModel
+      // Providers with their own default model (Fugu → "fugu", provider
+      // sakana) use it; everything else uses the configured default Codex model.
+      const codexFallback = defaultModelOfPreset(t?.agentPreset) ?? settingsStore.getSettings().defaultCodexModel
       return resolveCodexModel(t?.model, codexFallback)
     }
     return t?.model || settingsStore.getSettings().defaultClaudeModel || ''
@@ -449,16 +451,19 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
   // Host-wide usage poll (one poller per host, active account) keeps the 5h/7d
   // statusline items fresh while idle; mid-turn rate_limit_events still
   // overwrite with the latest API-reported numbers. Provider follows the
-  // session: codex sessions show the codex account's windows, not Claude's.
+  // session: codex sessions show the codex account's windows, not Claude's,
+  // and providers that report no usage (e.g. Fugu) show none.
+  const usageProvider = sessionUsageProvider(terminal?.agentPreset, isCodexSession ? 'codex' : 'claude')
   useEffect(() => {
+    if (!usageProvider) return
     const apply = () => {
-      const snap = getHostUsageSnapshot(isCodexSession ? 'codex' : 'claude')
+      const snap = getHostUsageSnapshot(usageProvider)
       if (!snap) return
       setRateLimits(prev => rateLimitsFromHostUsage(snap, prev))
     }
     apply()
     return subscribeHostUsage(apply)
-  }, [isCodexSession])
+  }, [usageProvider])
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([])
   const [availableEfforts, setAvailableEfforts] = useState<string[]>(() => [...CODEX_EFFORT_LEVELS])
   const [availableCodexSandboxModes, setAvailableCodexSandboxModes] = useState<string[]>(() => [...CODEX_SANDBOX_MODES])
@@ -2070,8 +2075,8 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
       const terminalState = workspaceStore.getState().terminals.find(t => t.id === sessionId)
       const savedSdkSessionId = terminalState?.sdkSessionId
       const savedModel = terminalState?.model
-      const apiVersion = terminalState?.agentPreset === 'claude-code-v2' ? 'v2' as const : 'v1' as const
-      const useWorktree = terminalState?.agentPreset === 'codex-agent-worktree' || !!terminalState?.worktreePath
+      const apiVersion = apiVersionOfPreset(terminalState?.agentPreset)
+      const useWorktree = isWorktreePreset(terminalState?.agentPreset) || !!terminalState?.worktreePath
       const globalSettings = settingsStore.getSettings()
       const effectiveModel = isCodexSession
         ? resolveCodexModel(currentModel || savedModel, globalSettings.defaultCodexModel)
@@ -2443,7 +2448,7 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
     // Mark that history will be loaded — prevents sys-init from wiping messages
     historyLoadedRef.current = true
     const apiVersion = isV2Session ? 'v2' as const : 'v1' as const
-    const resumeUsesWorktree = terminal?.agentPreset === 'codex-agent-worktree' || !!terminal?.worktreePath
+    const resumeUsesWorktree = isWorktreePreset(terminal?.agentPreset) || !!terminal?.worktreePath
     const resumeModel = currentModel || settingsStore.getSettings().defaultCodexModel || DEFAULT_CODEX_MODEL
     const resumeEffort = isCodexSession ? effortLevel : (effortLevelForClaudeMode(effortLevel) || 'high')
     await host.claude.resumeSession(
@@ -2494,7 +2499,7 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
       setAttachedImages([])
     }
 
-    const newTerminal = workspaceStore.addTerminal(workspaceId, 'claude-code' as AgentPresetId)
+    const newTerminal = workspaceStore.addTerminal(workspaceId, defaultPresetForRuntime('claude'))
     dlog(`${tag} newTerminal=${newTerminal.id.slice(0, 8)}`)
     workspaceStore.setTerminalSdkSessionId(newTerminal.id, result.newSdkSessionId)
     if (currentModel) {
@@ -2772,7 +2777,7 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
           id: `sys-login-${Date.now()}`, sessionId, role: 'system' as const,
           content: 'Opening Codex login...', timestamp: Date.now(),
         }])
-        onRequestLogin('codex')
+        onRequestLogin(providerOfPreset(terminal?.agentPreset) ?? providerOfPreset(defaultPresetForRuntime('codex'))!)
       } else {
         setMessages(prev => [...prev, {
           id: `sys-login-err-${Date.now()}`, sessionId, role: 'system' as const,

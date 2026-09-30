@@ -162,7 +162,18 @@ fn active_account_email(ctx: &HostContext) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+// Provider ids the two usage kinds publish under (shared/providers.json). The
+// fallbacks keep the historical ids if the manifest ever lacks the kind.
+fn anthropic_usage_provider() -> &'static str {
+    crate::providers::provider_with_usage("anthropic-oauth").unwrap_or("claude")
+}
+
+fn codex_usage_provider() -> &'static str {
+    crate::providers::provider_with_usage("codex-rate-limits").unwrap_or("codex")
+}
+
 fn poll_once(ctx: &HostContext, client: &reqwest::blocking::Client) -> Duration {
+    let provider = anthropic_usage_provider();
     let token = match read_access_token(ctx) {
         Ok(token) => token,
         Err(_) => return CREDS_MISSING_RETRY, // not logged in here: stay quiet
@@ -190,7 +201,7 @@ fn poll_once(ctx: &HostContext, client: &reqwest::blocking::Client) -> Duration 
                 Some(401) | Some(403) => "unauthorized",
                 _ => "network",
             };
-            publish_stale(ctx, "claude", reason, retry);
+            publish_stale(ctx, provider, reason, retry);
             return retry;
         }
     };
@@ -198,12 +209,12 @@ fn poll_once(ctx: &HostContext, client: &reqwest::blocking::Client) -> Duration 
     let Some(mut snapshot) = normalize_usage_response(&data) else {
         warn(ctx, "response had no usable windows (schema drift?)");
         let retry = BACKOFF_MAX.min(POLL_INTERVAL * 4);
-        publish_stale(ctx, "claude", "network", retry);
+        publish_stale(ctx, provider, "network", retry);
         return retry;
     };
 
     if let Some(obj) = snapshot.as_object_mut() {
-        obj.insert("provider".into(), json!("claude"));
+        obj.insert("provider".into(), json!(provider));
         obj.insert(
             "accountEmail".into(),
             active_account_email(ctx)
@@ -213,7 +224,7 @@ fn poll_once(ctx: &HostContext, client: &reqwest::blocking::Client) -> Duration 
         obj.insert("fetchedAt".into(), json!(now_ms()));
     }
 
-    store_and_publish(ctx, "claude", snapshot);
+    store_and_publish(ctx, provider, snapshot);
     POLL_INTERVAL
 }
 
@@ -291,13 +302,13 @@ fn merge_and_publish_codex_update(ctx: &HostContext, update: Value) {
         let Ok(mut store) = snapshot_store().lock() else {
             return;
         };
-        let snapshot = merge_codex_usage_snapshot(store.get("codex"), &update);
+        let snapshot = merge_codex_usage_snapshot(store.get(codex_usage_provider()), &update);
         let first = store
-            .insert("codex".to_string(), snapshot.clone())
+            .insert(codex_usage_provider().to_string(), snapshot.clone())
             .is_none();
         (snapshot, first)
     };
-    publish_stored_snapshot(ctx, "codex", snapshot, first);
+    publish_stored_snapshot(ctx, codex_usage_provider(), snapshot, first);
 }
 
 /// Pull path for the renderer cache and for remote clients: last snapshot per
@@ -367,7 +378,7 @@ pub async fn agent_usage_peek(account_id: String) -> Value {
             return Value::Null;
         };
         if let Some(obj) = snapshot.as_object_mut() {
-            obj.insert("provider".into(), json!("claude"));
+            obj.insert("provider".into(), json!(anthropic_usage_provider()));
             obj.insert("fetchedAt".into(), json!(now_ms()));
         }
         snapshot
@@ -486,7 +497,7 @@ pub fn normalize_codex_rate_limits(raw: &Value) -> Option<Value> {
         return None;
     }
     Some(json!({
-        "provider": "codex",
+        "provider": codex_usage_provider(),
         "fiveHour": five_hour,
         "sevenDay": seven_day,
         "planType": obj
@@ -538,7 +549,7 @@ pub fn publish_codex_usage(ctx: &HostContext, raw: &Value) {
     let Some(snapshot) = timestamped_codex_snapshot(raw) else {
         return;
     };
-    store_and_publish(ctx, "codex", snapshot);
+    store_and_publish(ctx, codex_usage_provider(), snapshot);
 }
 
 /// Merge a sparse `account/rateLimits/updated` notification without reviving
@@ -582,19 +593,27 @@ pub fn start(ctx: HostContext) {
                 }
             };
             std::thread::sleep(FIRST_POLL_DELAY);
-            // Per-provider due times on a coarse scheduler tick, so a Claude
-            // backoff (e.g. not logged in → 10 min retry) never starves the
-            // codex cadence and vice versa.
+            // Per-provider due times on a coarse scheduler tick, so one
+            // provider's backoff (e.g. Claude not logged in → 10 min retry)
+            // never starves another's cadence. Providers come from
+            // shared/providers.json and are polled by their `usage` kind.
             let tick = Duration::from_secs(30);
-            let mut claude_due = std::time::Instant::now();
-            let mut codex_due = std::time::Instant::now();
+            let mut due: HashMap<&'static str, std::time::Instant> = HashMap::new();
             loop {
                 let now = std::time::Instant::now();
-                if now >= claude_due {
-                    claude_due = now + poll_once(&ctx, &client);
-                }
-                if now >= codex_due {
-                    codex_due = now + poll_codex_once(&ctx);
+                for provider in crate::providers::providers() {
+                    let id = provider.id.as_str();
+                    if due.get(id).is_some_and(|next| now < *next) {
+                        continue;
+                    }
+                    let delay = match provider.usage.as_str() {
+                        "anthropic-oauth" => poll_once(&ctx, &client),
+                        "codex-rate-limits" => poll_codex_once(&ctx),
+                        // No usage to poll ("none"): never scheduled, so this
+                        // is re-checked each tick at no cost.
+                        _ => continue,
+                    };
+                    due.insert(id, now + delay);
                 }
                 std::thread::sleep(tick);
             }

@@ -1170,13 +1170,12 @@ fn effective_notification_cwd(options: Option<&Value>) -> Option<String> {
     Some(cwd.to_string())
 }
 
+/// Runtime family of the session, from its preset (shared/providers.json).
+/// Sessions started without a preset have always been Claude sessions.
 fn agent_kind_from_options(options: &Value) -> Option<String> {
     match options.get("agentPreset").and_then(Value::as_str) {
-        Some("codex-agent" | "codex-agent-worktree") => Some("codex".into()),
-        Some("claude-code" | "claude-code-v2" | "claude-code-worktree") | None => {
-            Some("claude".into())
-        }
-        Some(_) => None,
+        Some(preset) => crate::providers::sdk_runtime_family(preset).map(str::to_string),
+        None => Some("claude".into()),
     }
 }
 
@@ -1467,6 +1466,18 @@ mod tests {
         assert_eq!(
             agent_kind_from_options(&serde_json::json!({ "agentPreset": "claude-code-v2" }))
                 .as_deref(),
+            Some("claude")
+        );
+        assert_eq!(
+            agent_kind_from_options(&serde_json::json!({ "agentPreset": "codex-fugu" })).as_deref(),
+            Some("codex")
+        );
+        assert_eq!(
+            agent_kind_from_options(&serde_json::json!({ "agentPreset": "claude-channel" })),
+            None
+        );
+        assert_eq!(
+            agent_kind_from_options(&serde_json::json!({})).as_deref(),
             Some("claude")
         );
         assert_eq!(

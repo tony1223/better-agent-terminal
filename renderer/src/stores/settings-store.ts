@@ -5,6 +5,7 @@ import { getAgentPreset } from '../types/agent-presets'
 import { CODEX_EFFORT_LEVELS, FONT_OPTIONS, COLOR_PRESETS, AGENT_COMMAND_OPTIONS, STATUSLINE_ITEMS } from '../types'
 import { CLAUDE_BUILTIN_MODELS, CLAUDE_OPUS_47_1M_PRESET, normalizeClaudeModelSelection } from '../utils/claude-model-presets'
 import { CODEX_MODELS } from '../utils/codex-models'
+import { getDefaultPreset, resolvePresetAlias } from '../../../shared/providers.mjs'
 
 type Listener = () => void
 
@@ -34,7 +35,7 @@ const defaultSettings: AppSettings = {
   customForegroundColor: '#dfdbc3',
   customCursorColor: '#dfdbc3',
   globalEnvVars: [],
-  defaultAgent: 'claude-code' as AgentPresetId,
+  defaultAgent: getDefaultPreset().id as AgentPresetId,
   agentAutoCommand: true,
   agentCommandType: 'claude',
   agentCustomCommand: '',
@@ -52,12 +53,11 @@ const defaultSettings: AppSettings = {
 }
 
 function normalizeDefaultAgent(value: unknown): AgentPresetId {
-  if (value === 'openai-agent') return 'codex-agent'
   if (typeof value === 'string') {
-    const preset = getAgentPreset(value)
-    if (preset && (!preset.debug || host.debug.isDebugMode === true)) return value as AgentPresetId
+    const preset = getAgentPreset(resolvePresetAlias(value))
+    if (preset && (!preset.debug || host.debug.isDebugMode === true)) return preset.id as AgentPresetId
   }
-  return defaultSettings.defaultAgent ?? 'claude-code'
+  return defaultSettings.defaultAgent ?? getDefaultPreset().id
 }
 
 class SettingsStore {

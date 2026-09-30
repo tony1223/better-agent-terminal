@@ -31,6 +31,7 @@ mod panic_log;
 mod path_guard;
 mod remote_client;
 mod profile_context;
+mod providers;
 pub mod remote_core;
 mod remote_server;
 mod session_replay;

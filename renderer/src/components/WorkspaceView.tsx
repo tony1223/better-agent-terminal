@@ -21,6 +21,9 @@ import {
 } from '../utils/remote-auth'
 import { touchBoundedLru } from '../utils/bounded-lru'
 import { shouldKeepTerminalPanelMounted } from '../utils/workspace-mounts'
+import { apiVersionOfPreset, apiVersionSwitchOf, getDefaultPreset, getProvider, isPtyPreset, isSdkAgentPreset, isWorktreePreset, listProviders, panelOfPreset, providerAgentName, ptyAutoCommand, sdkRuntimeFamilyOfPreset, type ProviderId, type SdkRuntimeFamily } from '../../../shared/providers.mjs'
+import { accountAdapterFor, type AccountChip, type AccountMenuEntry } from '../providers/accounts'
+import { accountChipProviderOf, accountSwitchedEvent, cliRuntimeOf, usageProviderOf } from '../providers/account-routing'
 
 // Lazy load heavy components (xterm.js, Claude SDK, etc.)
 const MainPanel = lazy(() => import('./MainPanel').then(m => ({ default: m.MainPanel })))
@@ -32,46 +35,9 @@ type WorkspaceTab = 'terminal' | 'files' | 'git' | 'github'
 const TAB_KEY = 'better-terminal-workspace-tab'
 const MAX_MOUNTED_TERMINALS_PER_WORKSPACE = 2
 
-type AccountMenuEntry = {
-  id: string          // selector passed to the switch command
-  label: string       // primary line (email)
-  sublabel?: string   // secondary line (subscription tier / CODEX_HOME path)
-  active?: boolean
-  needsLogin?: boolean
-  lastAuthError?: string
-}
+type WorkspaceAccountChip = AccountChip
 
-type WorkspaceAccountChip = {
-  kind: 'claude' | 'codex'
-  label: string
-  title: string
-  plan?: string       // active account's subscription tier (Claude only)
-  accounts?: AccountMenuEntry[]
-  loggedIn?: boolean
-  unified?: boolean
-}
-
-type CodexAccountEntry = {
-  id: string
-  label?: string
-  email?: string
-  codexHome: string
-  authenticated?: boolean
-  active?: boolean
-  unified?: boolean
-  accountId?: string
-  needsLogin?: boolean
-  lastAuthError?: string
-}
-
-type ClaudeAccountEntry = {
-  id: string
-  email?: string
-  subscriptionType?: string
-  isDefault?: boolean
-}
-
-type CliVersions = { claude?: string; codex?: string }
+type CliVersions = Partial<Record<SdkRuntimeFamily, string>>
 
 function loadWorkspaceTab(): WorkspaceTab {
   try {
@@ -158,13 +124,7 @@ function mergeEnvVars(global: EnvVariable[] = [], workspace: EnvVariable[] = [])
 }
 
 function buildAgentAutoCommand(presetId: string, settings: ReturnType<typeof settingsStore.getSettings>): string | null {
-  if (presetId === 'codex-cli') {
-    return settings.allowBypassPermissions
-      ? 'codex --yolo'
-      : 'codex'
-  }
-  const preset = getAgentPreset(presetId)
-  return preset?.command || null
+  return ptyAutoCommand(presetId, { bypassPermissions: !!settings.allowBypassPermissions })
 }
 
 function errorMessage(error: unknown): string {
@@ -231,12 +191,15 @@ export const WorkspaceView = memo(function WorkspaceView({ workspace, terminals,
     setAccountMenuOpen(false)
   }, [isActive])
   // Host-wide usage snapshot for the account dropdown — provider follows the
-  // chip kind (claude vs codex). Fed by the Rust per-host poller; no polling
-  // from this component.
+  // chip. Fed by the Rust per-host poller; no polling from this component.
   const [hostUsage, setHostUsage] = useState<HostUsageSnapshot | null>(null)
   const [, setUsageTick] = useState(0)
   useEffect(() => {
-    const provider = accountChip?.kind === 'codex' ? 'codex' : 'claude'
+    const provider = usageProviderOf(accountChip?.kind)
+    if (!provider) {
+      setHostUsage(null)
+      return
+    }
     const apply = () => setHostUsage(getHostUsageSnapshot(provider))
     apply()
     return subscribeHostUsage(apply)
@@ -247,12 +210,13 @@ export const WorkspaceView = memo(function WorkspaceView({ workspace, terminals,
     const timer = window.setInterval(() => setUsageTick(n => n + 1), 60_000)
     return () => window.clearInterval(timer)
   }, [accountMenuOpen])
-  // Lazy usage peek for NON-active Claude accounts: queried only when the
-  // menu opens (one request per account per open; the host caches briefly).
+  // Lazy usage peek for NON-active accounts (providers whose adapter supports
+  // it, i.e. Claude): queried only when the menu opens (one request per
+  // account per open; the host caches briefly).
   // null = peeked but unavailable (expired token) — row just shows no usage.
   const [peekedUsage, setPeekedUsage] = useState<Record<string, Record<string, unknown> | null>>({})
   useEffect(() => {
-    if (!accountMenuOpen || accountChip?.kind === 'codex') return
+    if (!accountMenuOpen || !accountAdapterFor(accountChip?.kind)?.peeksInactiveUsage) return
     const targets = (accountChip?.accounts || []).filter(account => !account.active && account.id)
     if (targets.length === 0) return
     let cancelled = false
@@ -347,7 +311,7 @@ export const WorkspaceView = memo(function WorkspaceView({ workspace, terminals,
   const [cliVersions, setCliVersions] = useState<CliVersions | null>(null)
   const [loginPending, setLoginPending] = useState(false)
   // Non-null while the remote URL ("paste code") login dialog is open.
-  const [loginDialog, setLoginDialog] = useState<{ kind: 'claude' | 'codex'; target: 'local' | 'remote' } | null>(null)
+  const [loginDialog, setLoginDialog] = useState<{ kind: ProviderId; target: 'local' | 'remote' } | null>(null)
   // undefined = still loading, null = connected host does not advertise the
   // additive remote-auth capability (typically an older host).
   const [remoteAuthCapabilities, setRemoteAuthCapabilities] = useState<RemoteAuthCapabilities | null | undefined>(undefined)
@@ -542,89 +506,28 @@ export const WorkspaceView = memo(function WorkspaceView({ workspace, terminals,
       setAccountChip(null)
       return
     }
-    if (preset === 'codex-agent' || preset === 'codex-agent-worktree') {
-      try {
-        const result = await host.codex.accountList() as { accounts?: CodexAccountEntry[]; activeCodexHome?: string }
-        // Only real, signed-in accounts count: drop entries with no resolvable
-        // email (e.g. an empty ~/.codex home that would otherwise show as ".codex").
-        const raw = (result.accounts || []).filter(account => Boolean(account.email && account.email.trim()))
-        // In unified mode every account shares one runtime CODEX_HOME, so a
-        // `codexHome === activeCodexHome` check would mark EVERY entry active and
-        // make clicking a no-op (handleAccountSwitch early-returns on active rows).
-        // Trust the backend per-account `active` flag; only use the codexHome
-        // fallback for the legacy (non-unified) model where homes are distinct.
-        const active = raw.find(account => account.active)
-          || raw.find(account => !account.unified && account.codexHome === result.activeCodexHome)
-        const entries: AccountMenuEntry[] = raw.map(account => ({
-          id: account.id,
-          label: account.email || account.label || account.codexHome,
-          sublabel: account.needsLogin
-            ? 'Needs login'
-            : account.unified ? undefined : account.codexHome,
-          active: Boolean(account.active) || (!account.unified && account.codexHome === result.activeCodexHome),
-          needsLogin: Boolean(account.needsLogin),
-          lastAuthError: account.lastAuthError,
-        }))
-        setAccountChip({
-          kind: 'codex',
-          label: active?.email || active?.label || 'Codex',
-          title: active?.unified
-            ? 'Codex account'
-            : active?.codexHome ? `CODEX_HOME: ${active.codexHome}` : 'Codex account',
-          accounts: entries,
-          loggedIn: Boolean(active?.authenticated ?? entries.length > 0),
-          unified: Boolean(active?.unified || raw.some(a => a.unified)),
-        })
-      } catch (error) {
-        void host.debug.log(`[WorkspaceView] failed to load Codex account info: ${errorMessage(error)}`)
-        setAccountChip({ kind: 'codex', label: 'Codex', title: 'Codex account' })
-      }
+    const provider = getProvider(accountChipProviderOf(preset))
+    const adapter = accountAdapterFor(provider?.id)
+    if (!provider || !adapter || !accountTerminal) {
+      setAccountChip(null)
       return
     }
-    if (preset === 'claude-code' || preset === 'claude-code-v2' || preset === 'claude-code-worktree' || preset === 'claude-channel' || preset === 'claude-cli-agent') {
-      try {
-        const [info, list] = await Promise.all([
-          (host.claude.getAccountInfo(accountTerminal.id) as Promise<{ email?: string; organization?: string; subscriptionType?: string } | null>).catch(() => null),
-          (host.claude.accountList() as Promise<{ accounts?: ClaudeAccountEntry[]; activeAccountId?: string } | null>).catch(() => null),
-        ])
-        const accounts = list?.accounts || []
-        const activeId = list?.activeAccountId
-        const entries: AccountMenuEntry[] = accounts.map(account => ({
-          id: account.id,
-          label: account.email || account.id,
-          sublabel: account.subscriptionType || undefined,
-          active: account.id === activeId,
-        }))
-        const activeAccount = accounts.find(account => account.id === activeId)
-        const activeEmail = activeAccount?.email
-        const label = info?.email || activeEmail || info?.organization || 'Claude'
-        const plan = info?.subscriptionType || activeAccount?.subscriptionType || undefined
-        setAccountChip({
-          kind: 'claude',
-          label,
-          title: info?.email ? `${info.email} (${info.subscriptionType || 'unknown'})` : 'Claude account',
-          plan,
-          accounts: entries,
-          loggedIn: Boolean(info?.email || activeEmail || entries.length > 0),
-        })
-      } catch (error) {
-        void host.debug.log(`[WorkspaceView] failed to load Claude account info: ${errorMessage(error)}`)
-        setAccountChip({ kind: 'claude', label: 'Claude', title: 'Claude account' })
-      }
-      return
+    try {
+      setAccountChip(await adapter.load(provider, accountTerminal.id))
+    } catch (error) {
+      void host.debug.log(`[WorkspaceView] failed to load ${provider.label} account info: ${errorMessage(error)}`)
+      setAccountChip(adapter.fallback(provider))
     }
-    setAccountChip(null)
   }, [accountTerminal?.id, accountTerminal?.agentPreset, focusedTerminalId])
 
   useEffect(() => {
     if (!isActive) return
     void refreshAccountChip()
     const refresh = () => { void refreshAccountChip() }
-    window.addEventListener('claude-account-switched', refresh)
-    window.addEventListener('codex-account-switched', refresh)
+    const events = listProviders().map(provider => accountSwitchedEvent(provider.id))
+    for (const event of events) window.addEventListener(event, refresh)
     return () => {
-      window.removeEventListener('claude-account-switched', refresh)
-      window.removeEventListener('codex-account-switched', refresh)
+      for (const event of events) window.removeEventListener(event, refresh)
     }
   }, [isActive, refreshAccountChip])
 
@@ -650,9 +553,10 @@ export const WorkspaceView = memo(function WorkspaceView({ workspace, terminals,
     if (accountChip && !cliVersions) void loadCliVersions()
   }, [accountChip, cliVersions, loadCliVersions])
 
-  // Start a login flow from the chip. Claude has a real CLI login; for Codex
-  // (unified mode) we register the account currently authenticated in ~/.codex.
-  const handleLogin = useCallback(async (kind: 'claude' | 'codex') => {
+  // Start a login flow from the chip. How it runs is up to the provider's
+  // account adapter (providers/accounts.ts): Claude's paste-back dialog, Codex's
+  // inline browser OAuth, or nothing for API-key providers (set in Settings).
+  const handleLogin = useCallback(async (kind: ProviderId) => {
     // Remote client: the CLI login runs on the host, surfaced through a sign-in
     // dialog. Claude uses a URL ("paste code") flow; codex uses a device-code
     // flow (display URL + one-time code, poll for approval). Both authenticate
@@ -680,11 +584,18 @@ export const WorkspaceView = memo(function WorkspaceView({ workspace, terminals,
       setLoginDialog({ kind, target: 'remote' })
       return
     }
+    const adapter = accountAdapterFor(kind)
+    // No sign-in from the chip: open the menu, which explains where to configure it.
+    if (!adapter || adapter.localLogin === 'none' || (adapter.localLogin === 'inline' && !adapter.login)) {
+      setAccountMenuError(null)
+      setAccountMenuOpen(true)
+      return
+    }
     // Local Claude: `claude auth login` redirects to a hosted callback page, so
     // there is no localhost listener for the CLI to catch the code with — the
     // user has to paste it back. Same dialog as remote; the difference is the
     // host opens the browser for us, so we never ask the user to do it.
-    if (kind === 'claude') {
+    if (adapter.localLogin === 'dialog') {
       setAccountMenuOpen(false)
       setAccountMenuError(null)
       setLoginDialog({ kind, target: 'local' })
@@ -698,9 +609,8 @@ export const WorkspaceView = memo(function WorkspaceView({ workspace, terminals,
     setLoginPending(true)
     let loginError: string | null = null
     try {
-      // Real Codex login (ChatGPT browser OAuth); registers + activates it.
-      await host.codex.accountLogin()
-      window.dispatchEvent(new CustomEvent('codex-account-switched', { detail: {} }))
+      await adapter.login!()
+      window.dispatchEvent(new CustomEvent(accountSwitchedEvent(kind), { detail: {} }))
     } catch (error) {
       loginError = errorMessage(error)
       void host.debug.log(`[WorkspaceView] ${kind} login failed: ${loginError}`)
@@ -715,21 +625,22 @@ export const WorkspaceView = memo(function WorkspaceView({ workspace, terminals,
     }
   }, [refreshAccountChip, isRemoteConnected, loginPending, remoteAuthCapabilities, t])
 
-  // Cancel an in-flight Codex login (the browser OAuth hasn't completed yet).
-  // The backend kills the pending `codex login` child, which makes the awaited
-  // accountLogin() in handleLogin reject and reset loginPending.
-  const handleLoginCancel = useCallback(async (kind: 'claude' | 'codex') => {
-    if (kind !== 'codex') return
+  // Cancel an in-flight inline login (the browser OAuth hasn't completed yet).
+  // The adapter kills the pending login, which makes the awaited login() in
+  // handleLogin reject and reset loginPending.
+  const handleLoginCancel = useCallback(async (kind: ProviderId) => {
+    const adapter = accountAdapterFor(kind)
+    if (!adapter?.cancelLogin) return
     try {
-      await host.codex.accountLoginCancel()
+      await adapter.cancelLogin()
     } catch (error) {
-      void host.debug.log(`[WorkspaceView] codex login cancel failed: ${errorMessage(error)}`)
+      void host.debug.log(`[WorkspaceView] ${kind} login cancel failed: ${errorMessage(error)}`)
     }
   }, [])
 
-  // Switch Claude/Codex account directly from the chip menu. The id is the
-  // correct selector for both agents and both Codex modes (legacy id == path).
-  const handleAccountSwitch = useCallback(async (entry: AccountMenuEntry, kind: 'claude' | 'codex') => {
+  // Switch account directly from the chip menu. The id is the correct selector
+  // for every adapter (and both Codex modes: legacy id == path).
+  const handleAccountSwitch = useCallback(async (entry: AccountMenuEntry, kind: ProviderId) => {
     if (entry.active || !entry.id || switchingId) {
       if (!entry.active) setAccountMenuOpen(false)
       return
@@ -754,15 +665,9 @@ export const WorkspaceView = memo(function WorkspaceView({ workspace, terminals,
         setAccountMenuOpen(true)
         setSwitchingId(null)
       }
-      if (kind === 'codex') {
-        const result = await host.codex.accountSwitch(entry.id) as { success?: boolean }
-        if (result?.success === false) { await failed(); return }
-        window.dispatchEvent(new CustomEvent('codex-account-switched', { detail: { accountId: entry.id } }))
-      } else {
-        const ok = await host.claude.accountSwitch(entry.id) as boolean
-        if (ok === false) { await failed(); return }
-        window.dispatchEvent(new CustomEvent('claude-account-switched', { detail: { accountId: entry.id } }))
-      }
+      const adapter = accountAdapterFor(kind)
+      if (!adapter || !await adapter.switchAccount(entry.id)) { await failed(); return }
+      window.dispatchEvent(new CustomEvent(accountSwitchedEvent(kind), { detail: { accountId: entry.id } }))
     } catch (error) {
       // Surfaces e.g. the unified-mode "turn is running" denial.
       await refreshAccountChip()
@@ -803,9 +708,9 @@ export const WorkspaceView = memo(function WorkspaceView({ workspace, terminals,
         for (const terminal of terminals) {
           // Worker terminals manage their own PTYs internally via WorkerPanel
           if (terminal.procfilePath) continue
-          if (terminal.agentPreset === 'claude-code' || terminal.agentPreset === 'claude-channel' || terminal.agentPreset === 'claude-cli-agent' || terminal.agentPreset === 'claude-code-v2' || terminal.agentPreset === 'claude-code-worktree' || terminal.agentPreset === 'codex-agent' || terminal.agentPreset === 'codex-agent-worktree') continue
-          // Claude CLI presets are started by ClaudeCliPanel so it can own session restore.
-          if (terminal.agentPreset === 'claude-cli' || terminal.agentPreset === 'claude-cli-worktree') continue
+          // Agent panels start their own sessions; Claude CLI presets are started
+          // by ClaudeCliPanel so it can own session restore.
+          if (!isPtyPreset(terminal.agentPreset)) continue
           const created = await createWorkspacePty({
             id: terminal.id,
             cwd: terminal.cwd || workspace.folderPath,
@@ -831,7 +736,7 @@ export const WorkspaceView = memo(function WorkspaceView({ workspace, terminals,
         const terminalCount = settings.defaultTerminalCount || 1
         const createAgentTerminal = settings.createDefaultAgentTerminal === true
         const defaultAgent = createAgentTerminal
-          ? (workspace.defaultAgent || settings.defaultAgent || 'claude-code')
+          ? (workspace.defaultAgent || settings.defaultAgent || getDefaultPreset().id)
           : 'none'
 
         if (createAgentTerminal) {
@@ -839,7 +744,7 @@ export const WorkspaceView = memo(function WorkspaceView({ workspace, terminals,
           // the terminal already pointing at it, so the SDK session starts
           // through the normal path with cwd = worktree folder.
           let agentTerminal: TerminalInstance
-          if (defaultAgent === 'claude-code-worktree' || defaultAgent === 'codex-agent-worktree') {
+          if (isSdkAgentPreset(defaultAgent) && isWorktreePreset(defaultAgent)) {
             const id = uuidv4()
             const wtResult = await host.worktree.create(id, workspace.folderPath, settings.worktreePnpmInstallEnabled === true)
             if (wtResult.success && wtResult.worktreePath) {
@@ -849,7 +754,7 @@ export const WorkspaceView = memo(function WorkspaceView({ workspace, terminals,
                 worktreePath: wtResult.worktreePath,
                 worktreeBranch: wtResult.branchName,
               })
-              workspaceStore.setTerminalGeneratedTitle(agentTerminal.id, defaultAgent === 'codex-agent-worktree' ? 'Codex Agent (worktree)' : 'Claude Agent (worktree)')
+              workspaceStore.setTerminalGeneratedTitle(agentTerminal.id, `${providerAgentName(defaultAgent)} (worktree)`)
             } else {
               // Worktree creation failed — fall back to a normal agent terminal.
               agentTerminal = workspaceStore.addTerminal(workspace.id, defaultAgent as AgentPresetId, { id })
@@ -857,7 +762,7 @@ export const WorkspaceView = memo(function WorkspaceView({ workspace, terminals,
           } else {
             agentTerminal = workspaceStore.addTerminal(workspace.id, defaultAgent as AgentPresetId)
           }
-          if (defaultAgent !== 'claude-cli' && defaultAgent !== 'claude-cli-worktree' && defaultAgent !== 'claude-cli-agent' && defaultAgent !== 'claude-code' && defaultAgent !== 'claude-channel' && defaultAgent !== 'claude-code-v2' && defaultAgent !== 'claude-code-worktree' && defaultAgent !== 'codex-agent' && defaultAgent !== 'codex-agent-worktree') {
+          if (isPtyPreset(defaultAgent)) {
             const created = await createWorkspacePty({
               id: agentTerminal.id,
               cwd: workspace.folderPath,
@@ -971,7 +876,7 @@ export const WorkspaceView = memo(function WorkspaceView({ workspace, terminals,
     if (!preset) return
 
     if (preset.backend === 'sdk' || preset.backend === 'channel') {
-      if (presetId === 'claude-code-worktree' || presetId === 'codex-agent-worktree') {
+      if (isWorktreePreset(presetId)) {
         // Build the worktree folder first, then add the terminal already
         // pointing at it — the SDK session starts normally in the worktree.
         const settings = settingsStore.getSettings()
@@ -988,7 +893,7 @@ export const WorkspaceView = memo(function WorkspaceView({ workspace, terminals,
           worktreePath: wtResult.worktreePath,
           worktreeBranch: wtResult.branchName,
         })
-        workspaceStore.setTerminalGeneratedTitle(terminal.id, presetId === 'codex-agent-worktree' ? 'Codex Agent (worktree)' : 'Claude Agent (worktree)')
+        workspaceStore.setTerminalGeneratedTitle(terminal.id, `${providerAgentName(presetId)} (worktree)`)
         workspaceStore.setFocusedTerminal(terminal.id)
         workspaceStore.save()
       } else {
@@ -1103,12 +1008,15 @@ export const WorkspaceView = memo(function WorkspaceView({ workspace, terminals,
   const handleConfirmClose = useCallback((cleanWorktree = false) => {
     if (showCloseConfirm) {
       const terminal = terminals.find(t => t.id === showCloseConfirm)
-      if (terminal?.agentPreset === 'claude-code' || terminal?.agentPreset === 'claude-code-v2' || terminal?.agentPreset === 'claude-code-worktree' || terminal?.agentPreset === 'codex-agent' || terminal?.agentPreset === 'codex-agent-worktree') {
+      if (isSdkAgentPreset(terminal?.agentPreset)) {
         host.claude.stopSession(showCloseConfirm)
-        if (cleanWorktree && terminal?.agentPreset === 'claude-code-worktree') {
-          host.claude.cleanupWorktree(showCloseConfirm, true)
-        } else if (cleanWorktree && terminal?.agentPreset === 'codex-agent-worktree') {
-          host.worktree.remove(showCloseConfirm, true)
+        if (cleanWorktree && isWorktreePreset(terminal?.agentPreset)) {
+          // The Claude runtime owns its worktree; Codex worktrees are plain git worktrees.
+          if (sdkRuntimeFamilyOfPreset(terminal?.agentPreset) === 'claude') {
+            host.claude.cleanupWorktree(showCloseConfirm, true)
+          } else {
+            host.worktree.remove(showCloseConfirm, true)
+          }
         }
       } else {
         host.pty.kill(showCloseConfirm)
@@ -1128,15 +1036,15 @@ export const WorkspaceView = memo(function WorkspaceView({ workspace, terminals,
     if (!terminal) return
     workspaceStore.setTerminalRuntimeError(id, undefined)
     try {
-      if (terminal.agentPreset === 'claude-code' || terminal.agentPreset === 'claude-code-v2' || terminal.agentPreset === 'claude-code-worktree' || terminal.agentPreset === 'codex-agent' || terminal.agentPreset === 'codex-agent-worktree') {
-        // Stop and restart Claude session
+      if (isSdkAgentPreset(terminal.agentPreset)) {
+        // Stop and restart the agent session
         await host.claude.stopSession(id)
         await host.claude.startSession(id, {
           cwd: terminal.cwd,
           agentPreset: terminal.agentPreset,
-          ...(terminal.agentPreset === 'claude-code-worktree' || terminal.agentPreset === 'codex-agent-worktree' ? { useWorktree: true, worktreePath: terminal.worktreePath, worktreeBranch: terminal.worktreeBranch } : {}),
+          ...(isWorktreePreset(terminal.agentPreset) ? { useWorktree: true, worktreePath: terminal.worktreePath, worktreeBranch: terminal.worktreeBranch } : {}),
         })
-      } else if (terminal.agentPreset === 'claude-cli' || terminal.agentPreset === 'claude-cli-worktree' || terminal.agentPreset === 'claude-cli-agent') {
+      } else if (panelOfPreset(terminal.agentPreset) === 'claude-cli' || panelOfPreset(terminal.agentPreset) === 'claude-cli-agent') {
         await host.pty.kill(id)
         workspaceStore.bumpTerminalClaudeCliRestart(id)
       } else {
@@ -1170,13 +1078,13 @@ export const WorkspaceView = memo(function WorkspaceView({ workspace, terminals,
 
   const handleSwitchApiVersion = useCallback(async (id: string) => {
     const terminal = terminals.find(t => t.id === id)
-    if (!terminal || (terminal.agentPreset !== 'claude-code' && terminal.agentPreset !== 'claude-code-v2')) return
+    if (!terminal || !apiVersionSwitchOf(terminal.agentPreset)) return
     // Stop current session
     await host.claude.stopSession(id)
     // Switch agentPreset in store
     const newPreset = workspaceStore.switchTerminalApiVersion(id)
     if (!newPreset) return
-    const newApiVersion = newPreset === 'claude-code-v2' ? 'v2' as const : 'v1' as const
+    const newApiVersion = apiVersionOfPreset(newPreset)
     // Resume with the same sdkSessionId but new API version
     const sdkSessionId = terminal.sdkSessionId
     if (sdkSessionId) {
@@ -1238,7 +1146,7 @@ export const WorkspaceView = memo(function WorkspaceView({ workspace, terminals,
   // Send content to the active Claude agent session
   const handleSendToClaude = useCallback(async (content: string) => {
     if (!agentTerminal) return false
-    if (agentTerminal.agentPreset === 'claude-channel') {
+    if (panelOfPreset(agentTerminal.agentPreset) === 'claude-channel') {
       await host.claudeChannel.sendMessage(agentTerminal.id, content)
     } else {
       await host.claude.sendMessage(agentTerminal.id, content)
@@ -1285,7 +1193,7 @@ export const WorkspaceView = memo(function WorkspaceView({ workspace, terminals,
         {accountChip && (
           <div className="workspace-account-chip-wrap">
             <button
-              className={`workspace-account-chip workspace-account-chip-${accountChip.kind}`}
+              className={`workspace-account-chip workspace-account-chip-provider workspace-account-chip-${accountChip.kind}`}
               title={accountChip.title}
               onClick={() => {
                 // Signed-out profiles go straight to the appropriate ceremony
@@ -1307,7 +1215,8 @@ export const WorkspaceView = memo(function WorkspaceView({ workspace, terminals,
               <span className="workspace-account-kind">{accountChip.kind}</span>
               {(() => {
                 if (!accountChip.loggedIn) return null
-                const raw = accountChip.kind === 'claude' ? cliVersions?.claude : cliVersions?.codex
+                const runtime = cliRuntimeOf(accountChip.kind)
+                const raw = runtime ? cliVersions?.[runtime] : undefined
                 if (!raw) return null
                 const short = raw.match(/\d+\.\d+\.\d+/)?.[0] || raw
                 return <span className="workspace-account-version">v{short}</span>
@@ -1365,7 +1274,7 @@ export const WorkspaceView = memo(function WorkspaceView({ workspace, terminals,
                   <div className="workspace-account-menu-pending">
                     <span className="workspace-account-spinner" />
                     <span className="workspace-account-menu-pending-label">{t('workspace.accountLoggingIn')}</span>
-                    {accountChip.kind === 'codex' && (
+                    {accountAdapterFor(accountChip.kind)?.cancelLogin && (
                       <button
                         type="button"
                         className="workspace-account-menu-cancel"
@@ -1374,6 +1283,10 @@ export const WorkspaceView = memo(function WorkspaceView({ workspace, terminals,
                         {t('workspace.accountCancelLogin')}
                       </button>
                     )}
+                  </div>
+                ) : accountChip.hint ? (
+                  <div className="workspace-account-menu-hint">
+                    {t(accountChip.hint)}
                   </div>
                 ) : isRemoteConnected ? (
                   remoteAuthCapabilities === undefined ? (
@@ -1540,17 +1453,14 @@ export const WorkspaceView = memo(function WorkspaceView({ workspace, terminals,
       )}
       {loginDialog && (
         <LoginDialog
-          kind={loginDialog.kind}
+          provider={loginDialog.kind}
           target={loginDialog.target}
           hostLabel={remoteHostLabel || remoteEndpointLabel || undefined}
           onClose={() => setLoginDialog(null)}
           onSuccess={() => {
             setLoginDialog(null)
             void refreshAccountChip()
-            window.dispatchEvent(new CustomEvent(
-              loginDialog.kind === 'codex' ? 'codex-account-switched' : 'claude-account-switched',
-              { detail: {} },
-            ))
+            window.dispatchEvent(new CustomEvent(accountSwitchedEvent(loginDialog.kind), { detail: {} }))
           }}
         />
       )}

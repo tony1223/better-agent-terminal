@@ -28,6 +28,8 @@ import {
 } from './utils/remote-profile-events'
 import { rememberMountedWorkspace } from './utils/workspace-mounts'
 import type { AppState, EnvVariable, TerminalInstance } from './types'
+import { panelOfPreset } from '../../shared/providers.mjs'
+import { accountSwitchedEvent, hostProviderOf } from './providers/account-routing'
 
 // Panel settings interface
 interface PanelSettings {
@@ -892,8 +894,7 @@ export default function App() {
     // account chip and the agent panels already listen on, so one subscription
     // here keeps every view in this window in sync with host-owned state.
     const unsubAccountChanged = host.claude.onAccountChanged(payload => {
-      const kind = payload?.agent === 'codex' ? 'codex' : 'claude'
-      window.dispatchEvent(new CustomEvent(`${kind}-account-switched`, {
+      window.dispatchEvent(new CustomEvent(accountSwitchedEvent(hostProviderOf(payload?.agent)), {
         detail: { accountId: payload?.accountId ?? undefined },
       }))
     })
@@ -1359,7 +1360,7 @@ export default function App() {
       {/* Right sidebar: tabbed Snippets / Skills (Skills only for Claude Code terminals) */}
       {(() => {
         const focusedTerminal = state.focusedTerminalId ? state.terminals.find(t2 => t2.id === state.focusedTerminalId) : null
-        const isClaudeCode = focusedTerminal?.agentPreset === 'claude-code' || focusedTerminal?.agentPreset === 'claude-code-v2'
+        const isClaudeCode = panelOfPreset(focusedTerminal?.agentPreset) === 'claude-agent'
         const effectiveTab = isClaudeCode ? rightPanelTab : 'snippets'
 
         if (!showSnippetSidebar) return null

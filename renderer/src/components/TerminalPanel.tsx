@@ -23,6 +23,7 @@ import {
   shouldTraceTerminalKeyEvent,
   shouldUseDirectTerminalKeyInput,
 } from '../utils/terminal-key-input'
+import { panelOfPreset, supportsPtyImagePaste } from '../../../shared/providers.mjs'
 import '@xterm/xterm/css/xterm.css'
 
 const dlog = (...args: unknown[]) => host.debug.log(...args)
@@ -60,7 +61,8 @@ function getWindowsBuildNumber(): number | undefined {
 }
 
 function isClaudeCliPreset(agentPreset?: AgentPresetId): boolean {
-  return agentPreset === 'claude-cli' || agentPreset === 'claude-cli-worktree' || agentPreset === 'claude-cli-agent'
+  const panel = panelOfPreset(agentPreset)
+  return panel === 'claude-cli' || panel === 'claude-cli-agent'
 }
 
 function isTerminalKeyboardEventTarget(container: HTMLElement, target: EventTarget | null): boolean {
@@ -86,7 +88,7 @@ export const TerminalPanel = memo(function TerminalPanel({
   const hasBeenFocusedRef = useRef(false)
   const isActiveRef = useRef(isActive)
   const doResizeRef = useRef<(() => void) | null>(null)
-  const supportsImagePaste = agentPreset === 'codex-cli' || isClaudeCliPreset(agentPreset)
+  const supportsImagePaste = supportsPtyImagePaste(agentPreset)
   const isClaudeCliTerminal = isClaudeCliPreset(agentPreset)
   const ptyReadyRef = useRef(ptyReady)
   const ptyInputRef = useRef<PtyInputWriter | null>(null)

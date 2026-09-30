@@ -642,12 +642,13 @@ fn bridge_error(message: impl Into<String>) -> BridgeError {
     }
 }
 
+/// Presets whose sessions run on this Codex app-server: the Codex runtime
+/// family in shared/providers.json (Codex Agent, its worktree variant, Fugu).
 pub fn is_codex_agent_preset_id(preset: Option<&str>) -> bool {
-    match preset {
-        Some("codex-agent") => true,
-        Some("codex-agent-worktree") => true,
-        _ => false,
-    }
+    preset.is_some_and(|preset| {
+        crate::providers::sdk_runtime_family(crate::providers::resolve_preset_alias(preset))
+            == Some("codex")
+    })
 }
 
 fn is_codex_agent_preset(options: &Value) -> bool {
@@ -8255,6 +8256,19 @@ mod tests {
             "useWorktree": true,
             "worktreePath": "/repo/.bat-worktrees/abc12345"
         }))));
+    }
+
+    #[test]
+    fn codex_runtime_presets_come_from_the_registry() {
+        // Codex Fugu Agent runs on the Codex app-server too; it used to fall
+        // through to the sidecar because only codex-agent* were listed.
+        assert!(should_handle_codex(&Some(
+            json!({ "agentPreset": "codex-fugu", "cwd": "/repo" })
+        )));
+        assert!(is_codex_agent_preset_id(Some("openai-agent")));
+        assert!(!is_codex_agent_preset_id(Some("codex-cli")));
+        assert!(!is_codex_agent_preset_id(Some("claude-code")));
+        assert!(!is_codex_agent_preset_id(None));
     }
 
     #[test]

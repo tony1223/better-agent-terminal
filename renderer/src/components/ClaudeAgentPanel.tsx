@@ -47,6 +47,8 @@ import { buildAgentTaskTree, findAgentNode, formatAgentNodeElapsed, summarizeAge
 import { bindPanelActiveEvent, usePanelActivation, usePanelActiveEffect, type PanelActivation } from '../utils/panel-activation'
 import { prepareFilePickerResults, type FilePickerSearchEntry } from '../utils/file-picker-search'
 import { buildTranscriptHandoffPrompt, codexPermissionsForClaudeHandoff, type TranscriptSnapshot } from '../utils/agent-context-transfer'
+import { apiVersionOfPreset, defaultPresetForRuntime, isWorktreePreset, providerOfPreset, sdkRuntimeFamilyOfPreset, type ProviderId, type SdkRuntimeFamily } from '../../../shared/providers.mjs'
+import { sessionUsageProvider } from '../providers/account-routing'
 
 interface SessionMeta {
   model?: string
@@ -212,8 +214,8 @@ export interface ClaudeAgentPanelProps {
   showToolMsg?: boolean
   showThinkingMsg?: boolean
   isRemoteConnected?: boolean
-  targetAgent?: 'claude' | 'codex'
-  onRequestLogin?: (kind: 'claude' | 'codex') => void
+  targetAgent?: SdkRuntimeFamily
+  onRequestLogin?: (kind: ProviderId) => void
 }
 
 interface AttachedImage {
@@ -308,9 +310,9 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
   const { t, i18n } = useTranslation()
   // Determine backend/session flavor from agentPreset
   const terminal = workspaceStore.getState().terminals.find(t => t.id === sessionId)
-  const isCodexSession = targetAgent === 'codex' || terminal?.agentPreset === 'codex-agent'
-  const isV2Session = terminal?.agentPreset === 'claude-code-v2'
-  const isWorktreeSession = terminal?.agentPreset === 'claude-code-worktree'
+  const isCodexSession = targetAgent === 'codex' || sdkRuntimeFamilyOfPreset(terminal?.agentPreset) === 'codex'
+  const isV2Session = apiVersionOfPreset(terminal?.agentPreset) === 'v2'
+  const isWorktreeSession = isWorktreePreset(terminal?.agentPreset)
   const normalizedAgentParams = normalizeAgentParams(terminal?.agentPreset, terminal?.agentParams)
   const [messages, setMessages] = useState<MessageItem[]>([])
   // Per-tool render-helper cache. Avoids rerunning regex/split over large
@@ -404,16 +406,19 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
   // Host-wide usage poll (one poller per host, active account) keeps the 5h/7d
   // statusline items fresh while idle; mid-turn rate_limit_events still
   // overwrite with the latest API-reported numbers. Provider follows the
-  // session: codex sessions show the codex account's windows, not Claude's.
+  // session: codex sessions show the codex account's windows, not Claude's,
+  // and providers that report no usage (e.g. Fugu) show none.
+  const usageProvider = sessionUsageProvider(terminal?.agentPreset, isCodexSession ? 'codex' : 'claude')
   useEffect(() => {
+    if (!usageProvider) return
     const apply = () => {
-      const snap = getHostUsageSnapshot(isCodexSession ? 'codex' : 'claude')
+      const snap = getHostUsageSnapshot(usageProvider)
       if (!snap) return
       setRateLimits(prev => rateLimitsFromHostUsage(snap, prev))
     }
     apply()
     return subscribeHostUsage(apply)
-  }, [isCodexSession])
+  }, [usageProvider])
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([])
   const [availableEfforts, setAvailableEfforts] = useState<string[]>(() => [...EFFORT_LEVELS])
   const [availableCodexSandboxModes, setAvailableCodexSandboxModes] = useState<string[]>(() => [...CODEX_SANDBOX_MODES])
@@ -2290,8 +2295,8 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
       const terminalState = workspaceStore.getState().terminals.find(t => t.id === sessionId)
       const savedSdkSessionId = terminalState?.sdkSessionId
       const savedModel = normalizeClaudeModelSelection(terminalState?.model)
-      const apiVersion = terminalState?.agentPreset === 'claude-code-v2' ? 'v2' as const : 'v1' as const
-      const useWorktree = terminalState?.agentPreset === 'claude-code-worktree' || !!terminalState?.worktreePath
+      const apiVersion = apiVersionOfPreset(terminalState?.agentPreset)
+      const useWorktree = isWorktreePreset(terminalState?.agentPreset) || !!terminalState?.worktreePath
       const globalSettings = settingsStore.getSettings()
       const effectiveModel = normalizeClaudeModelSelection(currentModel || savedModel || globalSettings.defaultClaudeModel)
       const effectiveEffortMode = effortLevel || globalSettings.defaultEffort || 'high'
@@ -2933,7 +2938,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
       setAttachedImages([])
     }
 
-    const newTerminal = workspaceStore.addTerminal(workspaceId, 'claude-code' as AgentPresetId)
+    const newTerminal = workspaceStore.addTerminal(workspaceId, defaultPresetForRuntime('claude'))
     dlog(`${tag} newTerminal=${newTerminal.id.slice(0, 8)}`)
     workspaceStore.setTerminalSdkSessionId(newTerminal.id, result.newSdkSessionId)
     if (currentModel) {
@@ -2977,7 +2982,8 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
       const model = settings.defaultCodexModel || undefined
       const effort = settings.defaultCodexEffort || 'high'
       const handoffPermissions = codexPermissionsForClaudeHandoff(permissionMode)
-      const target = workspaceStore.addTerminal(workspaceId, 'codex-agent' as AgentPresetId, {
+      const codexPreset = defaultPresetForRuntime('codex')
+      const target = workspaceStore.addTerminal(workspaceId, codexPreset, {
         id: uuidv4(),
         cwd: snapshot.cwd,
         focus: false,
@@ -2994,7 +3000,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
         cwd: snapshot.cwd,
         model,
         effort,
-        agentPreset: 'codex-agent',
+        agentPreset: codexPreset,
         codexSandboxMode: handoffPermissions.sandboxMode,
         codexApprovalPolicy: handoffPermissions.approvalPolicy,
       }) as { sdkSessionId?: string } | null
@@ -3228,7 +3234,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
           id: `sys-login-${Date.now()}`, sessionId, role: 'system' as const,
           content: 'Opening Claude login...', timestamp: Date.now(),
         }])
-        onRequestLogin('claude')
+        onRequestLogin(providerOfPreset(terminal?.agentPreset) ?? providerOfPreset(defaultPresetForRuntime('claude'))!)
       } else {
         setMessages(prev => [...prev, {
           id: `sys-login-err-${Date.now()}`, sessionId, role: 'system' as const,

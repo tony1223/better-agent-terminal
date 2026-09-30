@@ -5,6 +5,7 @@ import { AgentPresetId, getAgentPreset } from '../types/agent-presets'
 import { normalizeAgentParams } from '../types/agent-profiles'
 import { clearPreviewCache } from '../components/TerminalThumbnail'
 import { settingsStore } from './settings-store'
+import { apiVersionOfPreset, apiVersionSwitchOf, defaultModelOfPreset, providerAgentName, resolvePresetAlias, sdkRuntimeFamilyOfPreset, type SdkRuntimeFamily } from '../../../shared/providers.mjs'
 
 type Listener = () => void
 
@@ -42,22 +43,20 @@ function setHostDockBadge(count: number): void {
 }
 
 function normalizePersistedAgentPreset(value: unknown): AgentPresetId | undefined {
-  if (value === 'openai-agent') return 'codex-agent'
   if (typeof value === 'string') {
-    const preset = getAgentPreset(value)
-    if (preset && (!preset.debug || host.debug.isDebugMode === true)) return value as AgentPresetId
+    const preset = getAgentPreset(resolvePresetAlias(value))
+    if (preset && (!preset.debug || host.debug.isDebugMode === true)) return preset.id as AgentPresetId
   }
   return undefined
 }
 
-export function sdkSessionRuntimeFamily(agentPreset?: AgentPresetId): 'claude' | 'codex' | null {
-  if (agentPreset === 'codex-agent' || agentPreset === 'codex-agent-worktree' || agentPreset === 'codex-fugu') return 'codex'
-  if (agentPreset === 'claude-code' || agentPreset === 'claude-code-v2' || agentPreset === 'claude-code-worktree') return 'claude'
-  return null
+export function sdkSessionRuntimeFamily(agentPreset?: AgentPresetId): SdkRuntimeFamily | null {
+  return sdkRuntimeFamilyOfPreset(agentPreset)
 }
 
 function defaultModelForNewAgent(agentPreset?: AgentPresetId): string | undefined {
-  if (agentPreset !== 'codex-agent' && agentPreset !== 'codex-agent-worktree') return undefined
+  // Providers with their own default model (e.g. Fugu) resolve it in the panel.
+  if (sdkRuntimeFamilyOfPreset(agentPreset) !== 'codex' || defaultModelOfPreset(agentPreset)) return undefined
   return settingsStore.getSettings().defaultCodexModel || undefined
 }
 
@@ -519,11 +518,12 @@ class WorkspaceStore {
     this.notify()
   }
 
-  switchTerminalApiVersion(id: string): 'claude-code' | 'claude-code-v2' | null {
+  switchTerminalApiVersion(id: string): AgentPresetId | null {
     const terminal = this.state.terminals.find(t => t.id === id)
     if (!terminal) return null
-    const newPreset = terminal.agentPreset === 'claude-code' ? 'claude-code-v2' as const : 'claude-code' as const
-    const newTitle = newPreset === 'claude-code-v2' ? 'Claude Agent (V2)' : 'Claude Agent (V1)'
+    const newPreset = apiVersionSwitchOf(terminal.agentPreset) as AgentPresetId | undefined
+    if (!newPreset) return null
+    const newTitle = `${providerAgentName(newPreset)} (${apiVersionOfPreset(newPreset).toUpperCase()})`
     this.state = {
       ...this.state,
       terminals: this.state.terminals.map(t =>

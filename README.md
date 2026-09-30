@@ -77,7 +77,7 @@ Mobile apps require Better Agent Terminal **v3.1.3 or later**.
 ### Terminal
 - **Split-panel layout** — 70% main panel + 30% scrollable thumbnail bar showing all terminals
 - **Multiple terminals per workspace** — Powered by xterm.js with full Unicode/CJK support
-- **Agent presets** — Pre-configured terminal roles: Claude Code, Claude Code (worktree), Codex Agent, or plain terminal
+- **Agent presets** — Pre-configured terminal roles: Claude Code, Claude Code (worktree), Codex Agent, or plain terminal. Providers and their presets are declared in one manifest, [`shared/providers.json`](shared/providers.json); see [docs/providers.md](docs/providers.md)
 - **Git worktree isolation** — Spawn Claude agents in an isolated worktree to prevent destructive changes to your main working tree
 - **Tab navigation** — Switch between Terminal, Files, and Git views per workspace
 - **File browser** — Search, navigate, and preview files with syntax highlighting (highlight.js)
@@ -131,7 +131,8 @@ Items can be reordered, colored, and toggled on/off via a drag-and-drop template
 
 #### Account & Usage
 - **Multi-account switching** — `/switch` to manage and switch between multiple Claude accounts
-- **Usage monitoring** — Track API rate limits (5-hour and 7-day windows) via Anthropic OAuth or Chrome session key
+- **Account chip per provider** — The chip in the workspace tab bar follows the focused session's provider (Claude, Codex, …): its accounts, sign-in and usage
+- **Usage monitoring** — Track API rate limits (5-hour and 7-day windows) per provider: Claude via Anthropic OAuth or Chrome session key, Codex via its app-server rate limits
 - **Context usage panel** — Visualize token usage breakdown by category (code, conversation, tools, memory, MCP, etc.)
 
 #### UI & Interaction

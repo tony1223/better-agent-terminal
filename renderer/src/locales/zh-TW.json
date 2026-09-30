@@ -341,6 +341,7 @@
     "accountRemoteLoginAction": "在 {{host}} 上登入…",
     "accountRemoteLoginChecking": "正在確認遠端登入支援…",
     "accountRemoteLoginUnsupported": "此主機版本不支援遠端登入。請更新主機上的 Better Agent Terminal，或直接從主機終端登入。",
+    "accountApiKeyHint": "此提供者使用 API 金鑰，請在設定中設定。",
     "accountLoggingIn": "登入中…請在瀏覽器完成登入",
     "accountCancelLogin": "取消",
     "remoteHostFallback": "遠端主機",
