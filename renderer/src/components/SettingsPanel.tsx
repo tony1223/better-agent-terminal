@@ -13,6 +13,8 @@ import { checkUpdatesNow, getUpdateState, subscribeUpdate } from '../lib/auto-up
 import { CLAUDE_BUILTIN_MODELS } from '../utils/claude-model-presets'
 import { CODEX_MODELS } from '../utils/codex-models'
 import { LoginDialog } from './LoginDialog'
+import { ProvidersSettings } from './ProvidersSettings'
+import { isPresetEnabled, resolveDefaultAgentPreset } from '../../../shared/providers.mjs'
 
 interface SettingsPanelProps {
   onClose: () => void
@@ -103,7 +105,7 @@ interface RuntimeInstallResult {
   message?: string
 }
 
-type SettingsTab = 'general' | 'agent' | 'remote' | 'accounts' | 'runtime' | 'advanced'
+type SettingsTab = 'general' | 'agent' | 'remote' | 'providers' | 'runtime' | 'advanced'
 const CUSTOM_MODEL_OPTION = '__custom_model__'
 
 export function SettingsPanel({ onClose, isRemoteProfile = false, remoteOrigin = null }: SettingsPanelProps) {
@@ -173,10 +175,12 @@ export function SettingsPanel({ onClose, isRemoteProfile = false, remoteOrigin =
   const platform = host.platform || 'darwin'
   const platformShellOptions = SHELL_OPTIONS.filter(opt => opt.platforms.includes(platform))
   const isDebugMode = host.debug.isDebugMode === true
-  const visibleAgentPresets = getVisiblePresets(isDebugMode).filter(p => p.id !== 'none')
+  const providerOptions = settingsStore.providerToggleOptions()
+  const visibleAgentPresets = getVisiblePresets(isDebugMode)
+    .filter(p => p.id !== 'none' && isPresetEnabled(p.id, settings.providers, providerOptions))
   const defaultAgentValue = visibleAgentPresets.some(p => p.id === settings.defaultAgent)
     ? settings.defaultAgent
-    : 'claude-code'
+    : resolveDefaultAgentPreset(settings.defaultAgent, settings.providers, providerOptions)
   const openExternal = useCallback((url: string) => {
     Promise.resolve(host.shell.openExternal(url)).catch(() => window.open(url))
   }, [])
@@ -290,7 +294,7 @@ export function SettingsPanel({ onClose, isRemoteProfile = false, remoteOrigin =
   }, [])
 
   useEffect(() => {
-    if (activeTab !== 'accounts') return
+    if (activeTab !== 'providers') return
     if (settings.accountSwitching !== false) {
       loadAccounts()
     } else {
@@ -616,11 +620,121 @@ export function SettingsPanel({ onClose, isRemoteProfile = false, remoteOrigin =
 
   const terminalColors = settingsStore.getTerminalColors()
 
+  // Claude accounts (claude-oauth): quick-switch list, add / remove accounts.
+  const claudeAccountsSection = (
+    <>
+      <h3>{t('settings.accountSwitching')}</h3>
+      <p className="settings-hint" style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '8px' }}>
+        {t('settings.accountSwitchingHint')}
+      </p>
+      <label className="settings-checkbox" style={{ marginBottom: '10px' }}>
+        <input type="checkbox" checked={settings.accountSwitching !== false} onChange={(e) => settingsStore.setAccountSwitching(e.target.checked)} />
+        {t('settings.accountSwitchingEnabled')}
+      </label>
+      {settings.accountSwitching !== false && (
+        <div style={{ marginTop: '8px' }}>
+          {accountsLoading ? (
+            <p style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>{t('settings.accountSwitchingImporting')}</p>
+          ) : accounts.length === 0 ? (
+            <p style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>{t('settings.accountSwitchingNoAccounts')}</p>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+              {accounts.map(account => (
+                <div key={account.id} style={{
+                  display: 'flex', alignItems: 'center', gap: '8px',
+                  padding: '6px 10px', borderRadius: '4px',
+                  background: account.id === activeAccountId ? 'var(--bg-tertiary)' : 'transparent',
+                  border: account.id === activeAccountId ? '1px solid var(--border-color)' : '1px solid transparent',
+                }}>
+                  <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: account.id === activeAccountId ? '#3fb950' : 'var(--text-secondary)', flexShrink: 0 }} />
+                  <span style={{ fontSize: '13px', flex: 1 }}>
+                    {account.email}
+                    {account.subscriptionType && <span style={{ fontSize: '11px', color: 'var(--text-secondary)', marginLeft: '6px' }}>({account.subscriptionType})</span>}
+                  </span>
+                  {account.id === activeAccountId ? (
+                    <span style={{ fontSize: '11px', color: '#3fb950', fontWeight: 500 }}>{t('settings.accountSwitchingActive')}</span>
+                  ) : (
+                    <>
+                      <button
+                        className="statusline-template-btn"
+                        style={{ fontSize: '11px' }}
+                        onClick={() => void handleAccountSwitch(account.id)}
+                        disabled={accountSwitchingId !== null || accountRemovingId !== null}
+                      >
+                        {accountSwitchingId === account.id ? t('settings.accountSwitchingSwitching') : t('settings.accountSwitchingSwitch')}
+                      </button>
+                      {!account.isDefault && (
+                        <button
+                          className="statusline-template-btn"
+                          style={{ fontSize: '11px', color: '#f85149' }}
+                          onClick={() => void handleAccountRemove(account.id)}
+                          disabled={accountSwitchingId !== null || accountRemovingId !== null}
+                        >
+                          {accountRemovingId === account.id ? t('settings.accountSwitchingRemoving') : t('settings.accountSwitchingRemove')}
+                        </button>
+                      )}
+                    </>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+          <button className="statusline-template-btn" style={{ marginTop: '10px', fontSize: '12px' }} onClick={handleAccountLoginNew} disabled={accountLoginOpen}>
+            {accountLoginOpen ? t('settings.accountSwitchingOpeningLoginShort') : t('settings.accountSwitchingAddAccount')}
+          </button>
+          {accountStatusMsg && (
+            <p style={{ fontSize: '11px', color: accountStatusIsError ? '#f85149' : 'var(--text-secondary)', marginTop: '6px' }}>
+              {accountStatusMsg}
+            </p>
+          )}
+        </div>
+      )}
+    </>
+  )
+
+  // Fugu (Sakana): API key stored in $CODEX_HOME/.env (apiKeyStore codex-env).
+  const codexEnvKeySection = (
+    <div className="settings-group">
+      <p className="settings-hint">
+        Experimental. Writes the Sakana provider + key into ~/.codex so the
+        Codex Fugu Agent (model “fugu”) can authenticate — no need to run the
+        Fugu installer. Get a key at console.sakana.ai.
+      </p>
+      <p className="settings-hint">
+        Provider: {fuguStatus?.providerConfigured ? 'configured ✓' : 'not configured'}
+        {' · '}
+        Key: {fuguStatus?.keyConfigured ? 'set ✓' : 'not set'}
+      </p>
+      <input
+        type="password"
+        value={fuguKey}
+        autoComplete="off"
+        placeholder="SAKANA_API_KEY"
+        onChange={e => setFuguKey(e.target.value)}
+      />
+      <button
+        className="settings-btn"
+        disabled={fuguSaving || !fuguKey.trim()}
+        onClick={() => {
+          setFuguSaving(true)
+          setFuguMsg(null)
+          host.codex.fuguSetKey(fuguKey.trim())
+            .then(s => { setFuguStatus(s); setFuguKey(''); setFuguMsg('Saved to ~/.codex (provider + key).') })
+            .catch(e => setFuguMsg(e instanceof Error ? e.message : String(e)))
+            .finally(() => setFuguSaving(false))
+        }}
+      >
+        {fuguSaving ? 'Saving…' : 'Save Sakana key'}
+      </button>
+      {fuguMsg && <p className="settings-hint">{fuguMsg}</p>}
+    </div>
+  )
+
   const tabs: { id: SettingsTab; label: string }[] = [
     { id: 'general', label: t('settings.tabGeneral') },
     { id: 'agent', label: t('settings.tabAgent') },
     { id: 'remote', label: t('settings.tabRemote') },
-    { id: 'accounts', label: t('settings.tabAccounts', 'Accounts') },
+    { id: 'providers', label: t('settings.tabProviders') },
     { id: 'runtime', label: t('settings.tabRuntime', 'Runtime') },
     { id: 'advanced', label: t('settings.tabAdvanced') },
   ]
@@ -1048,43 +1162,6 @@ export function SettingsPanel({ onClose, isRemoteProfile = false, remoteOrigin =
                   <p className="settings-hint">{t('settings.codexUnifiedAccountsHint')}</p>
                   {codexUnifiedInfo && <p className="settings-hint">{codexUnifiedInfo}</p>}
                 </div>
-                {isDebugMode && (
-                  <div className="settings-group">
-                    <label>Codex Fugu (Sakana)</label>
-                    <p className="settings-hint">
-                      Experimental. Writes the Sakana provider + key into ~/.codex so the
-                      Codex Fugu Agent (model “fugu”) can authenticate — no need to run the
-                      Fugu installer. Get a key at console.sakana.ai.
-                    </p>
-                    <p className="settings-hint">
-                      Provider: {fuguStatus?.providerConfigured ? 'configured ✓' : 'not configured'}
-                      {' · '}
-                      Key: {fuguStatus?.keyConfigured ? 'set ✓' : 'not set'}
-                    </p>
-                    <input
-                      type="password"
-                      value={fuguKey}
-                      autoComplete="off"
-                      placeholder="SAKANA_API_KEY"
-                      onChange={e => setFuguKey(e.target.value)}
-                    />
-                    <button
-                      className="settings-btn"
-                      disabled={fuguSaving || !fuguKey.trim()}
-                      onClick={() => {
-                        setFuguSaving(true)
-                        setFuguMsg(null)
-                        host.codex.fuguSetKey(fuguKey.trim())
-                          .then(s => { setFuguStatus(s); setFuguKey(''); setFuguMsg('Saved to ~/.codex (provider + key).') })
-                          .catch(e => setFuguMsg(e instanceof Error ? e.message : String(e)))
-                          .finally(() => setFuguSaving(false))
-                      }}
-                    >
-                      {fuguSaving ? 'Saving…' : 'Save Sakana key'}
-                    </button>
-                    {fuguMsg && <p className="settings-hint">{fuguMsg}</p>}
-                  </div>
-                )}
               </div>
 
               <div className="settings-section">
@@ -1453,76 +1530,13 @@ Reference: https://github.com/ind-igo/cx`
             </div>
           )}
 
-          {/* ── ACCOUNTS TAB ── */}
-          {activeTab === 'accounts' && (
-            <div className="settings-section">
-              <h3>{t('settings.accountSwitching')}</h3>
-              <p className="settings-hint" style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '8px' }}>
-                {t('settings.accountSwitchingHint')}
-              </p>
-              <label className="settings-checkbox" style={{ marginBottom: '10px' }}>
-                <input type="checkbox" checked={settings.accountSwitching !== false} onChange={(e) => settingsStore.setAccountSwitching(e.target.checked)} />
-                {t('settings.accountSwitchingEnabled')}
-              </label>
-              {settings.accountSwitching !== false && (
-                <div style={{ marginTop: '8px' }}>
-                  {accountsLoading ? (
-                    <p style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>{t('settings.accountSwitchingImporting')}</p>
-                  ) : accounts.length === 0 ? (
-                    <p style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>{t('settings.accountSwitchingNoAccounts')}</p>
-                  ) : (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                      {accounts.map(account => (
-                        <div key={account.id} style={{
-                          display: 'flex', alignItems: 'center', gap: '8px',
-                          padding: '6px 10px', borderRadius: '4px',
-                          background: account.id === activeAccountId ? 'var(--bg-tertiary)' : 'transparent',
-                          border: account.id === activeAccountId ? '1px solid var(--border-color)' : '1px solid transparent',
-                        }}>
-                          <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: account.id === activeAccountId ? '#3fb950' : 'var(--text-secondary)', flexShrink: 0 }} />
-                          <span style={{ fontSize: '13px', flex: 1 }}>
-                            {account.email}
-                            {account.subscriptionType && <span style={{ fontSize: '11px', color: 'var(--text-secondary)', marginLeft: '6px' }}>({account.subscriptionType})</span>}
-                          </span>
-                          {account.id === activeAccountId ? (
-                            <span style={{ fontSize: '11px', color: '#3fb950', fontWeight: 500 }}>{t('settings.accountSwitchingActive')}</span>
-                          ) : (
-                            <>
-                              <button
-                                className="statusline-template-btn"
-                                style={{ fontSize: '11px' }}
-                                onClick={() => void handleAccountSwitch(account.id)}
-                                disabled={accountSwitchingId !== null || accountRemovingId !== null}
-                              >
-                                {accountSwitchingId === account.id ? t('settings.accountSwitchingSwitching') : t('settings.accountSwitchingSwitch')}
-                              </button>
-                              {!account.isDefault && (
-                                <button
-                                  className="statusline-template-btn"
-                                  style={{ fontSize: '11px', color: '#f85149' }}
-                                  onClick={() => void handleAccountRemove(account.id)}
-                                  disabled={accountSwitchingId !== null || accountRemovingId !== null}
-                                >
-                                  {accountRemovingId === account.id ? t('settings.accountSwitchingRemoving') : t('settings.accountSwitchingRemove')}
-                                </button>
-                              )}
-                            </>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  <button className="statusline-template-btn" style={{ marginTop: '10px', fontSize: '12px' }} onClick={handleAccountLoginNew} disabled={accountLoginOpen}>
-                    {accountLoginOpen ? t('settings.accountSwitchingOpeningLoginShort') : t('settings.accountSwitchingAddAccount')}
-                  </button>
-                  {accountStatusMsg && (
-                    <p style={{ fontSize: '11px', color: accountStatusIsError ? '#f85149' : 'var(--text-secondary)', marginTop: '6px' }}>
-                      {accountStatusMsg}
-                    </p>
-                  )}
-                </div>
-              )}
-            </div>
+          {/* ── PROVIDERS TAB ── */}
+          {activeTab === 'providers' && (
+            <ProvidersSettings
+              sectionFor={provider => provider.auth === 'claude-oauth'
+                ? claudeAccountsSection
+                : provider.apiKeyStore === 'codex-env' ? codexEnvKeySection : null}
+            />
           )}
 
           {/* ── RUNTIME TAB ── */}
@@ -1783,7 +1797,7 @@ Reference: https://github.com/ind-igo/cx`
             panel's stopPropagation handler instead of closing Settings too. */}
         {accountLoginOpen && (
           <LoginDialog
-            kind="claude"
+            provider="claude"
             target={isRemoteProfile ? 'remote' : 'local'}
             hostLabel={remoteOrigin || undefined}
             onClose={() => setAccountLoginOpen(false)}

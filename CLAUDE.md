@@ -55,6 +55,12 @@
 - 15 configurable items (see `STATUSLINE_ITEMS` in `renderer/src/types/index.ts`) with custom colors, zone alignment, and template-based config.
 - Usage polling: Chrome session key (primary, lenient rate limits) → OAuth fallback (strict rate limits).
 
+## Providers
+
+- Agent providers and presets are declared in `shared/providers.json`; the renderer and sidecar read it through `shared/providers.mjs`, the Rust host through `src-tauri/src/providers.rs`. See `docs/providers.md`.
+- Do not add new comparisons against provider or preset id literals (`'claude' | 'codex'`, `'codex-agent'`, …) outside those registries. Look the preset up and branch on its `provider` / `panel` kind instead.
+- Provider and preset ids are persisted and sent over IPC/remote: never rename them; retire a preset with `hidden`.
+
 ## Remote State Ownership
 
 - Remote mode is host-owned by default. Except for purely local presentation state, clients do not own remote state.

@@ -1,3 +1,4 @@
+import type { ProviderToggles } from '../../../shared/providers.mjs';
 import { AgentPresetId } from './agent-presets';
 
 // 環境變數定義
@@ -288,6 +289,7 @@ export interface AppSettings {
   autoCompactWindow?: number;     // Auto-compact context window size (token count)
   perTerminalHistory?: boolean;   // Per-terminal shell history (separate HISTFILE per terminal)
   accountSwitching?: boolean;     // Claude account quick-switch (default: true)
+  providers?: ProviderToggles;    // Settings → Providers: per-provider enable toggles (absent = provider's defaultEnabled)
   cacheExpiryWarning?: boolean;   // Warn before sending when cache (>150k) has expired (>1h)
   cacheAlarmTimer?: boolean;      // Show floating cache TTL countdown (5m / 1h) in top-right corner
   remoteServerAutoStart?: boolean;  // Start the local remote server when the app launches

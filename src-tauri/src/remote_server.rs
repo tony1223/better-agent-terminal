@@ -2498,7 +2498,8 @@ fn workspace_summary(ctx: &HostContext, sidecar: &SidecarState, params: &Value) 
                     total += 1;
                     if !inspect { continue; }
                     let preset = terminal["agentPreset"].as_str().unwrap_or_default();
-                    if !(preset.starts_with("codex-agent") || preset.starts_with("claude-code") || preset == "openai-agent") { continue; }
+                    // SDK agent sessions only (Claude or Codex runtime), per shared/providers.json.
+                    if crate::providers::sdk_runtime_family(crate::providers::resolve_preset_alias(preset)).is_none() { continue; }
                     match call("claude:get-session-meta", json!({"sessionId":terminal["id"]})) {
                         Ok(meta) if meta.is_null() => {},
                         Ok(meta) => {
@@ -2720,8 +2721,8 @@ fn invoke_rust_for_remote(
         "app:new-window" | "app:check-update" | "app:install-update" | "app:relaunch" => {
             Err(format!("{channel}: not supported on a headless bat-server"))
         }
-        "agent:get-supported-session-types" => Ok(agent_cmd::agent_supported_session_type_ids()),
-        "agent:list-presets" => Ok(agent_cmd::agent_supported_session_presets()),
+        "agent:get-supported-session-types" => Ok(agent_cmd::agent_supported_session_type_ids(ctx)),
+        "agent:list-presets" => Ok(agent_cmd::agent_supported_session_presets(ctx)),
         "claude:start-session" => {
             let options = params.get("options").cloned().unwrap_or(Value::Null);
             let maybe_options = Some(options.clone());

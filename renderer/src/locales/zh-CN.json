@@ -40,7 +40,12 @@
     "tabGeneral": "常规",
     "tabAgent": "Agent",
     "tabRemote": "远程",
-    "tabAccounts": "账号",
+    "tabProviders": "提供方",
+    "providersTitle": "代理提供方",
+    "providersHint": "选择此应用提供的代理提供方。已停用的提供方会隐藏其会话类型，不再轮询用量，也不会自动安装其运行环境。现有会话会保留。",
+    "providerSessionTypes": "会话类型：{{types}}",
+    "providerDisabledHint": "已停用：其会话类型已隐藏。",
+    "providerLastEnabled": "至少需要保留一个已启用的提供方。",
     "tabRuntime": "运行环境",
     "tabAdvanced": "高级",
     "runtimeManager": "运行环境管理器",
@@ -331,6 +336,7 @@
     "accountRemoteLoginAction": "在 {{host}} 上登录…",
     "accountRemoteLoginChecking": "正在确认远程登录支持…",
     "accountRemoteLoginUnsupported": "此主机版本不支持远程登录。请更新主机上的 Better Agent Terminal，或直接从主机终端登录。",
+    "accountApiKeyHint": "此提供方使用 API 密钥，请在设置中配置。",
     "accountLoggingIn": "登录中…请在浏览器完成登录",
     "accountCancelLogin": "取消",
     "remoteHostFallback": "远程主机",
@@ -675,5 +681,10 @@
     "imageAttached": "已附加图片",
     "removeImage": "移除图片",
     "hint": "Ctrl+Enter 发送 · Ctrl+V 粘贴图片 · ↑↓ 浏览历史"
+  },
+  "providers": {
+    "disabledTitle": "{{provider}} 已停用",
+    "disabledMessage": "此会话的提供方已在「设置 → 提供方」中停用。会话会保留；启用该提供方即可继续使用。",
+    "enable": "启用 {{provider}}"
   }
 }

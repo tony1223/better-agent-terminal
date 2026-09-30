@@ -5,6 +5,7 @@ import { workspaceStore } from '../stores/workspace-store'
 import type { EnvVariable, TerminalInstance } from '../types'
 import type { AgentPresetId } from '../types/agent-presets'
 import { TerminalPanel } from './TerminalPanel'
+import { isWorktreePreset, panelOfPreset } from '../../../shared/providers.mjs'
 
 interface ClaudeCliPanelProps {
   terminal: TerminalInstance
@@ -71,8 +72,9 @@ function buildClaudeLaunch(
   return { command: cliPath, args }
 }
 
-function isClaudeCliPreset(value: TerminalInstance['agentPreset']): value is 'claude-cli' | 'claude-cli-worktree' {
-  return value === 'claude-cli' || value === 'claude-cli-worktree'
+// Runtime check only: preset ids are plain strings (see shared/providers.json).
+function isClaudeCliPreset(value: TerminalInstance['agentPreset']): boolean {
+  return panelOfPreset(value) === 'claude-cli'
 }
 
 export function ClaudeCliPanel({ terminal, isActive, onClose, workspaceId }: Readonly<ClaudeCliPanelProps>) {
@@ -109,7 +111,7 @@ export function ClaudeCliPanel({ terminal, isActive, onClose, workspaceId }: Rea
       const workspace = workspaceStore.getState().workspaces.find(w => w.id === terminal.workspaceId)
       const customEnv = mergeEnvVars(settings.globalEnvVars, workspace?.envVars)
       const preset = terminal.agentPreset as AgentPresetId
-      const isWorktree = preset === 'claude-cli-worktree'
+      const isWorktree = isWorktreePreset(preset)
       let effectiveCwd = terminal.worktreePath || terminal.cwd || workspace?.folderPath || ''
 
       if (isWorktree && !terminal.worktreePath) {

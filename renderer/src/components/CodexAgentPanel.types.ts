@@ -1,4 +1,5 @@
 import type { ClaudeMessage, ClaudeToolCall } from '../types/claude-agent'
+import { type ProviderId } from '../../../shared/providers.mjs'
 
 export interface SessionMeta {
   model?: string
@@ -100,7 +101,7 @@ export interface CodexAgentPanelProps {
   showToolMsg?: boolean
   showThinkingMsg?: boolean
   isRemoteConnected?: boolean
-  onRequestLogin?: (kind: 'claude' | 'codex') => void
+  onRequestLogin?: (kind: ProviderId) => void
 }
 
 export interface AttachedImage {

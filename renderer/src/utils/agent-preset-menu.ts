@@ -1,4 +1,5 @@
 import type { AgentPreset } from '../types/agent-presets'
+import { presetMenuRank } from '../../../shared/providers.mjs'
 
 export interface AgentPresetMenuGroups {
   standardAgents: AgentPreset[]
@@ -7,20 +8,9 @@ export interface AgentPresetMenuGroups {
   worktreeCli: AgentPreset[]
 }
 
-const PRESET_ORDER = [
-  'claude-code',
-  'claude-channel',
-  'codex-agent',
-  'claude-cli',
-  'codex-cli',
-  'claude-code-worktree',
-  'codex-agent-worktree',
-  'claude-cli-worktree',
-]
-
+// Menu order is data: shared/providers.json `menuOrder`.
 function presetOrder(preset: AgentPreset): number {
-  const index = PRESET_ORDER.indexOf(preset.id)
-  return index === -1 ? PRESET_ORDER.length : index
+  return presetMenuRank(preset.id)
 }
 
 function isWorktreePreset(preset: AgentPreset): boolean {

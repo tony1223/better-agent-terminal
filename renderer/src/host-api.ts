@@ -11,6 +11,7 @@
 // so older shells keep working. We never fall back silently.
 
 import { dispatchTauriNativeDrop } from './utils/tauri-native-drop'
+import { type SdkRuntimeFamily } from '../../shared/providers.mjs'
 
 type BatAppAPI = any
 
@@ -488,7 +489,7 @@ type NotificationEntry = {
   error?: string
   timestamp: number
   read: boolean
-  agentKind?: 'claude' | 'codex'
+  agentKind?: SdkRuntimeFamily
   kind?: 'remote-client'
   title?: string
 }
@@ -1224,7 +1225,7 @@ function createTauriHost(): BatAppAPI {
           })
         }
         if (key === 'listSessions') {
-          return (cwd: string, agentKind?: 'claude' | 'codex') =>
+          return (cwd: string, agentKind?: SdkRuntimeFamily) =>
             getInvoke()<unknown>('claude_list_sessions', { cwd, agentKind })
         }
         if (key === 'scanSkills') {

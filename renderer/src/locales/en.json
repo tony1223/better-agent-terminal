@@ -43,7 +43,12 @@
     "tabGeneral": "General",
     "tabAgent": "Agent",
     "tabRemote": "Remote",
-    "tabAccounts": "Accounts",
+    "tabProviders": "Providers",
+    "providersTitle": "Agent providers",
+    "providersHint": "Choose which agent providers this app offers. A disabled provider's session types are hidden, its usage is not polled and its runtime is not installed automatically. Existing sessions are kept.",
+    "providerSessionTypes": "Session types: {{types}}",
+    "providerDisabledHint": "Disabled: its session types are hidden.",
+    "providerLastEnabled": "At least one provider must stay enabled.",
     "tabRuntime": "Runtime",
     "tabAdvanced": "Advanced",
     "runtimeManager": "Runtime Manager",
@@ -341,6 +346,7 @@
     "accountRemoteLoginAction": "Sign in on {{host}}…",
     "accountRemoteLoginChecking": "Checking remote sign-in support…",
     "accountRemoteLoginUnsupported": "This host version does not support remote sign-in. Update Better Agent Terminal on the host, or sign in from its terminal.",
+    "accountApiKeyHint": "This provider uses an API key. Set it in Settings.",
     "accountLoggingIn": "Signing in… complete it in your browser",
     "accountCancelLogin": "Cancel",
     "remoteHostFallback": "remote host",
@@ -701,5 +707,10 @@
     "imageAttached": "Image attached",
     "removeImage": "Remove image",
     "hint": "Ctrl+Enter to send \u00b7 Paste images with Ctrl+V \u00b7 \u2191\u2193 history"
+  },
+  "providers": {
+    "disabledTitle": "{{provider}} is disabled",
+    "disabledMessage": "This session's provider is turned off in Settings → Providers. The session is kept; enable the provider to use it again.",
+    "enable": "Enable {{provider}}"
   }
 }

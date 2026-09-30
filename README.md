@@ -77,7 +77,7 @@ Mobile apps require Better Agent Terminal **v3.1.3 or later**.
 ### Terminal
 - **Split-panel layout** — 70% main panel + 30% scrollable thumbnail bar showing all terminals
 - **Multiple terminals per workspace** — Powered by xterm.js with full Unicode/CJK support
-- **Agent presets** — Pre-configured terminal roles: Claude Code, Claude Code (worktree), Codex Agent, or plain terminal
+- **Agent presets** — Pre-configured terminal roles: Claude Code, Claude Code (worktree), Codex Agent, or plain terminal. Providers and their presets are declared in one manifest, [`shared/providers.json`](shared/providers.json); see [docs/providers.md](docs/providers.md)
 - **Git worktree isolation** — Spawn Claude agents in an isolated worktree to prevent destructive changes to your main working tree
 - **Tab navigation** — Switch between Terminal, Files, and Git views per workspace
 - **File browser** — Search, navigate, and preview files with syntax highlighting (highlight.js)
@@ -131,7 +131,8 @@ Items can be reordered, colored, and toggled on/off via a drag-and-drop template
 
 #### Account & Usage
 - **Multi-account switching** — `/switch` to manage and switch between multiple Claude accounts
-- **Usage monitoring** — Track API rate limits (5-hour and 7-day windows) via Anthropic OAuth or Chrome session key
+- **Account chip per provider** — The chip in the workspace tab bar follows the focused session's provider (Claude, Codex, …): its accounts, sign-in and usage
+- **Usage monitoring** — Track API rate limits (5-hour and 7-day windows) per provider: Claude via Anthropic OAuth or Chrome session key, Codex via its app-server rate limits
 - **Context usage panel** — Visualize token usage breakdown by category (code, conversation, tools, memory, MCP, etc.)
 
 #### UI & Interaction
@@ -144,6 +145,22 @@ Items can be reordered, colored, and toggled on/off via a drag-and-drop template
 - **Long MCP tool output collapse** — Auto-collapse oversized MCP tool results with a one-click expand
 - **Notifications** — Dock badge, sound, and system notifications on agent completion (configurable)
 - **Update notifications** — Automatic check for new releases on GitHub
+
+### Providers
+
+Agent providers are declared in one manifest, [`shared/providers.json`](shared/providers.json):
+
+| Provider | Session types | Sign-in |
+|---|---|---|
+| **Claude** | Claude Agent, Claude Agent (worktree), Claude CLI, Claude CLI (worktree) | Claude account (OAuth) |
+| **Codex** | Codex Agent, Codex Agent (worktree), Codex CLI | ChatGPT account or OpenAI API key |
+| **Fugu (Sakana)** | Codex Fugu Agent (`BAT_DEBUG` only) | Sakana API key |
+
+Turn providers on or off in **Settings → Providers**. A disabled provider's session types
+disappear from the new-terminal menus, its usage is not polled, and its runtime is not
+auto-installed. Open sessions of a disabled provider are kept and show an **Enable** button. At
+least one provider always stays enabled. See [docs/providers.md](docs/providers.md) for the
+manifest format and how to add a provider.
 
 ### Codex Agent
 

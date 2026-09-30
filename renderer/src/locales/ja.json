@@ -40,7 +40,12 @@
     "tabGeneral": "一般",
     "tabAgent": "エージェント",
     "tabRemote": "リモート",
-    "tabAccounts": "アカウント",
+    "tabProviders": "プロバイダー",
+    "providersTitle": "エージェントプロバイダー",
+    "providersHint": "このアプリで利用するエージェントプロバイダーを選択します。無効にしたプロバイダーはセッション種別が非表示になり、使用量の取得やランタイムの自動インストールも行われません。既存のセッションは保持されます。",
+    "providerSessionTypes": "セッション種別: {{types}}",
+    "providerDisabledHint": "無効: セッション種別は非表示です。",
+    "providerLastEnabled": "少なくとも 1 つのプロバイダーを有効にしておく必要があります。",
     "tabRuntime": "ランタイム",
     "tabAdvanced": "詳細",
     "runtimeManager": "ランタイムマネージャー",
@@ -333,6 +338,7 @@
     "accountRemoteLoginAction": "{{host}} でログイン…",
     "accountRemoteLoginChecking": "リモートログイン対応を確認中…",
     "accountRemoteLoginUnsupported": "このホストのバージョンはリモートログインに対応していません。ホストの Better Agent Terminal を更新するか、ホストのターミナルからログインしてください。",
+    "accountApiKeyHint": "このプロバイダーは API キーを使用します。設定で API キーを設定してください。",
     "accountLoggingIn": "ログインしています… ブラウザで完了してください",
     "accountCancelLogin": "キャンセル",
     "remoteHostFallback": "リモートホスト",
@@ -681,5 +687,10 @@
     "imageAttached": "画像を添付しました",
     "removeImage": "画像を削除",
     "hint": "Ctrl+Enter で送信 · Ctrl+V で画像を貼り付け · ↑↓ で履歴"
+  },
+  "providers": {
+    "disabledTitle": "{{provider}} は無効です",
+    "disabledMessage": "このセッションのプロバイダーは「設定 → プロバイダー」で無効になっています。セッションは保持されます。再び使うにはプロバイダーを有効にしてください。",
+    "enable": "{{provider}} を有効にする"
   }
 }

@@ -1,6 +1,7 @@
 import type { AgentPresetId } from './agent-presets'
 import { CODEX_EFFORT_LEVELS, type AgentParamValue } from './index'
 import { settingsStore } from '../stores/settings-store'
+import { sdkRuntimeFamilyOfPreset } from '../../../shared/providers.mjs'
 
 export interface AgentParamOption {
   value: AgentParamValue
@@ -56,7 +57,7 @@ function getCodexAgentParamDefinitions(): AgentParamDefinition[] {
 }
 
 function getAgentParamDefinitions(agentPreset?: AgentPresetId | null): AgentParamDefinition[] {
-  if (agentPreset === 'codex-agent' || agentPreset === 'codex-agent-worktree') return getCodexAgentParamDefinitions()
+  if (sdkRuntimeFamilyOfPreset(agentPreset) === 'codex') return getCodexAgentParamDefinitions()
   return []
 }
 

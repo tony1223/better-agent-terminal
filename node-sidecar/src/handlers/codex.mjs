@@ -14,6 +14,7 @@ import { dirname, join } from 'node:path'
 import { sendEvent } from '../lib/protocol.mjs'
 import { info as logInfo, warn as logWarn, error as logError } from '../lib/logger.mjs'
 import { activeWorktrees, worktreeCreate, worktreeRehydrate, worktreeGetBranch, worktreeStatus, worktreeRemove } from './worktree.mjs'
+import { sdkRuntimeFamilyOfPreset } from '../../../shared/providers.mjs'
 
 const CODEX_MODELS = [
   { value: 'gpt-6.1-sol', displayName: 'GPT-6.1 Sol', description: 'Latest workhorse - coding and everyday work' },
@@ -60,7 +61,7 @@ const sessions = new Map()
 const sdkThreadIds = new Map()
 
 export function isCodexAgentPreset(agentPreset) {
-  return agentPreset === 'codex-agent' || agentPreset === 'codex-agent-worktree'
+  return sdkRuntimeFamilyOfPreset(agentPreset) === 'codex'
 }
 
 export function isCodexSession(sessionId) {

@@ -403,8 +403,7 @@
   cursor: default;
 }
 
-.workspace-account-chip-codex,
-.workspace-account-chip-claude {
+.workspace-account-chip-provider {
   cursor: pointer;
 }
 

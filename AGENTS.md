@@ -27,6 +27,12 @@ Follow the project guidance in `CLAUDE.md`. The most important operational notes
 - Tauri logs live under `<app-data>/logs/`: renderer/Rust logs in `debug.log`, sidecar logs in `sidecar.log`. On macOS fresh Tauri installs this is usually `~/Library/Application Support/com.tonyq.better-agent-terminal/logs/debug.log`; existing Electron migrations may use `~/Library/Application Support/BetterAgentTerminal/logs/debug.log`. `BAT_TAURI_DATA_DIR` overrides this in dev/tests.
 - When modifying shared code such as stores, IPC handlers, or shared types, trace consumers before committing.
 
+## Providers
+
+- Agent providers and presets are declared in `shared/providers.json`; the renderer and sidecar read it through `shared/providers.mjs`, the Rust host through `src-tauri/src/providers.rs`. See `docs/providers.md`.
+- Do not add new comparisons against provider or preset id literals (`'claude' | 'codex'`, `'codex-agent'`, …) outside those registries. Look the preset up and branch on its `provider` / `panel` kind instead.
+- Provider and preset ids are persisted and sent over IPC/remote: never rename them; retire a preset with `hidden`.
+
 ## IPC Compatibility
 
 - Treat renderer-facing IPC as a compatibility contract. Existing `host.*`, `window.batAppAPI.*`, and event names/signatures should be additive-only unless a task explicitly includes a coordinated migration.

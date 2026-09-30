@@ -20,6 +20,8 @@
 // user's broken-but-present install is a decision, not a default.
 
 import { host } from '../host-api'
+import { settingsStore } from '../stores/settings-store'
+import { requiredRuntimes, type SdkRuntimeFamily } from '../../../shared/providers.mjs'
 
 type RuntimeTool = 'node' | 'codex' | 'claude'
 
@@ -45,6 +47,14 @@ const INSTALL_ORDER: RuntimeTool[] = ['node', 'codex', 'claude']
 
 let started = false
 
+/**
+ * Tools to consider, in install order: Node always (the sidecar needs it), an
+ * agent runtime only when an enabled provider runs on it (Settings → Providers).
+ */
+export function toolsToAutoInstall(required: ReadonlySet<SdkRuntimeFamily>): RuntimeTool[] {
+  return INSTALL_ORDER.filter(tool => tool === 'node' || required.has(tool))
+}
+
 /** Missing entirely, or a managed install left behind by an older catalog pin. */
 export function shouldAutoInstall(item: Pick<RuntimeItemStatus, 'state' | 'source' | 'managedStale'>): boolean {
   if (item.state === 'missing') return true
@@ -67,7 +77,8 @@ export function startRuntimeAutoInstall(): void {
       }
       if (!status) return
 
-      const missing = INSTALL_ORDER
+      const required = requiredRuntimes(settingsStore.getSettings().providers, { debug: host.debug.isDebugMode === true })
+      const missing = toolsToAutoInstall(required)
         .map(tool => status?.[tool])
         .filter((item): item is RuntimeItemStatus => !!item && item.canInstallManaged && shouldAutoInstall(item))
       if (missing.length === 0) return

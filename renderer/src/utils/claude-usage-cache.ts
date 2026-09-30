@@ -1,7 +1,10 @@
 import { host } from '../host-api'
+import { getProvider, type ProviderId } from '../../../shared/providers.mjs'
+import { hostProviderOf } from '../providers/account-routing'
 
 // Renderer-side cache for the host-wide `agent:usage` broadcast (the Rust
-// host runs ONE poller per host, keyed to the active account). Panels read
+// host runs ONE poller per host, keyed by provider id to each provider's active
+// account). Panels read
 // the cached snapshot on mount and subscribe for refreshes — they never poll
 // themselves, and a panel opened between poll ticks still paints immediately.
 
@@ -12,7 +15,7 @@ export interface HostUsageWindow {
   resetsAt: number | null
 }
 
-export type UsageProvider = 'claude' | 'codex'
+export type UsageProvider = ProviderId
 
 export interface HostUsageSnapshot {
   provider: UsageProvider
@@ -84,18 +87,20 @@ function normalizeWindow(value: unknown): HostUsageWindow | null {
   return { utilization, resetsAt }
 }
 
-function ingest(payload: unknown): boolean {
-  if (!payload || typeof payload !== 'object') return false
+/** Parse one `agent:usage` payload; null when it carries nothing usable. */
+export function usageSnapshotFromPayload(payload: unknown): HostUsageSnapshot | null {
+  if (!payload || typeof payload !== 'object') return null
   const p = payload as Record<string, unknown>
-  const provider: UsageProvider = p.provider === 'codex' ? 'codex' : 'claude'
+  const provider = hostProviderOf(p.provider)
   const fiveHour = normalizeWindow(p.fiveHour)
   const sevenDay = normalizeWindow(p.sevenDay)
   const hasExplicitWindows = Object.prototype.hasOwnProperty.call(p, 'fiveHour')
     || Object.prototype.hasOwnProperty.call(p, 'sevenDay')
-  // A full Codex read can validly contain only unsupported/absent windows.
-  // Accept its explicit nulls so stale 5h/7d values are cleared.
-  if (!fiveHour && !sevenDay && !(provider === 'codex' && hasExplicitWindows)) return false
-  lastSnapshots[provider] = {
+  // A full Codex rate-limit read can validly contain only unsupported/absent
+  // windows. Accept its explicit nulls so stale 5h/7d values are cleared.
+  const nullsAreAuthoritative = getProvider(provider)?.usage === 'codex-rate-limits' && hasExplicitWindows
+  if (!fiveHour && !sevenDay && !nullsAreAuthoritative) return null
+  return {
     provider,
     fiveHour,
     sevenDay,
@@ -107,6 +112,12 @@ function ingest(payload: unknown): boolean {
     fetchedAt: typeof p.fetchedAt === 'number' ? p.fetchedAt : Date.now(),
     stale: normalizeStale(p.stale),
   }
+}
+
+function ingest(payload: unknown): boolean {
+  const snapshot = usageSnapshotFromPayload(payload)
+  if (!snapshot) return false
+  lastSnapshots[snapshot.provider] = snapshot
   return true
 }
 
