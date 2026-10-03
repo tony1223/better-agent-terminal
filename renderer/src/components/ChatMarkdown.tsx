@@ -9,6 +9,7 @@ import {
   renderChatMarkdown,
 } from '../utils/chat-markdown'
 import { RevealPathMenu, type RevealPathTarget } from './RevealPathMenu'
+import { WeightedLruCache } from '../utils/weighted-lru-cache'
 
 interface ResolvedPathLink {
   rawPath: string
@@ -23,9 +24,14 @@ interface ChatMarkdownProps {
   cwd: string
   className?: string
   resolvePathLinks?: boolean
+  cache?: boolean
 }
 
-const resolvedPathCache = new Map<string, ResolvedPathLink | null>()
+const resolvedPathCache = new WeightedLruCache<string, ResolvedPathLink | null>(
+  2000,
+  1024 * 1024,
+  (key, value) => 2 * (key.length + (value?.path.length ?? 0) + (value?.rawPath.length ?? 0)),
+)
 
 function cacheKey(cwd: string, rawPath: string): string {
   return `${cwd}\0${rawPath}`
@@ -88,10 +94,10 @@ function applyResolvedPathLinks(html: string, links: Map<string, ResolvedPathLin
   return container.innerHTML
 }
 
-function ChatMarkdownComponent({ text, cwd, className = 'claude-markdown', resolvePathLinks = true }: ChatMarkdownProps) {
+function ChatMarkdownComponent({ text, cwd, className = 'claude-markdown', resolvePathLinks = true, cache = true }: ChatMarkdownProps) {
   const [resolvedLinks, setResolvedLinks] = useState<Map<string, ResolvedPathLink>>(new Map())
   const [menu, setMenu] = useState<RevealPathTarget | null>(null)
-  const html = useMemo(() => renderChatMarkdown(text, cwd), [text, cwd])
+  const html = useMemo(() => renderChatMarkdown(text, cwd, { cache }), [text, cwd, cache])
 
   useEffect(() => {
     let cancelled = false

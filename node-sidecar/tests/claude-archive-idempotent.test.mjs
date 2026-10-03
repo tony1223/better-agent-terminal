@@ -124,6 +124,23 @@ try {
     assert.equal(loaded.result.total, 3)
     assert.deepEqual(loaded.result.messages.map(m => m.id), ['a', 'b', 'c'])
   })
+  await check('zero-row prompt metadata excludes bodies, tools, and malformed rows', async () => {
+    const sid = 'archive-prompt-metadata'
+    const rows = [
+      { ...msg('u1', 'user prompt'), role: 'user' },
+      msg('a1', 'x'.repeat(1_000_000)),
+      { ...msg('tool', 'tool answer'), role: 'user', toolName: 'AskUserQuestion' },
+      { ...msg('u2', 'next prompt'), role: 'user' },
+    ]
+    await send('claude.archiveMessages', { sessionId: sid, messages: rows })
+    writeFileSync(archivePath(sid), readFileSync(archivePath(sid), 'utf8') + 'malformed\n\n', 'utf8')
+    const result = (await send('claude.loadArchived', { sessionId: sid, offset: 0, limit: 0 })).result
+    assert.deepEqual(result.promptIds, ['u1', 'u2'])
+    assert.deepEqual(result.messages, [])
+    assert.equal(result.total, 5)
+    const missing = (await send('claude.loadArchived', { sessionId: 'archive-missing-meta', offset: 0, limit: 0 })).result
+    assert.deepEqual(missing.promptIds, [])
+  })
 } finally {
   rmSync(dataDir, { recursive: true, force: true })
 }

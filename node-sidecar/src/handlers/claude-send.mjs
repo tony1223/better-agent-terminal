@@ -30,6 +30,7 @@
 // the renderer reads to retry after a runtime restart).
 
 import { registerHandler, sendEvent } from '../lib/protocol.mjs'
+import { effectiveFastMode, refreshFastMode, applyFastModeStatus } from '../lib/fast-mode.mjs'
 import {
   sessions,
   ensureSession,
@@ -529,6 +530,9 @@ function processMessage(s, sessionId, msg) {
     s.sdkSessionId = msg.session_id
   }
   const t = msg?.type
+  if (t === 'system' && applyFastModeStatus(s, msg) && msg.subtype !== 'init') {
+    sendEvent('claude:status', { sessionId, meta: buildSessionMeta(s) })
+  }
   if (t === 'system' && msg.subtype === 'init') {
     if (typeof msg.session_id === 'string') s.sdkSessionId = msg.session_id
     if (typeof msg.model === 'string') s.model = msg.model
@@ -982,6 +986,9 @@ async function buildQueryOptions(s, sessionId, prompt) {
   if (isUltracodeMode(s.effort) || s.ultracode === true) {
     queryOptions.settings = { ultracode: true, enableWorkflows: true }
   }
+  // Explicit false overrides user/project CLI defaults. BAT requires its own
+  // global opt-in and an explicit opt-in for this conversation.
+  queryOptions.settings = { ...queryOptions.settings, fastMode: effectiveFastMode(s) }
   if (sdkModel) queryOptions.model = sdkModel
   if (claudeCodePath) queryOptions.pathToClaudeCodeExecutable = claudeCodePath
   // Capture the claude subprocess stderr so an opaque non-zero exit can be
@@ -1024,6 +1031,9 @@ function buildUserMessage(prompt, images) {
 }
 
 async function ensureLiveQuery(s, sessionId, sdk, prompt) {
+  refreshFastMode(s)
+  const fastMode = effectiveFastMode(s)
+  if (s.liveQuery && !s.liveQuery.isClosed && s.liveQueryFastMode !== fastMode) closeLiveQuery(s)
   if (s.liveQuery && !s.liveQuery.isClosed) return s.liveQuery
   const queryOptions = await buildQueryOptions(s, sessionId, prompt)
   s.abortController = new AbortController()
@@ -1058,6 +1068,7 @@ async function ensureLiveQuery(s, sessionId, sdk, prompt) {
     },
   })
   s.liveQuery = live
+  s.liveQueryFastMode = queryOptions.settings.fastMode
   s.currentQuery = live.generator
   debugLog('live-query-ready', sessionId, {})
   return live

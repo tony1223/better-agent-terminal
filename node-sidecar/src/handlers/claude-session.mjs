@@ -20,6 +20,7 @@ import {
 import { normalizeClaudeEffortMode, isUltracodeMode, runtimeEffortForMode } from '../lib/claude-effort.mjs'
 import { autoCompactWindowForClaudeSelection, expectedContextWindowForModel, sdkModelForClaudeSelection } from '../lib/models.mjs'
 import { closeLiveQuery } from './claude-send.mjs'
+import { readFastModePolicy, supportsClaudeFastMode, refreshFastMode, isFastModeDebugEnabled } from '../lib/fast-mode.mjs'
 
 function applyEffortOptions(session, options) {
   const mode = normalizeClaudeEffortMode(options?.effort, options?.ultracode === true)
@@ -477,6 +478,16 @@ registerHandler('claude.setModel', async (params) => {
   if (isCodexSession(sessionId)) return setCodexModel(params)
   const s = ensureSession(sessionId)
   if (typeof params?.model === 'string') s.model = params.model
+  if (s.fastMode && !supportsClaudeFastMode(s.model)) {
+    s.fastMode = false
+    s.fastModeState = 'off'
+    // The old CLI settings layer must not keep Fast on under the new model.
+    if (!s.streaming) closeLiveQuery(s)
+    else if (s.liveQuery?.applyFlagSettings) {
+      try { await s.liveQuery.applyFlagSettings({ fastMode: false }) }
+      catch (err) { logWarn(`Fast disable control failed for ${sessionId}: ${err?.message || err}`) }
+    }
+  }
   let windowChanged = false
   if (typeof params?.autoCompactWindow === 'number') {
     s.autoCompactWindow = params.autoCompactWindow
@@ -516,6 +527,7 @@ registerHandler('claude.setModel', async (params) => {
       }
     }
   }
+  sendEvent('claude:status', { sessionId, meta: buildSessionMeta(s) })
   return true
 })
 
@@ -550,6 +562,30 @@ registerHandler('claude.setEffort', async (params) => {
     }
   }
   return true
+})
+
+registerHandler('claude.setFastMode', async (params) => {
+  const sessionId = params?.sessionId
+  const s = sessions.get(sessionId)
+  if (!s || isCodexSession(sessionId) || typeof params?.enabled !== 'boolean') {
+    throw new Error('Fast mode requires a started session and a boolean value.')
+  }
+  refreshFastMode(s)
+  if (params.enabled && !isFastModeDebugEnabled()) throw new Error('Fast mode requires BAT_DEBUG=1 on the host.')
+  const policy = readFastModePolicy()
+  if (params.enabled && !policy.allowed) throw new Error('Enable Fast mode in host settings first.')
+  if (params.enabled && !supportsClaudeFastMode(s.model)) throw new Error('This model does not support Fast mode.')
+  if (s.streaming || s.runtimeStatus) throw new Error('Wait for the current turn to finish before changing Fast mode.')
+  // SDK noninteractive Fast requires startup opt-in; rebuild the idle query
+  // with resume, retaining the transcript, rather than pretending a flag worked.
+  closeLiveQuery(s)
+  s.fastMode = params.enabled
+  s.fastModeEpoch = policy.epoch
+  s.fastModeState = params.enabled ? 'pending' : 'off'
+  s.fastModeDisabledReason = null
+  const meta = buildSessionMeta(s)
+  sendEvent('claude:status', { sessionId, meta })
+  return meta
 })
 
 registerHandler('claude.resetSession', async (params) => {

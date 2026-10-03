@@ -1,5 +1,8 @@
 {
   "common": {
+    "page": "頁數",
+    "nextPage": "下一頁",
+    "previousPage": "上一頁",
     "cancel": "取消",
     "save": "儲存",
     "close": "關閉",
@@ -39,6 +42,8 @@
   },
 
   "settings": {
+    "allowFastMode": "允許使用 Fast 模式",
+    "allowFastModeHint": "Fast 可能消耗更多額度或產生額外費用。啟用此設定只會顯示模型旁的 checkbox，仍需逐個對話手動勾選。關閉設定會撤銷先前的勾選，後續回合停用 Fast。遠端對話也需要主機允許 Fast。",
     "title": "設定",
     "tabGeneral": "一般",
     "tabAgent": "Agent",
@@ -547,6 +552,16 @@
   },
 
   "claude": {
+    "fastModeUnsupported": "此模型不支援 Fast 模式。",
+    "fastModeBusy": "請等待目前回合結束後再切換 Fast。",
+    "fastModeCooldown": "Fast 正在冷卻，執行環境暫時使用一般速度。",
+    "fastModePending": "已要求下一回合使用 Fast；是否可用取決於帳號與執行環境。",
+    "fastModeHint": "為此對話要求 Fast，可能消耗更多額度或產生額外費用。",
+    "fastModeUnavailable": "此主機尚不支援 Fast 控制。",
+    "fastModeCooling": "冷卻中",
+    "archivedGap": "此頁與最新訊息之間還有 {{count}} 則封存訊息",
+    "backToLatestMessages": "回到最新訊息",
+    "loadNewerMessages": "載入較新的訊息",
     "thinking": "思考中",
     "reasoningSummary": "推理摘要",
     "turnWorking": "處理中",

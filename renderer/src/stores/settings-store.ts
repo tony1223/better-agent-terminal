@@ -42,6 +42,8 @@ const defaultSettings: AppSettings = {
   closeTerminalAfterProcessExit: false,
   createDefaultAgentTerminal: true,
   allowBypassPermissions: true,
+  allowFastMode: false,
+  fastModeEpoch: 0,
   defaultEffort: 'high',
   defaultCodexEffort: 'high',
   remoteServerAutoStart: false,
@@ -221,6 +223,19 @@ class SettingsStore {
     this.settings = { ...this.settings, allowBypassPermissions: allow }
     this.notify()
     this.save()
+  }
+
+  async setAllowFastMode(allow: boolean): Promise<void> {
+    if (allow && host.debug.isDebugMode !== true) throw new Error('Fast mode requires BAT_DEBUG=1.')
+    const next = {
+      ...this.settings,
+      allowFastMode: allow,
+      fastModeEpoch: (this.settings.fastModeEpoch || 0) + (allow ? 0 : 1),
+    }
+    // Do not unlock a paid mode until the host has saved the policy.
+    await host.settings.save(JSON.stringify(next))
+    this.settings = { ...this.settings, allowFastMode: next.allowFastMode, fastModeEpoch: next.fastModeEpoch }
+    this.notify()
   }
 
   setCollapseToolOutputs(collapse: boolean): void {
@@ -480,6 +495,8 @@ class SettingsStore {
           parsed.defaultCodexEffort = parsed.defaultEffort
         }
         parsed.defaultAgent = normalizeDefaultAgent(parsed.defaultAgent)
+        parsed.allowFastMode = parsed.allowFastMode === true
+        parsed.fastModeEpoch = Number.isSafeInteger(parsed.fastModeEpoch) && parsed.fastModeEpoch >= 0 ? parsed.fastModeEpoch : 0
         this.settings = { ...defaultSettings, ...parsed }
         this.notify()
       } catch (e) {

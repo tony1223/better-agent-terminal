@@ -420,6 +420,7 @@ fn legacy_v1_param_keys(channel: &str) -> Option<&'static [&'static str]> {
         "claude:set-codex-approval-policy" => Some(&["sessionId", "policy"]),
         "claude:set-model" => Some(&["sessionId", "model", "autoCompactWindow"]),
         "claude:set-effort" => Some(&["sessionId", "effort"]),
+        "claude:set-fast-mode" => Some(&["sessionId", "enabled"]),
         "claude:cleanup-worktree" => Some(&["sessionId", "deleteBranch"]),
         "claude:scan-skills" => Some(&["cwd"]),
         "claude:resolve-permission" => Some(&["sessionId", "toolUseId", "result"]),

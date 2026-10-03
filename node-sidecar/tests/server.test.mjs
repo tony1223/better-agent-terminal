@@ -2973,7 +2973,7 @@ async function inProcess() {
     // effort level 'max' (the legacy 'xhigh' value was dropped in Claude Code
     // CLI >= 2.1.175 and is aliased to 'max').
     assert.equal(opts.effort, 'max')
-    assert.deepEqual(opts.settings, { ultracode: true, enableWorkflows: true })
+    assert.deepEqual(opts.settings, { ultracode: true, enableWorkflows: true, fastMode: false })
     assert.equal(opts.permissionMode, 'bypassPermissions')
     assert.equal(opts.allowDangerouslySkipPermissions, true)
     // sdkModelForClaudeSelection maps the preset to the base id, keeping the

@@ -1548,6 +1548,17 @@
   text-decoration: underline;
 }
 
+.claude-diff-pagination {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px;
+  font-size: 12px;
+}
+
+.claude-diff-pagination input { width: 64px; }
+
 /* Todo Checklist */
 .claude-todo-checklist {
   display: flex;
@@ -3460,3 +3471,8 @@
 .claude-context-menu-item:hover {
   background: var(--bg-hover);
 }
+.claude-fast-control { display: inline-flex; align-items: center; gap: 6px; }
+.claude-fast-checkbox { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; white-space: nowrap; font-size: 11px; }
+.claude-fast-checkbox:has(input:disabled) { opacity: 0.5; cursor: default; }
+.claude-fast-checkbox:has(input:checked) { color: var(--warning, #e5c07b); }
+.claude-fast-error { color: var(--warning, #e5c07b); font-size: 11px; max-width: 240px; }

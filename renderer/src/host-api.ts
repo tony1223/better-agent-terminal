@@ -1264,6 +1264,10 @@ function createTauriHost(): BatAppAPI {
           return (sessionId: string, effort: string) =>
             getInvoke()<unknown>('claude_set_effort', { sessionId, effort })
         }
+        if (key === 'setFastMode') {
+          return (sessionId: string, enabled: boolean) =>
+            getInvoke()<unknown>('claude_set_fast_mode', { sessionId, enabled })
+        }
         if (key === 'resetSession') {
           return (sessionId: string) =>
             getInvoke()<unknown>('claude_reset_session', { sessionId })

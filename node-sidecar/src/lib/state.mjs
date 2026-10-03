@@ -2,6 +2,7 @@
 // canonical store consumed by every claude.* handler.
 
 import { expectedContextWindowForModel } from './models.mjs'
+import { effectiveFastMode, supportsClaudeFastMode } from './fast-mode.mjs'
 
 export const sessions = new Map()
 
@@ -56,6 +57,10 @@ export function ensureSession(sessionId) {
       autoCompactWindow: null,
       effort: undefined,
       ultracode: false,
+      fastMode: false,
+      fastModeEpoch: 0,
+      fastModeState: 'off',
+      fastModeDisabledReason: null,
       permissionMode: 'default',
       codexSandboxMode: undefined,
       codexApprovalPolicy: undefined,
@@ -187,11 +192,16 @@ export function buildSessionMeta(s) {
   const cacheCreationTokens = u?.cache_creation_input_tokens ?? 0
   const contextTokens = inputTokens + cacheReadTokens + cacheCreationTokens
   const contextWindow = expectedContextWindowForModel(u?.model || s.model) || 0
+  const fastMode = effectiveFastMode(s)
   return {
     permissionMode: s.permissionMode ?? 'default',
     model: s.model ?? null,
     effort: s.effort ?? null,
     ultracode: s.ultracode === true,
+    fastMode,
+    supportsFastMode: supportsClaudeFastMode(s.model),
+    fastModeState: fastMode ? s.fastModeState : 'off',
+    fastModeDisabledReason: s.fastModeDisabledReason ?? null,
     autoCompactWindow: s.autoCompactWindow ?? null,
     sdkSessionId: s.sdkSessionId ?? null,
     cwd: (s.options && typeof s.options === 'object' && typeof s.options.cwd === 'string') ? s.options.cwd : null,

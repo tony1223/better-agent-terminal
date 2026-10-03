@@ -1,5 +1,8 @@
 {
   "common": {
+    "page": "ページ",
+    "nextPage": "次のページ",
+    "previousPage": "前のページ",
     "cancel": "キャンセル",
     "save": "保存",
     "close": "閉じる",
@@ -36,6 +39,8 @@
     "noMatches": "一致するターミナルの種類がありません"
   },
   "settings": {
+    "allowFastMode": "Fast モードを許可",
+    "allowFastModeHint": "Fast は使用枠の消費や追加料金が増える場合があります。この設定はモデルの横にチェックボックスを表示するだけです。会話ごとに手動で有効にしてください。無効にすると以前の選択が取り消され、次のターンから Fast が無効になります。リモートの場合はホスト側の許可も必要です。",
     "title": "設定",
     "tabGeneral": "一般",
     "tabAgent": "エージェント",
@@ -529,6 +534,16 @@
     "daysAgo": "{{count}} 日前"
   },
   "claude": {
+    "fastModeUnsupported": "このモデルは Fast に対応していません。",
+    "fastModeBusy": "現在のターンが終了してから Fast を変更してください。",
+    "fastModeCooldown": "Fast はクールダウン中で、現在は通常速度を使用しています。",
+    "fastModePending": "次のターンで Fast を要求します。利用可否はアカウントと実行環境に依存します。",
+    "fastModeHint": "この会話で Fast を要求します。使用枠の消費や追加料金が増える場合があります。",
+    "fastModeUnavailable": "このホストは Fast の操作に対応していません。",
+    "fastModeCooling": "クールダウン",
+    "archivedGap": "このページと最新のメッセージの間に {{count}} 件のアーカイブがあります",
+    "backToLatestMessages": "最新のメッセージに戻る",
+    "loadNewerMessages": "新しいメッセージを読み込む",
     "thinking": "思考中",
     "reasoningSummary": "推論の要約",
     "turnWorking": "処理中",

@@ -2,6 +2,7 @@ import i18next from 'i18next'
 import type { TFunction } from 'i18next'
 import type { MessageItem } from './CodexAgentPanel.types'
 import { summarizeAskUserInput } from './AskUserQuestion.helpers'
+import { countTextLines } from '../utils/text-lines'
 
 // ToolSearch returns a JSON array of { tool_name, type } references. Render a
 // readable one-line summary instead of dumping the raw JSON; return null (fall
@@ -166,8 +167,8 @@ export function summarizeShellCommand(command: string): string | null {
   return summaries.length > 2 ? `${visible} + ${summaries.length - 2} more` : visible
 }
 
-export function formatContentSize(text: string): string {
-  const lines = text ? text.split(/\r?\n/).length : 0
+export function formatContentSize(text: string, lineCount?: number): string {
+  const lines = lineCount ?? (text ? countTextLines(text) : 0)
   const chars = text.length
   if (lines <= 1) return `${chars.toLocaleString()} ${i18next.t('claude.chars')}`
   return `${lines.toLocaleString()} ${i18next.t('claude.lines')} · ${chars.toLocaleString()} ${i18next.t('claude.chars')}`
@@ -332,6 +333,18 @@ export function stringifyToolResult(result: unknown): string {
   } catch {
     return String(result)
   }
+}
+
+// Special tool rows keep their full result available in the existing detail
+// view. Cache this preparation per result, including its line count, rather
+// than repeatedly parsing JSON and allocating a full line array while streaming.
+export function prepareSpecialToolResult(result: unknown, toolName: string) {
+  const raw = result ? stringifyToolResult(result) : ''
+  const split = splitSystemReminders(toolName === 'AskUserQuestion' ? parseContentBlocks(raw) : raw)
+  const content = toolName === 'Task' || toolName === 'Agent' || toolName === 'TaskOutput'
+    ? parseContentBlocks(split.content)
+    : split.content
+  return { ...split, content, lineCount: countTextLines(content) }
 }
 
 export function formatTimestamp(ts: number): string {

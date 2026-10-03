@@ -58,6 +58,27 @@ fn settings_path(data_dir: &Path) -> PathBuf {
     data_dir.join("settings.json")
 }
 
+/// Read the host-owned policy. Missing/invalid settings never grant paid Fast.
+pub fn fast_mode_policy(data_dir: Option<&Path>) -> (bool, u64) {
+    read_fast_mode_policy(data_dir, fast_mode_debug_enabled())
+}
+
+pub fn fast_mode_debug_enabled() -> bool {
+    matches!(std::env::var("BAT_DEBUG").as_deref(), Ok("1") | Ok("true") | Ok("TRUE"))
+}
+
+fn read_fast_mode_policy(data_dir: Option<&Path>, debug_enabled: bool) -> (bool, u64) {
+    if !debug_enabled { return (false, 0); }
+    let settings = data_dir
+        .and_then(|dir| fs::read_to_string(settings_path(dir)).ok())
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+    let allowed = settings.as_ref().and_then(|s| s.get("allowFastMode"))
+        .and_then(serde_json::Value::as_bool) == Some(true);
+    let epoch = settings.as_ref().and_then(|s| s.get("fastModeEpoch"))
+        .and_then(serde_json::Value::as_u64).unwrap_or(0);
+    (allowed, epoch)
+}
+
 pub fn settings_load_impl(data_dir: &Path) -> Result<Option<String>, CommandError> {
     let path = settings_path(data_dir);
     if !path.exists() {
@@ -81,6 +102,25 @@ pub async fn settings_load(app: tauri::AppHandle) -> Result<Option<String>, Comm
 }
 
 pub fn settings_save_impl(data_dir: &Path, data: String) -> Result<(), CommandError> {
+    // Revoke host session opt-ins even for older remote clients that omit the
+    // epoch. Never let an outdated settings snapshot lower the revocation epoch.
+    let data = if let Ok(mut next) = serde_json::from_str::<serde_json::Value>(&data) {
+        if let Some(next) = next.as_object_mut() {
+            let previous = fs::read_to_string(settings_path(data_dir)).ok()
+                .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+            let previous_epoch = previous.as_ref().and_then(|v| v.get("fastModeEpoch"))
+                .and_then(serde_json::Value::as_u64).unwrap_or(0);
+            let revoked = previous.as_ref().and_then(|v| v.get("allowFastMode"))
+                .and_then(serde_json::Value::as_bool) == Some(true)
+                && next.get("allowFastMode").and_then(serde_json::Value::as_bool) != Some(true);
+            let epoch = next.get("fastModeEpoch").and_then(serde_json::Value::as_u64).unwrap_or(0)
+                .max(previous_epoch.saturating_add(u64::from(revoked)));
+            if epoch > 0 && next.get("fastModeEpoch").and_then(serde_json::Value::as_u64) != Some(epoch) {
+                next.insert("fastModeEpoch".into(), serde_json::json!(epoch));
+                serde_json::Value::Object(next.clone()).to_string()
+            } else { data }
+        } else { data }
+    } else { data };
     let path = settings_path(data_dir);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(SettingsError::from)?;
@@ -395,6 +435,38 @@ pub async fn settings_detect_cx(app: tauri::AppHandle) -> Result<CxDetectionResu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fast_policy_requires_debug_and_explicit_opt_in() {
+        let root = std::env::temp_dir().join(format!("bat-fast-policy-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        assert_eq!(read_fast_mode_policy(None, true), (false, 0));
+        fs::write(settings_path(&root), r#"{"allowFastMode":true,"fastModeEpoch":7}"#).unwrap();
+        assert_eq!(read_fast_mode_policy(Some(&root), false), (false, 0));
+        assert_eq!(read_fast_mode_policy(Some(&root), true), (true, 7));
+        for text in ["{}", "invalid json", r#"{"allowFastMode":"true"}"#, r#"{"allowFastMode":false}"#] {
+            fs::write(settings_path(&root), text).unwrap();
+            assert!(!read_fast_mode_policy(Some(&root), true).0);
+        }
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn saving_settings_revokes_fast_for_old_clients_and_preserves_epoch() {
+        let root = std::env::temp_dir().join(format!("bat-fast-revoke-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(settings_path(&root), r#"{"allowFastMode":true,"fastModeEpoch":4}"#).unwrap();
+        settings_save_impl(&root, r#"{"allowFastMode":false}"#.into()).unwrap();
+        assert_eq!(read_fast_mode_policy(Some(&root), true), (false, 5));
+        settings_save_impl(&root, r#"{"allowFastMode":true,"fastModeEpoch":0}"#.into()).unwrap();
+        assert_eq!(read_fast_mode_policy(Some(&root), true), (true, 5));
+        // Existing settings RPC accepts opaque JSON text; formatting is kept
+        // when no Fast epoch migration is necessary.
+        let text = "{ \"allowFastMode\": true, \"fastModeEpoch\": 5, \"theme\": \"dark\" }";
+        settings_save_impl(&root, text.into()).unwrap();
+        assert_eq!(settings_load_impl(&root).unwrap().as_deref(), Some(text));
+        fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn settings_path_uses_settings_json_filename() {

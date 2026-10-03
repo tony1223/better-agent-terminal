@@ -1,9 +1,14 @@
 import { host } from '../host-api'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
+import { WeightedLruCache } from './weighted-lru-cache'
 
-const markdownCache = new Map<string, string>()
-const MARKDOWN_CACHE_MAX = 500
+const markdownCache = new WeightedLruCache<string, string>(
+  500,
+  16 * 1024 * 1024,
+  (key, html) => 2 * (key.length + html.length),
+)
+const MARKDOWN_CACHE_INPUT_LIMIT = 256 * 1024
 const PATH_LINK_EXTS = [
   'ts', 'tsx', 'js', 'jsx', 'json', 'jsonl', 'css', 'scss', 'less', 'html', 'htm',
   'md', 'mdx', 'txt', 'yml', 'yaml', 'toml', 'xml', 'svg', 'sh', 'bash', 'zsh',
@@ -107,9 +112,13 @@ export function repairBrokenTableRows(text: string): string {
   return out.join('\n')
 }
 
-export function renderChatMarkdown(text: string, cwd: string): string {
-  const cacheKey = cwd + '\0' + text
-  const cached = markdownCache.get(cacheKey)
+export function renderChatMarkdown(text: string, cwd: string, options: { cache?: boolean } = {}): string {
+  // Avoid hashing/retaining a full growing string for streaming content.
+  // Component-local useMemo still retains the currently displayed HTML.
+  const cacheKey = options.cache !== false && text.length + cwd.length <= MARKDOWN_CACHE_INPUT_LIMIT
+    ? cwd + '\0' + text
+    : null
+  const cached = cacheKey === null ? undefined : markdownCache.get(cacheKey)
   if (cached !== undefined) return cached
   const processed = repairBrokenTableRows(text).replace(
     /(`{1,3}[\s\S]*?`{1,3})|(file:\/\/\/[^\s<>)\]`'"]+)/g,
@@ -153,11 +162,7 @@ export function renderChatMarkdown(text: string, cwd: string): string {
     ADD_ATTR: ['checked', 'disabled', 'type', 'data-external-link'],
     ALLOWED_URI_REGEXP: /^(?:https?|mailto|tel|file):/i,
   })
-  if (markdownCache.size >= MARKDOWN_CACHE_MAX) {
-    const oldestKey = markdownCache.keys().next().value
-    if (oldestKey !== undefined) markdownCache.delete(oldestKey)
-  }
-  markdownCache.set(cacheKey, result)
+  if (cacheKey !== null) markdownCache.set(cacheKey, result)
   return result
 }
 

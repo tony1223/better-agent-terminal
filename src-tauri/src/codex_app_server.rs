@@ -423,6 +423,9 @@ struct CodexSession {
     sandbox_mode: String,
     approval_policy: String,
     effort: String,
+    fast_mode: bool,
+    fast_mode_epoch: u64,
+    fast_mode_data_dir: Option<PathBuf>,
     context_window: u64,
     start_time: Instant,
     active_turn_id: Option<String>,
@@ -477,11 +480,18 @@ struct TurnInterruptResolution {
 }
 
 impl CodexSession {
+    fn effective_fast_mode(&self) -> bool {
+        if !self.fast_mode { return false; }
+        let (allowed, epoch) = crate::commands::settings::fast_mode_policy(self.fast_mode_data_dir.as_deref());
+        self.fast_mode && allowed && self.fast_mode_epoch == epoch && supports_codex_fast_mode(&self.model)
+    }
+
     fn metadata(&self) -> Value {
         // Cached input is a subset of input tokens in the Codex app-server
         // protocol, so adding it again would double-count context usage.
         // `last`, not lifetime `total`, represents the active context window.
         let context_tokens = self.last_input_tokens + self.last_output_tokens;
+        let fast_mode = self.effective_fast_mode();
         json!({
             "model": self.model,
             "contextWindowOverride": codex_context_window_override(&self.model),
@@ -503,6 +513,9 @@ impl CodexSession {
             "codexSandboxMode": self.sandbox_mode,
             "codexApprovalPolicy": self.approval_policy,
             "effort": self.effort,
+            "fastMode": fast_mode,
+            "supportsFastMode": supports_codex_fast_mode(&self.model),
+            "fastModeState": if fast_mode { "pending" } else { "off" },
             "lastTurnFirstTokenMs": self.last_turn_first_token_ms,
             "lastTurnDurationMs": self.last_turn_duration_ms,
             "isStreaming": self.is_running,
@@ -1909,6 +1922,7 @@ fn build_turn_start_params(
     effort: &str,
     approval_policy: &str,
     sandbox_mode: &str,
+    fast_mode: bool,
 ) -> Value {
     // approvalPolicy / sandboxPolicy are per-turn overrides ("for this turn
     // and subsequent turns"). Always sending the session's current values
@@ -1920,6 +1934,7 @@ fn build_turn_start_params(
         "model": codex_base_model(model),
         "effort": effort,
         "summary": DEFAULT_CODEX_REASONING_SUMMARY,
+        "serviceTier": if fast_mode { "fast" } else { "default" },
         "approvalPolicy": approval_policy,
         "sandboxPolicy": app_server_sandbox_policy(sandbox_mode),
     })
@@ -1946,6 +1961,11 @@ fn provider_for_model(model: &str) -> Option<&'static str> {
     }
 }
 
+fn supports_codex_fast_mode(model: &str) -> bool {
+    matches!(codex_base_model(model), "gpt-6.1-sol" | "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna"
+        | "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna" | "gpt-5.5")
+}
+
 fn build_thread_start_params(
     model: &str,
     cwd: &str,
@@ -1959,6 +1979,7 @@ fn build_thread_start_params(
         "approvalPolicy": approval_policy,
         "sandbox": app_server_sandbox(sandbox_mode),
         "serviceName": "better_agent_terminal",
+        "serviceTier": "default",
     });
     if let Some(provider) = provider_for_model(base_model) {
         params["modelProvider"] = Value::String(provider.to_string());
@@ -1982,6 +2003,7 @@ fn build_thread_resume_params(
         "approvalPolicy": approval_policy,
         "sandbox": app_server_sandbox(sandbox_mode),
         "serviceName": "better_agent_terminal",
+        "serviceTier": "default",
     });
     if let Some(provider) = provider_for_model(base_model) {
         params["modelProvider"] = Value::String(provider.to_string());
@@ -4978,6 +5000,9 @@ impl CodexAppServerState {
             sandbox_mode: sandbox_mode.clone(),
             approval_policy: approval_policy.clone(),
             effort,
+            fast_mode: false,
+            fast_mode_epoch: 0,
+            fast_mode_data_dir: app.data_dir_opt(),
             context_window: codex_context_window_for_model(&model),
             start_time: Instant::now(),
             active_turn_id: None,
@@ -5227,6 +5252,9 @@ impl CodexAppServerState {
             sandbox_mode,
             approval_policy,
             effort: normalize_effort(options.get("effort").and_then(Value::as_str)),
+            fast_mode: false,
+            fast_mode_epoch: 0,
+            fast_mode_data_dir: app.data_dir_opt(),
             context_window,
             start_time: Instant::now(),
             active_turn_id: None,
@@ -5596,6 +5624,7 @@ impl CodexAppServerState {
                 &effort,
                 &approval_policy,
                 &sandbox_mode,
+                self.fast_mode_for_session(&session_id),
             ),
             TURN_START_TIMEOUT,
         ) {
@@ -5656,6 +5685,7 @@ impl CodexAppServerState {
                                     &effort,
                                     &approval_policy,
                                     &sandbox_mode,
+                                    self.fast_mode_for_session(&session_id),
                                 ),
                                 TURN_START_TIMEOUT,
                             ) {
@@ -5730,6 +5760,7 @@ impl CodexAppServerState {
                                         &effort,
                                         &approval_policy,
                                         &sandbox_mode,
+                                        self.fast_mode_for_session(&session_id),
                                     ),
                                     TURN_START_TIMEOUT,
                                 ) {
@@ -6222,6 +6253,7 @@ impl CodexAppServerState {
             return Some(json!(true));
         }
         session.model = model;
+        if !supports_codex_fast_mode(&session.model) { session.fast_mode = false; }
         session.context_window = codex_context_window_for_model(&session.model);
         let meta = session.metadata();
         let msg = make_system_message(
@@ -6232,6 +6264,28 @@ impl CodexAppServerState {
         emit(app, "claude:message", session_id, "message", msg);
         emit(app, "claude:status", session_id, "meta", meta.clone());
         Some(json!(true))
+    }
+
+    fn fast_mode_for_session(&self, session_id: &str) -> bool {
+        self.inner.sessions.lock().expect("codex sessions lock")
+            .get(session_id).is_some_and(CodexSession::effective_fast_mode)
+    }
+
+    pub fn set_fast_mode(&self, app: &HostContext, session_id: &str, enabled: bool) -> Option<Result<Value, BridgeError>> {
+        let mut sessions = self.inner.sessions.lock().expect("codex sessions lock");
+        let session = sessions.get_mut(session_id)?;
+        if enabled && !crate::commands::settings::fast_mode_debug_enabled() {
+            return Some(Err(bridge_error("Fast mode requires BAT_DEBUG=1 on the host.")));
+        }
+        let (allowed, epoch) = crate::commands::settings::fast_mode_policy(app.data_dir_opt().as_deref());
+        if enabled && !allowed { return Some(Err(bridge_error("Enable Fast mode in host settings first."))); }
+        if enabled && !supports_codex_fast_mode(&session.model) { return Some(Err(bridge_error("This model does not support Fast mode."))); }
+        if session.is_running { return Some(Err(bridge_error("Wait for the current turn to finish before changing Fast mode."))); }
+        session.fast_mode = enabled;
+        session.fast_mode_epoch = epoch;
+        let meta = session.metadata();
+        emit(app, "claude:status", session_id, "meta", meta.clone());
+        Some(Ok(meta))
     }
 
     pub fn set_effort(&self, app: &HostContext, session_id: &str, effort: String) -> Option<Value> {
@@ -7961,6 +8015,9 @@ mod tests {
             sandbox_mode: "workspace-write".to_string(),
             approval_policy: "on-request".to_string(),
             effort: "high".to_string(),
+            fast_mode: false,
+            fast_mode_epoch: 0,
+            fast_mode_data_dir: None,
             context_window: GPT_5_6_CONTEXT_WINDOW_FALLBACK,
             start_time: Instant::now(),
             active_turn_id: Some("turn-1".to_string()),
@@ -8343,14 +8400,34 @@ mod tests {
             "max",
             "on-request",
             "workspace-write",
+            false,
         );
         assert_eq!(params["threadId"], "thread-1");
         assert_eq!(params["model"], "gpt-5.6-sol");
         assert_eq!(params["effort"], "max");
+        assert_eq!(params["serviceTier"], "default");
         assert_eq!(params["summary"], DEFAULT_CODEX_REASONING_SUMMARY);
         assert!(params.get("reasoningEffort").is_none());
         assert_eq!(params["approvalPolicy"], "on-request");
         assert_eq!(params["sandboxPolicy"], json!({ "type": "workspaceWrite" }));
+    }
+
+    #[test]
+    fn codex_fast_tier_requires_per_turn_opt_in_and_threads_start_standard() {
+        let fast = build_turn_start_params("thread-1", json!([]), "gpt-6-astra:872k", "high", "on-request", "workspace-write", true);
+        assert_eq!(fast["serviceTier"], "fast");
+        let standard = build_turn_start_params("thread-1", json!([]), "gpt-6-astra:872k", "high", "on-request", "workspace-write", false);
+        assert_eq!(standard["serviceTier"], "default");
+        let start = build_thread_start_params("gpt-6-astra", "/repo", "on-request", "workspace-write");
+        let resume = build_thread_resume_params("thread-1", "gpt-6-astra", "/repo", "on-request", "workspace-write");
+        assert_eq!(start["serviceTier"], "default");
+        assert_eq!(resume["serviceTier"], "default");
+        assert!(supports_codex_fast_mode("gpt-6-astra:872k"));
+        assert!(!supports_codex_fast_mode("fugu"));
+        assert!(!supports_codex_fast_mode("gpt-5.3-codex-spark"));
+        let mut session = test_codex_session();
+        session.fast_mode = true;
+        assert_eq!(session.metadata()["fastMode"], false, "an in-memory opt-in cannot bypass the host policy");
     }
 
     #[test]
@@ -8406,6 +8483,7 @@ mod tests {
             "high",
             "on-request",
             "workspace-write",
+            false,
         );
         assert_eq!(turn["model"], "gpt-6-astra");
         assert!(turn.get("config").is_none());
@@ -8719,6 +8797,9 @@ mod tests {
             sandbox_mode: "workspace-write".to_string(),
             approval_policy: "on-request".to_string(),
             effort: "high".to_string(),
+            fast_mode: false,
+            fast_mode_epoch: 0,
+            fast_mode_data_dir: None,
             context_window: codex_context_window_for_model("gpt-5.6-sol"),
             start_time: Instant::now(),
             active_turn_id: None,
@@ -8768,6 +8849,9 @@ mod tests {
             sandbox_mode: "workspace-write".to_string(),
             approval_policy: "on-request".to_string(),
             effort: "high".to_string(),
+            fast_mode: false,
+            fast_mode_epoch: 0,
+            fast_mode_data_dir: None,
             context_window: DEFAULT_CODEX_CONTEXT_WINDOW,
             start_time: Instant::now(),
             active_turn_id: None,
@@ -8825,6 +8909,9 @@ mod tests {
             sandbox_mode: "workspace-write".to_string(),
             approval_policy: "on-request".to_string(),
             effort: "high".to_string(),
+            fast_mode: false,
+            fast_mode_epoch: 0,
+            fast_mode_data_dir: None,
             context_window: DEFAULT_CODEX_CONTEXT_WINDOW,
             start_time: Instant::now(),
             active_turn_id: None,

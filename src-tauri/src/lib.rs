@@ -420,6 +420,7 @@ fn app_builder(headless: bool) -> tauri::Builder<tauri::Wry> {
             claude_cmd::claude_set_codex_approval_policy,
             claude_cmd::claude_set_model,
             claude_cmd::claude_set_effort,
+            claude_cmd::claude_set_fast_mode,
             claude_cmd::claude_reset_session,
             claude_cmd::claude_resume_session,
             claude_cmd::claude_client_resume,

@@ -1,5 +1,8 @@
 {
   "common": {
+    "page": "Page",
+    "nextPage": "Next",
+    "previousPage": "Previous",
     "cancel": "Cancel",
     "save": "Save",
     "close": "Close",
@@ -39,6 +42,8 @@
   },
 
   "settings": {
+    "allowFastMode": "Allow Fast mode",
+    "allowFastModeHint": "Fast may use more quota or incur additional charges. This only shows the checkbox beside the model; enable it separately for each conversation. Disabling this setting revokes previous selections for future turns. Remote sessions also require the host to allow Fast.",
     "title": "Settings",
     "tabGeneral": "General",
     "tabAgent": "Agent",
@@ -548,6 +553,16 @@
   },
 
   "claude": {
+    "fastModeUnsupported": "This model does not support Fast mode.",
+    "fastModeBusy": "Wait for the current turn to finish before changing Fast.",
+    "fastModeCooldown": "Fast is cooling down; the runtime is temporarily using standard speed.",
+    "fastModePending": "Fast is requested for the next turn; availability depends on the account and runtime.",
+    "fastModeHint": "Request Fast for this conversation. Higher usage or additional charges may apply.",
+    "fastModeUnavailable": "This host does not support Fast controls.",
+    "fastModeCooling": "cooldown",
+    "archivedGap": "{{count}} archived messages between this page and the latest messages",
+    "backToLatestMessages": "Back to latest messages",
+    "loadNewerMessages": "Load newer messages",
     "thinking": "Thinking",
     "reasoningSummary": "Reasoning summary",
     "turnWorking": "Working",

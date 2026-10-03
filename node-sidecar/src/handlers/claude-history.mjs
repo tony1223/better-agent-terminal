@@ -3,6 +3,8 @@
 // loadArchived, clearArchive.
 
 import { readFile, appendFile, mkdir, readdir, unlink } from 'node:fs/promises'
+import { createReadStream } from 'node:fs'
+import { createInterface } from 'node:readline'
 import { join } from 'node:path'
 
 import { registerHandler, sendEvent } from '../lib/protocol.mjs'
@@ -609,6 +611,30 @@ registerHandler('claude.loadArchived', async (params) => {
   const offset = Number.isFinite(params?.offset) ? Math.max(0, Math.floor(params.offset)) : 0
   const limit = Number.isFinite(params?.limit) ? Math.max(0, Math.floor(params.limit)) : 0
   if (typeof sessionId !== 'string' || !sessionId) return { messages: [], total: 0, hasMore: false }
+  // A zero-row query can return prompt IDs for explicit rewind operations,
+  // without retaining the full archive or transferring any message bodies.
+  if (limit === 0) {
+    const input = createReadStream(archiveFilePath(sessionId), { encoding: 'utf8' })
+    const reader = createInterface({ input, crlfDelay: Infinity })
+    const promptIds = []
+    let total = 0
+    try {
+      for await (const line of reader) {
+        if (!line.trim()) continue
+        total++
+        try {
+          const item = JSON.parse(line)
+          if (item?.role === 'user' && typeof item.toolName !== 'string' && typeof item.id === 'string') promptIds.push(item.id)
+        } catch { /* same malformed-row policy as ordinary pages */ }
+      }
+      return { messages: [], total, hasMore: total > offset, promptIds }
+    } catch {
+      return { messages: [], total: 0, hasMore: false, promptIds: [] }
+    } finally {
+      reader.close()
+      input.destroy()
+    }
+  }
   let raw
   try {
     raw = await readFile(archiveFilePath(sessionId), 'utf-8')

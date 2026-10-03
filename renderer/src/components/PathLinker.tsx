@@ -1,5 +1,5 @@
 import { host } from '../host-api'
-import { useState, useEffect, useCallback, useRef, Fragment } from 'react'
+import { memo, useMemo, useState, useEffect, useCallback, useRef, Fragment } from 'react'
 import { useTranslation } from 'react-i18next'
 import { RevealPathMenu, type RevealPathTarget } from './RevealPathMenu'
 import { MarkdownPreview } from './MarkdownPreview'
@@ -470,7 +470,7 @@ interface LinkedTextProps {
   text: string
 }
 
-export function LinkedText({ text }: LinkedTextProps) {
+export const LinkedText = memo(function LinkedText({ text }: LinkedTextProps) {
   const [previewPath, setPreviewPath] = useState<string | null>(null)
   // One menu for the whole block rather than one per link: a long agent reply can
   // cite hundreds of paths.
@@ -498,9 +498,8 @@ export function LinkedText({ text }: LinkedTextProps) {
     host.shell.openExternal(url)
   }, [])
 
+  const tokens = useMemo(() => typeof text === 'string' ? tokenize(text) : [], [text])
   if (typeof text !== 'string') return <>{text}</>
-
-  const tokens = tokenize(text)
   if (tokens.length === 1 && tokens[0].type === 'text') return <>{text}</>
 
   return (
@@ -544,4 +543,4 @@ export function LinkedText({ text }: LinkedTextProps) {
       )}
     </>
   )
-}
+})

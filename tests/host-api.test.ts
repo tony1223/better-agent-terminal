@@ -217,6 +217,7 @@ async function run() {
       if (cmd === 'claude_set_codex_approval_policy') return true as unknown as T
       if (cmd === 'claude_set_model') return true as unknown as T
       if (cmd === 'claude_set_effort') return true as unknown as T
+      if (cmd === 'claude_set_fast_mode') return { fastMode: true, supportsFastMode: true } as unknown as T
       if (cmd === 'claude_reset_session') return true as unknown as T
       if (cmd === 'claude_get_supported_models') return [] as unknown as T
       if (cmd === 'claude_get_supported_efforts') return [] as unknown as T
@@ -636,6 +637,7 @@ async function run() {
     assert.equal(await mod.host.claude.setCodexApprovalPolicy('s-1', 'on-request'), true)
     assert.equal(await mod.host.claude.setModel('s-1', 'claude-opus-4-7'), true)
     assert.equal(await mod.host.claude.setEffort('s-1', 'high'), true)
+    assert.deepEqual(await mod.host.claude.setFastMode('s-1', true), { fastMode: true, supportsFastMode: true })
     assert.equal(await mod.host.claude.resetSession('s-1'), true)
     assert.deepEqual(await mod.host.claude.getSupportedModels('s-1'), [])
     assert.deepEqual(await mod.host.claude.getSupportedEfforts('s-1'), [])
@@ -915,6 +917,7 @@ async function run() {
       { cmd: 'claude_set_codex_approval_policy', args: { sessionId: 's-1', policy: 'on-request' } },
       { cmd: 'claude_set_model', args: { sessionId: 's-1', model: 'claude-opus-4-7', autoCompactWindow: undefined } },
       { cmd: 'claude_set_effort', args: { sessionId: 's-1', effort: 'high' } },
+      { cmd: 'claude_set_fast_mode', args: { sessionId: 's-1', enabled: true } },
       { cmd: 'claude_reset_session', args: { sessionId: 's-1' } },
       // Session-read commands attach the terminal's agentPreset so the Rust
       // router can pick the Claude/Codex runtime; the test store has no

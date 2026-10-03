@@ -1,3 +1,4 @@
+import { persistTranscriptArchive, readArchivePage, releaseArchivedSnapshots, resolveTranscriptPrompt, transcriptArchivePrefix, type ArchivePage } from '../utils/transcript-window'
 import { host, isTauri } from '../host-api'
 import { useState, useEffect, useRef, useCallback, useMemo, Fragment, cloneElement, isValidElement, memo } from 'react'
 import { describePendingAction } from '../utils/attention'
@@ -16,6 +17,11 @@ import { shallowEqual } from '../stores/use-store'
 import { getAgentPreset, type AgentPresetId } from '../types/agent-presets'
 import { LinkedText, FilePreviewModal } from './PathLinker'
 import { ChatMarkdown } from './ChatMarkdown'
+import { AgentFilePreview } from './AgentFilePreview'
+import { AgentToolInput } from './AgentToolInput'
+import { prepareSpecialToolResult } from './CodexAgentPanel.helpers'
+import { countTextLines } from '../utils/text-lines'
+import { SubagentTranscriptCache } from '../utils/subagent-transcript-cache'
 import { WorktreeMergedChip } from './WorktreeMergedChip'
 import { buildMessageStream } from './messageSkip'
 import { InterruptedTurnCard } from './InterruptedTurnCard'
@@ -34,6 +40,8 @@ import { buildSnippetContextPrompt, parseSnippetSlashCommand, type SnippetForCon
 import { filterSlashCommands, flattenSlashGroups, groupSlashCommands, mergeSlashCommands, type SlashCommandInfo } from '../utils/slash-commands'
 import { PERMISSION_MODES, PERMISSION_MODE_LABELS, normalizePermissionMode } from '../utils/permission-modes'
 import { createToolRenderCache, getOrComputeToolRender, pruneToolRenderCache } from '../utils/tool-result-cache'
+import { useBatchedSubagentStreams } from '../utils/use-batched-subagent-streams'
+import { AgentFastModeCheckbox } from './AgentFastModeCheckbox'
 import { useRafBatchedString } from '../utils/use-raf-batched-string'
 import { translateRuntimeMessage } from '../utils/runtime-status-message'
 import { agentSendResultError, isMissingSessionCwdError } from '../utils/agent-send-recovery'
@@ -318,11 +326,17 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
   // change / message clear so it never holds stale entries.
   const toolRenderCacheRef = useRef(createToolRenderCache<{
     outText: string
+    outLineCount: number
     isLongOutput: boolean
     outPreviewLines: string[]
     reminders: string[]
     errors: string[]
   }>())
+  const specialToolRenderCacheRef = useRef(createToolRenderCache<ReturnType<typeof prepareSpecialToolResult>>())
+  const getSpecialResult = (item: ClaudeToolCall) => getOrComputeToolRender(
+    specialToolRenderCacheRef.current, item.id, item.result,
+    () => prepareSpecialToolResult(item.result, item.toolName),
+  )
   const inputValueRef = useRef('')
   const [isStreaming, setIsStreaming] = useState(false)
   const [runtimeWaitNow, setRuntimeWaitNow] = useState(() => Date.now())
@@ -488,9 +502,8 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
     return actual === expected ? null : { expected, actual }
   }, [isCodexSession, sessionMeta, currentModel])
   // Subagent message storage (keyed by parent Task tool_use_id)
-  const subagentMessagesRef = useRef<Map<string, MessageItem[]>>(new Map())
-  const [subagentStreamingText, setSubagentStreamingText] = useState<Map<string, string>>(new Map())
-  const [subagentStreamingThinking, setSubagentStreamingThinking] = useState<Map<string, string>>(new Map())
+  const subagentMessagesRef = useRef(new SubagentTranscriptCache<MessageItem>())
+  const { text: subagentStreamingText, thinking: subagentStreamingThinking, controller: subagentStreams } = useBatchedSubagentStreams(activation)
   const [taskModal, setTaskModal] = useState<{ taskId: string; label: string; subagentType?: string } | null>(null)
   const [taskModalTick, setTaskModalTick] = useState(0)
   // Task id whose stored transcript is currently being read back from the SDK.
@@ -498,6 +511,18 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
   // Best-effort `claude:task` lifecycle entries (workflow name / terminal
   // status), merged into the agent activity tree. Keyed by task id.
   const [taskLifecycle, setTaskLifecycle] = useState<Map<string, TaskLifecycle>>(new Map())
+  // A mid-run disk read must not suppress the final read after completion.
+  const partialTranscriptRef = useRef(new Set<string>())
+  const taskTranscriptRequestRef = useRef<symbol | null>(null)
+  const resetSubagentState = useCallback(() => {
+    subagentMessagesRef.current.clear()
+    partialTranscriptRef.current.clear()
+    taskTranscriptRequestRef.current = null
+    subagentStreams.clear()
+    setTaskLifecycle(new Map())
+    setTaskTranscriptLoading(null)
+    setTaskModal(null)
+  }, [subagentStreams])
   const [agentTreeView, setAgentTreeView] = useState<'bar' | 'tree' | 'hidden'>('bar')
   const [showPromptHistory, setShowPromptHistory] = useState(false)
   const [worktreeInfo, setWorktreeInfo] = useState<{ branchName: string; worktreePath: string; sourceBranch: string; gitRoot?: string } | null>(() => {
@@ -641,8 +666,41 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
   // a redundant append, never a lost row.
   const archivedIdsRef = useRef<Set<string>>(new Set())
   const archivingRef = useRef(false)
-  const VISIBLE_LIMIT = 120
-  const ARCHIVE_TRIGGER = 160 // archive when exceeding this
+  const archiveRevisionRef = useRef(0)
+  const archiveRequestRef = useRef<symbol | null>(null)
+  const archiveWindowRef = useRef({ start: 0, end: 0, total: 0 })
+  const [hasNewerArchived, setHasNewerArchived] = useState(false)
+  const archiveWriteQueueRef = useRef<Promise<unknown>>(Promise.resolve())
+  const serializeArchiveWrite = useCallback((operation: () => Promise<boolean>) => {
+    const revision = archiveRevisionRef.current
+    const pending = archiveWriteQueueRef.current.catch(() => {}).then(() =>
+      revision === archiveRevisionRef.current ? operation() : false)
+    archiveWriteQueueRef.current = pending
+    return pending
+  }, [])
+  const resetArchivePage = useCallback(() => {
+    archiveRevisionRef.current++
+    archiveRequestRef.current = null
+    archiveWindowRef.current = { start: 0, end: 0, total: 0 }
+    archivingRef.current = false
+    setHasNewerArchived(false)
+    setIsLoadingMore(false)
+  }, [])
+  const applyArchivePage = useCallback((page: ArchivePage<MessageItem>) => {
+    const total = Math.max(page.total, archivedCountRef.current)
+    archiveWindowRef.current = { start: page.start, end: page.end, total }
+    archivedCountRef.current = total
+    loadedFromArchiveRef.current = page.end > 0 ? total - page.start : 0
+    for (const item of page.items) archivedIdsRef.current.add(item.id)
+    setLoadedArchive(page.items)
+    setHasMoreArchived(page.start > 0 || (page.end === 0 && total > 0))
+    setHasNewerArchived(page.end > 0 && page.end < total)
+  }, [])
+
+  useEffect(() => () => {
+    archiveRevisionRef.current++
+    archiveRequestRef.current = null
+  }, [])
   const INITIAL_ARCHIVE_LOAD = 120
   const LOAD_BATCH = 40
   const historyLoadedRef = useRef(false)
@@ -1020,36 +1078,27 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
     if (autoLoadedArchiveSessionRef.current === sessionId) return
     autoLoadedArchiveSessionRef.current = sessionId
     let cancelled = false
+    const revision = archiveRevisionRef.current
+    const token = Symbol('initial-archive-page')
+    archiveRequestRef.current = token
     archiveDlog(
       `[Claude:${sessionId.slice(0, 8)}] auto-load archived start limit=${INITIAL_ARCHIVE_LOAD} live=${messages.length} loaded=${loadedArchive.length}`
     )
     setIsLoadingMore(true)
-    host.claude.loadArchived(sessionId, 0, INITIAL_ARCHIVE_LOAD)
-      .then((result: { messages: unknown[]; total: number; hasMore: boolean }) => {
-        if (cancelled) return
-        const rawMessages = result.messages || []
-        const archived = normalizeMessageItems(rawMessages)
-        archiveDlog(
-          `[Claude:${sessionId.slice(0, 8)}] auto-load archived result messages=${archived.length}/${rawMessages.length} total=${result.total || 0} hasMore=${result.hasMore} live=${messages.length}`
-        )
-        archivedCountRef.current = result.total || archived.length
-        loadedFromArchiveRef.current = rawMessages.length
-        // Anything read back is on disk by definition. A fresh mount starts
-        // with no record of what it archived in a previous life, and this is
-        // the cheapest way to recover part of it — enough that re-hydrating
-        // does not re-flush the tail the panel just read.
-        for (const m of archived) archivedIdsRef.current.add(m.id)
-        setLoadedArchive(archived)
-        setHasMoreArchived(result.hasMore)
+    readArchivePage((offset, limit) => host.claude.loadArchived(sessionId, offset, limit), normalizeMessageItems,
+      { total: archivedCountRef.current, limit: INITIAL_ARCHIVE_LOAD })
+      .then(page => {
+        if (cancelled || revision !== archiveRevisionRef.current || archiveRequestRef.current !== token) return
+        applyArchivePage(page)
       })
       .catch((err) => {
         archiveDlog(
           `[Claude:${sessionId.slice(0, 8)}] auto-load archived failed: ${err instanceof Error ? err.message : String(err)}`
         )
-        if (!cancelled) setHasMoreArchived(false)
+        if (!cancelled && revision === archiveRevisionRef.current) setHasMoreArchived(false)
       })
       .finally(() => {
-        if (!cancelled) setIsLoadingMore(false)
+        if (archiveRequestRef.current === token) { archiveRequestRef.current = null; setIsLoadingMore(false) }
       })
     return () => {
       cancelled = true
@@ -1161,89 +1210,77 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
   }, [])
 
-  // Archive excess messages to disk when threshold is exceeded.
-  // Trim in-memory immediately to release memory; the archive IPC writes
-  // the snapshot to disk in parallel. If the archive write fails, we keep
-  // the count (best-effort) — losing the ability to load-back those
-  // messages is preferable to letting memory grow unbounded.
+  // Persist finalized rows before releasing their in-memory snapshots.
   useEffect(() => {
-    if (archivingRef.current || messages.length <= ARCHIVE_TRIGGER) return
+    if (archivingRef.current) return
+    const snapshots = transcriptArchivePrefix(messages)
+    if (snapshots.length === 0) return
+    const revision = archiveRevisionRef.current
     archivingRef.current = true
-    const excess = messages.length - VISIBLE_LIMIT
-    // This effect assumed `messages` only ever grows by new rows. It does not:
-    // hydrating (on mount, and again on every remote reconnect — isRemoteConnected
-    // is a dep of the hydrate effect) replaces it with the host's last 300, whose
-    // head is already archived. Flushing that window unfiltered appended a second
-    // copy per hydrate, permanently, and the duplicates then rendered as repeated
-    // replies. Archive only what has not been archived before.
-    const toArchive = messages.slice(0, excess).filter(m => !archivedIdsRef.current.has(m.id))
-    setMessages(prev => prev.slice(excess))
-    // Counts rows in the archive file, which is what the "load older" label
-    // reports — so it advances by what is actually written, not by what was
-    // dropped from the visible window.
-    archivedCountRef.current += toArchive.length
-    setHasMoreArchived(true)
-    if (toArchive.length === 0) {
-      archivingRef.current = false
-      return
-    }
-    for (const m of toArchive) archivedIdsRef.current.add(m.id)
-    host.claude.archiveMessages(sessionId, toArchive)
-      .catch((err) => {
-        host.debug.log?.('[ClaudeAgentPanel] archiveMessages failed:', String(err))
+    const toArchive = snapshots.filter(m => !archivedIdsRef.current.has(m.id))
+    serializeArchiveWrite(() => persistTranscriptArchive(toArchive, batch => revision === archiveRevisionRef.current
+      ? host.claude.archiveMessages(sessionId, batch) : Promise.resolve(false)))
+      .then(ok => {
+        if (revision !== archiveRevisionRef.current) return
+        archivingRef.current = false
+        if (!ok) { host.debug.log('[ClaudeAgentPanel] archive write failed; keeping messages in memory'); return }
+        for (const item of toArchive) archivedIdsRef.current.add(item.id)
+        archivedCountRef.current += toArchive.length
+        setHasMoreArchived(archiveWindowRef.current.start > 0 || archiveWindowRef.current.end === 0)
+        setHasNewerArchived(archiveWindowRef.current.end > 0 && archiveWindowRef.current.end < archivedCountRef.current)
+        setMessages(prev => releaseArchivedSnapshots(prev, snapshots))
       })
-      .finally(() => { archivingRef.current = false })
-  }, [messages.length, sessionId])
+      .catch(err => {
+        if (revision !== archiveRevisionRef.current) return
+        archivingRef.current = false
+        host.debug.log('[ClaudeAgentPanel] archiveMessages failed:', String(err))
+      })
+  }, [messages, sessionId, serializeArchiveWrite])
 
-  // Drop tool-render cache entries whose tool ids are no longer in messages.
+  // Loaded archive rows are still rendered; keep their computed output until
+  // they leave the combined transcript, rather than reparsing every new row.
   useEffect(() => {
     const liveIds = new Set<string>()
-    for (const m of messages) {
+    for (const m of allMessages) {
       if ('toolName' in m) liveIds.add(m.id)
     }
     pruneToolRenderCache(toolRenderCacheRef.current, liveIds)
-  }, [messages])
+    pruneToolRenderCache(specialToolRenderCacheRef.current, liveIds)
+  }, [allMessages])
 
   // Load more archived messages when scrolling to top
-  const loadMoreArchived = useCallback(async () => {
-    if (isLoadingMore || !hasMoreArchived) return
+  const navigateArchive = useCallback(async (direction: 'older' | 'newer' | 'latest') => {
+    if (archiveRequestRef.current) return
+    const token = Symbol('archive-page')
+    archiveRequestRef.current = token
+    const revision = archiveRevisionRef.current
+    const current = archiveWindowRef.current
     setIsLoadingMore(true)
-    const container = messagesContainerRef.current
-    const prevScrollHeight = container?.scrollHeight ?? 0
-    // Anchor on the item that is currently at the top rather than on a
-    // scrollHeight delta. Items off screen are size-estimated until they
-    // scroll in, so the total height is not a stable reference across the
-    // await — but a node that is already on screen has a real height, and
-    // holding it still is what the user actually perceives as "kept my place".
-    const anchor = container?.querySelector<HTMLElement>('.tl-item') ?? null
-    const anchorTop = anchor?.getBoundingClientRect().top ?? 0
+    followOutputRef.current = direction === 'latest'
     try {
-      const result = await host.claude.loadArchived(sessionId, loadedFromArchiveRef.current, LOAD_BATCH)
-      if (result.messages.length > 0) {
-        const archived = normalizeMessageItems(result.messages)
-        loadedFromArchiveRef.current += result.messages.length
-        for (const m of archived) archivedIdsRef.current.add(m.id)
-        setLoadedArchive(prev => [...archived, ...prev])
-        setHasMoreArchived(result.hasMore)
-        // Preserve scroll position after prepending
-        requestAnimationFrame(() => {
-          if (!container) return
-          if (anchor?.isConnected) {
-            container.scrollTop += anchor.getBoundingClientRect().top - anchorTop
-          } else {
-            // React dropped the anchor (index-keyed rows remount on prepend);
-            // fall back to the height delta.
-            container.scrollTop += container.scrollHeight - prevScrollHeight
-          }
-        })
-      } else {
-        setHasMoreArchived(false)
-      }
-    } catch {
-      setHasMoreArchived(false)
+      const page = await readArchivePage((offset, limit) => host.claude.loadArchived(sessionId, offset, limit), normalizeMessageItems, {
+        total: archivedCountRef.current,
+        limit: LOAD_BATCH,
+        ...(direction === 'older' && current.end > 0 ? { end: current.start } : {}),
+        ...(direction === 'newer' ? { start: current.end } : {}),
+      })
+      if (revision !== archiveRevisionRef.current || archiveRequestRef.current !== token) return
+      applyArchivePage(page)
+      if (direction === 'latest') scrollToBottomAfterRender()
+      else requestAnimationFrame(() => {
+        if (revision !== archiveRevisionRef.current) return
+        const container = messagesContainerRef.current
+        if (container) container.scrollTop = 0
+      })
+    } catch (err) {
+      if (revision === archiveRevisionRef.current) host.debug.log('[ClaudeAgentPanel] archive page failed:', String(err))
+    } finally {
+      if (archiveRequestRef.current === token) { archiveRequestRef.current = null; setIsLoadingMore(false) }
     }
-    setIsLoadingMore(false)
-  }, [sessionId, isLoadingMore, hasMoreArchived])
+  }, [sessionId, applyArchivePage, scrollToBottomAfterRender])
+  const loadMoreArchived = useCallback(() => navigateArchive('older'), [navigateArchive])
+  const loadNewerArchived = useCallback(() => navigateArchive('newer'), [navigateArchive])
+  const loadLatestArchived = useCallback(() => navigateArchive('latest'), [navigateArchive])
 
   // Sync pending action state to workspace store for breathing light indicator
   useEffect(() => {
@@ -1344,12 +1381,13 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
           if (!historyLoadedRef.current) {
             setMessages([message])
             // Clear archive on fresh session start
+            resetArchivePage()
             setLoadedArchive([])
             archivedCountRef.current = 0
             loadedFromArchiveRef.current = 0
             archivedIdsRef.current = new Set()
             setHasMoreArchived(false)
-            host.claude.clearArchive(sessionId).catch(() => {})
+            serializeArchiveWrite(() => host.claude.clearArchive(sessionId)).catch(() => {})
           }
           setStreamingText('')
           setStreamingThinking('')
@@ -1376,8 +1414,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
             subagentMessagesRef.current.set(message.parentToolUseId, bucket)
             if (taskModal?.taskId === message.parentToolUseId) setTaskModalTick(t => t + 1)
           }
-          setSubagentStreamingText(prev => { const n = new Map(prev); n.delete(message.parentToolUseId!); return n })
-          setSubagentStreamingThinking(prev => { const n = new Map(prev); n.delete(message.parentToolUseId!); return n })
+          subagentStreams.delete(message.parentToolUseId)
           return
         }
         // Deduplicate by id; for user messages also dedup by content+timestamp proximity
@@ -1557,9 +1594,8 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
         const doResultUpdate = () => setMessages(prev => prev.map(m => {
           if ('toolName' in m && m.id === id) {
             // When a Task tool completes, clear its subagent streaming state
-            if (m.toolName === 'Task') {
-              setSubagentStreamingText(p => { const n = new Map(p); n.delete(id); return n })
-              setSubagentStreamingThinking(p => { const n = new Map(p); n.delete(id); return n })
+            if (m.toolName === 'Task' || m.toolName === 'Agent') {
+              subagentStreams.delete(id)
             }
             endBoundLifecycle(m as ClaudeToolCall)
             return { ...m, ...updates } as ClaudeToolCall
@@ -1673,21 +1709,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
         workspaceStore.updateTerminalActivity(sessionId)
         setSessionMeta(prev => clearRuntimeStatusMeta(prev))
         if (d.parentToolUseId) {
-          // Route to per-subagent streaming state
-          if (d.text) {
-            setSubagentStreamingText(prev => {
-              const n = new Map(prev)
-              n.set(d.parentToolUseId!, (prev.get(d.parentToolUseId!) || '') + d.text)
-              return n
-            })
-          }
-          if (d.thinking) {
-            setSubagentStreamingThinking(prev => {
-              const n = new Map(prev)
-              n.set(d.parentToolUseId!, (prev.get(d.parentToolUseId!) || '') + d.thinking)
-              return n
-            })
-          }
+          subagentStreams.append(d.parentToolUseId, d)
         } else {
           if (d.text) streamingTextStore.append(d.text)
           if (d.thinking) streamingThinkingStore.append(d.thinking)
@@ -1820,10 +1842,17 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
       api.onSessionReset((sid: string) => {
         if (sid !== sessionId) return
         hostEventSeqRef.current += 1
+        resetSubagentState()
         setMessages([])
+        resetArchivePage()
+        setLoadedArchive([])
+        autoLoadedArchiveSessionRef.current = null
+        archivedCountRef.current = 0
+        loadedFromArchiveRef.current = 0
+        archivedIdsRef.current = new Set()
+        setHasMoreArchived(false)
         setStreamingText('')
         setStreamingThinking('')
-        setTaskLifecycle(new Map())
         setPendingPermission(null)
         setPendingQuestion(null)
         setAskAnswers({})
@@ -1861,7 +1890,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
             mainItems.push(item)
           }
         }
-        subagentMessagesRef.current = subagentBuckets
+        subagentMessagesRef.current.replace(subagentBuckets)
         // Restore activePlanFile from history: only show bar if last plan tool is
         // ExitPlanMode and it fired within the 10-minute badge window.
         for (let i = mainItems.length - 1; i >= 0; i--) {
@@ -1879,47 +1908,43 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
           }
         }
         const historyItems = mainItems
-        const archiveHistoryItems = historyItems.length > ARCHIVE_TRIGGER
-          ? historyItems.slice(0, -VISIBLE_LIMIT)
-          : []
-        const liveHistoryItems = archiveHistoryItems.length > 0
-          ? historyItems.slice(-VISIBLE_LIMIT)
-          : historyItems
-        archiveDlog(
-          `${tag} onHistory reset archive items=${historyItems.length} live=${liveHistoryItems.length} archive=${archiveHistoryItems.length} loadedArchive=${loadedArchive.length} archivedCount=${archivedCountRef.current} loadedFromArchive=${loadedFromArchiveRef.current}`
-        )
+        const archiveHistoryItems = transcriptArchivePrefix(historyItems)
+        const liveHistoryItems = historyItems.slice(archiveHistoryItems.length)
         if (historyItems.length > 0 || loadedFromArchiveRef.current === 0) {
+          resetArchivePage()
+          const revision = archiveRevisionRef.current
           setLoadedArchive([])
-          archivedCountRef.current = archiveHistoryItems.length
+          archivedCountRef.current = 0
           loadedFromArchiveRef.current = 0
           setHasMoreArchived(false)
-          // The archive is about to be replaced wholesale, so what this panel
-          // believes it has written is void either way.
           archivedIdsRef.current = new Set()
-          window.setTimeout(() => {
-            const resetArchive = host.claude.clearArchive(sessionId)
-            if (archiveHistoryItems.length === 0) {
-              resetArchive.catch(() => {})
-              return
-            }
-            resetArchive
-              .then(() => host.claude.archiveMessages(sessionId, archiveHistoryItems))
-              .then((ok) => {
-                if (ok) {
-                  for (const m of archiveHistoryItems) archivedIdsRef.current.add(m.id)
-                  setHasMoreArchived(true)
-                } else {
-                  archivedCountRef.current = 0
-                  archiveDlog(`${tag} onHistory archive history failed`)
-                }
-              })
-              .catch((err) => {
-                archivedCountRef.current = 0
-                host.debug.log?.('[ClaudeAgentPanel] archive history failed:', String(err))
-              })
-          }, 0)
-        } else {
-          archiveDlog(`${tag} onHistory empty; keeping auto-loaded archive`)
+          archivingRef.current = true
+          serializeArchiveWrite(async () => {
+            if (!await host.claude.clearArchive(sessionId)) return false
+            if (revision !== archiveRevisionRef.current) return false
+            return persistTranscriptArchive(archiveHistoryItems, batch => revision === archiveRevisionRef.current
+              ? host.claude.archiveMessages(sessionId, batch) : Promise.resolve(false))
+          })
+            .then(ok => {
+              if (revision !== archiveRevisionRef.current) return
+              archivingRef.current = false
+              if (ok) {
+                for (const item of archiveHistoryItems) archivedIdsRef.current.add(item.id)
+                archivedCountRef.current = archiveHistoryItems.length
+                setHasMoreArchived(archiveHistoryItems.length > 0)
+                setMessages(prev => [...prev])
+              } else {
+                // Keep the only available copies if persistence was rejected.
+                setMessages(prev => dedupeMessagesById([...archiveHistoryItems, ...prev]))
+                host.debug.log('[ClaudeAgentPanel] history archive failed; restored messages in memory')
+              }
+            })
+            .catch(err => {
+              if (revision !== archiveRevisionRef.current) return
+              archivingRef.current = false
+              setMessages(prev => dedupeMessagesById([...archiveHistoryItems, ...prev]))
+              host.debug.log('[ClaudeAgentPanel] history archive failed:', String(err))
+            })
         }
         setStreamingText('')
         setStreamingThinking('')
@@ -1996,7 +2021,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
       host.debug.log(`${tag} unsubscribing IPC events`)
       unsubs.forEach(unsub => unsub())
     }
-  }, [sessionId, archiveDlog])
+  }, [sessionId, archiveDlog, resetSubagentState])
 
   // Stable per session so a retry replaces the notice rather than stacking one.
   const remoteDisconnectNoticeId = `sys-remote-disconnected-${sessionId}`
@@ -2696,11 +2721,6 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
     [agentTree, taskModal?.taskId], // eslint-disable-line react-hooks/exhaustive-deps
   )
 
-  // taskIds whose transcript was read while the task was still running. Such a
-  // read stops at whatever the CLI had flushed, so it must not block the final
-  // read once the task finishes.
-  const partialTranscriptRef = useRef(new Set<string>())
-
   // Backfill the open task modal's transcript. getSubagentMessages() reads the
   // on-disk shard the CLI appends to during the parent run, so this works for a
   // running subagent too — it used to bail out on `running`, which left a
@@ -2717,14 +2737,20 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
     // Tracked so the transcript area can say "loading" instead of claiming
     // nothing was captured while the read is still in flight.
     setTaskTranscriptLoading(taskId)
-    host.claude.fetchSubagentMessages(sessionId, taskId).then((msgs: unknown[]) => {
+    const request = Symbol(taskId)
+    taskTranscriptRequestRef.current = request
+    subagentMessagesRef.current.load(taskId,
+      async () => await host.claude.fetchSubagentMessages(sessionId, taskId) as MessageItem[],
+    ).then(msgs => {
+      if (msgs === null) return
       if (msgs && msgs.length > 0) {
-        subagentMessagesRef.current.set(taskId, msgs as MessageItem[])
         setTaskModalTick(t => t + 1)
       }
       if (wasRunning) partialTranscriptRef.current.add(taskId)
       else partialTranscriptRef.current.delete(taskId)
     }).catch(() => {}).finally(() => {
+      if (taskTranscriptRequestRef.current !== request) return
+      taskTranscriptRequestRef.current = null
       setTaskTranscriptLoading(prev => (prev === taskId ? null : prev))
     })
     // Status is a dep so a task that finishes while its modal is open gets read
@@ -2833,7 +2859,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
     workspaceStore.updateTerminalModel(sessionId, selectedModel)
   }, [sessionId, isCodexSession, isV2Session, currentModel, t])
 
-  const handleResumeSelect = useCallback(async (sdkSessionId: string) => {
+  const handleResumeSelect = useCallback(async (sdkSessionId: string, knownSession = false) => {
     host.debug.log(`[Claude:${sessionId.slice(0, 8)}] handleResumeSelect sdkSessionId=${sdkSessionId.slice(0, 8)}`)
     const owner = workspaceStore.findSdkSessionOwner(sdkSessionId, terminal?.agentPreset, sessionId)
     if (owner) {
@@ -2844,25 +2870,29 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
       window.alert(`This Claude session is already open in "${owner.alias || owner.title}". Switched to that session instead.`)
       return
     }
-    setResumeLoading(true)
-    try {
-      const latest = await host.claude.listSessions(cwd) || []
-      if (!latest.some(s => s.sdkSessionId === sdkSessionId)) {
-        setResumeSessions(latest)
+    if (!knownSession) {
+      setResumeLoading(true)
+      try {
+        const latest = await host.claude.listSessions(cwd) || []
+        if (!latest.some(s => s.sdkSessionId === sdkSessionId)) {
+          setResumeSessions(latest)
+          setShowResumeList(true)
+          return
+        }
+      } catch {
+        setResumeSessions([])
         setShowResumeList(true)
         return
+      } finally {
+        setResumeLoading(false)
       }
-    } catch {
-      setResumeSessions([])
-      setShowResumeList(true)
-      return
-    } finally {
-      setResumeLoading(false)
     }
     setShowResumeList(false)
     setResumeSessions([])
     // Clear UI immediately so user sees the switch
+    resetSubagentState()
     setMessages([])
+    resetArchivePage()
     setLoadedArchive([])
     archivedCountRef.current = 0
     loadedFromArchiveRef.current = 0
@@ -2902,7 +2932,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
       return
     }
     workspaceStore.setTerminalSdkSessionId(sessionId, sdkSessionId)
-  }, [sessionId, cwd, isV2Session, terminal?.agentPreset, currentModel, permissionMode, effortLevel])
+  }, [sessionId, cwd, isV2Session, terminal?.agentPreset, currentModel, permissionMode, effortLevel, resetSubagentState])
 
   const handleForkSession = useCallback(async () => {
     const dlog = (...args: unknown[]) => host.debug.log(...args)
@@ -3020,14 +3050,25 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
     }
   }, [isCodexSession, isRemoteConnected, isStreaming, isTransferringToCodex, permissionMode, sessionId, t, workspaceId])
 
-  const handleRewindToPrompt = useCallback(async (promptIndex: number, promptCount: number) => {
-    const removed = promptCount - promptIndex
-    const confirmMsg = `Rewind to before prompt #${promptIndex + 1}?\n\nThis will remove the last ${removed} prompt(s) and their responses from conversation history. The original session history is preserved on disk.`
+  const handleRewindToPrompt = useCallback(async (promptIndex: number, _promptCount: number) => {
+    const target = allMessages.filter(item => !isToolCall(item) && item.role === 'user')[promptIndex]
+    if (!target) return
+    let prompt: { index: number; count: number }
+    try {
+      await archiveWriteQueueRef.current
+      prompt = await resolveTranscriptPrompt(target.id, messages,
+        (offset, limit) => host.claude.loadArchived(sessionId, offset, limit), normalizeMessageItems)
+    } catch (err) {
+      alert('Rewind failed: ' + String(err))
+      return
+    }
+    const removed = prompt.count - prompt.index
+    const confirmMsg = `Rewind to before prompt #${prompt.index + 1}?\n\nThis will remove the last ${removed} prompt(s) and their responses from conversation history. The original session history is preserved on disk.`
     if (!window.confirm(confirmMsg)) return
 
     let result: { newSdkSessionId: string; removedPromptCount: number } | { error: string }
     try {
-      result = await host.claude.rewindToPrompt(sessionId, promptIndex)
+      result = await host.claude.rewindToPrompt(sessionId, prompt.index)
     } catch (e) {
       alert('Rewind failed: ' + (e instanceof Error ? e.message : String(e)))
       return
@@ -3037,29 +3078,11 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
       return
     }
 
-    // Trim local message state: keep messages BEFORE the Nth user prompt.
-    // Splice allMessages (loadedArchive + messages) at the cutoff and redistribute.
-    const combined = dedupeMessagesById([...loadedArchive, ...messages])
-    let userPromptCount = 0
-    let cutoffIdx = combined.length
-    for (let i = 0; i < combined.length; i++) {
-      const m = combined[i]
-      if (!isToolCall(m) && (m as ClaudeMessage).role === 'user') {
-        if (userPromptCount === promptIndex) {
-          cutoffIdx = i
-          break
-        }
-        userPromptCount++
-      }
-    }
-    const kept = combined.slice(0, cutoffIdx)
-    // Put everything into loadedArchive so later streaming appends to messages cleanly
-    setLoadedArchive(kept)
-    setMessages([])
-
     workspaceStore.setTerminalSdkSessionId(sessionId, result.newSdkSessionId)
     setShowPromptHistory(false)
-  }, [sessionId, loadedArchive, messages])
+    await host.claude.resetSession(sessionId)
+    await handleResumeSelect(result.newSdkSessionId, true)
+  }, [sessionId, allMessages, messages, handleResumeSelect])
 
   const clearInput = useCallback(() => {
     inputValueRef.current = ''
@@ -3198,7 +3221,9 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
     // Intercept /new or /clear command — reset session (clear conversation, fresh start)
     if (!isStreaming && (trimmed === '/new' || trimmed === '/clear')) {
       clearInput()
+      resetSubagentState()
       setMessages([])
+      resetArchivePage()
       setLoadedArchive([])
       archivedCountRef.current = 0
       loadedFromArchiveRef.current = 0
@@ -3576,7 +3601,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
         host.debug.log(`[handleSend] sync=${sync.toFixed(1)}ms invoke=${invoke.toFixed(1)}ms total=${total.toFixed(1)}ms sessionId=${sessionId} promptLen=${trimmed.length}`)
       }
     }
-  }, [isRemoteConnected, isStreaming, isInterrupted, sessionId, attachedImages, attachedFiles, clearInput, setInputValue, sendClaudeMessage, onRequestLogin])
+  }, [isRemoteConnected, isStreaming, isInterrupted, sessionId, attachedImages, attachedFiles, clearInput, setInputValue, sendClaudeMessage, onRequestLogin, resetSubagentState])
 
   const handleInterrupt = useCallback(() => {
     if (!isStreaming) return
@@ -4553,8 +4578,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
       // part of the conversation, not tool plumbing, so it should not have to be
       // reconstructed from a JSON input next to the SDK's acknowledgement.
       if (item.toolName === 'AskUserQuestion') {
-        const resultRaw = item.result ? stringifyToolResult(item.result) : ''
-        const { content: resultText, errors: resultErrors } = splitSystemReminders(parseContentBlocks(resultRaw))
+        const { content: resultText, errors: resultErrors } = getSpecialResult(item)
         const qna = buildAskUserQnA(item.input, resultText)
         const rowExpanded = expandedTools.has(item.id)
         // A payload we cannot read falls through to the generic row, which at
@@ -4601,8 +4625,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
 
       // ExitPlanMode / EnterPlanMode: show plan content in readable view
       if (item.toolName === 'ExitPlanMode' || item.toolName === 'EnterPlanMode') {
-        const resultRaw = item.result ? (stringifyToolResult(item.result)) : ''
-        const { content: resultText, errors: resultErrors } = splitSystemReminders(resultRaw)
+        const { content: resultText, errors: resultErrors } = getSpecialResult(item)
         const planPath = item.input.planFilePath ? String(item.input.planFilePath) : ''
         return (
           <div key={item.id || index} className="tl-item">
@@ -4641,7 +4664,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
                 <div className="claude-tool-body">
                   <div className="claude-tool-input">
                     <div className="claude-tool-label">{t('claude.fullInput')}</div>
-                    <pre>{JSON.stringify(item.input, null, 2)}</pre>
+                    <AgentToolInput input={item.input} />
                   </div>
                 </div>
               )}
@@ -4663,11 +4686,8 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
         const model = item.input.model ? String(item.input.model) : null
         const maxTurns = item.input.max_turns ? String(item.input.max_turns) : null
         const runBg = item.input.run_in_background ? true : false
-        const resultRaw = item.result ? (stringifyToolResult(item.result)) : ''
-        const { content: resultTextRaw, reminders: resultReminders, errors: resultErrors } = splitSystemReminders(resultRaw)
-        const resultText = parseContentBlocks(resultTextRaw)
-        const resultLines = resultText.split('\n')
-        const isLongResult = resultLines.length > 6 || resultText.length > 400
+        const { content: resultText, reminders: resultReminders, errors: resultErrors, lineCount: resultLineCount } = getSpecialResult(item)
+        const isLongResult = resultLineCount > 6 || resultText.length > 400
         const progressDesc = item.description || ''
         const isStalled = progressDesc.startsWith('[stalled]')
         const isStopped = progressDesc.startsWith('[stopped')
@@ -4742,7 +4762,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
                   )}
                   {!isResultExpanded && isLongResult && (
                     <div className="claude-plan-open-btn" onClick={() => setContentModal({ title: 'Task Result', content: resultText, markdown: true })}>
-                      View result ({resultLines.length} lines)
+                      View result ({resultLineCount} lines)
                     </div>
                   )}
                 </div>
@@ -4762,7 +4782,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
                 <div className="claude-tool-body">
                   <div className="claude-tool-input">
                     <div className="claude-tool-label">{t('claude.fullInput')}</div>
-                    <pre>{JSON.stringify(item.input, null, 2)}</pre>
+                    <AgentToolInput input={item.input} />
                   </div>
                 </div>
               )}
@@ -4774,15 +4794,8 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
       // Edit tool: show diff view
       if (item.toolName === 'Edit' && item.input.old_string !== undefined) {
         const filePath = String(item.input.file_path || '')
-        const oldStr = String(item.input.old_string || '')
-        const newStr = String(item.input.new_string || '')
         const isDiffExpanded = expandedTools.has(`diff-${item.id}`)
-        const oldLines = oldStr.split('\n')
-        const newLines = newStr.split('\n')
-        const totalLines = oldLines.length + newLines.length
-        const isLongDiff = totalLines > 12
-        const resultRaw = item.result ? (stringifyToolResult(item.result)) : ''
-        const { content: resultText, errors: resultErrors } = splitSystemReminders(resultRaw)
+        const { content: resultText, errors: resultErrors } = getSpecialResult(item)
         return (
           <div key={item.id || index} className="tl-item">
             <div className={`tl-dot ${dotClass}`} />
@@ -4792,25 +4805,13 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
                 <span className="claude-tool-desc"><LinkedText text={filePath} /></span>
                 {item.timestamp > 0 && <span className="claude-tool-time" title={formatFullTimestamp(item.timestamp)}>{formatTimestamp(item.timestamp)}</span>}
               </div>
-              <div className="claude-diff-block">
-                {(isDiffExpanded || !isLongDiff ? oldLines : oldLines.slice(0, 3)).map((line, i) => (
-                  <div key={`o${i}`} className="claude-diff-line claude-diff-del">
-                    <span className="claude-diff-sign">-</span>
-                    <span className="claude-diff-text">{line}</span>
-                  </div>
-                ))}
-                {(isDiffExpanded || !isLongDiff ? newLines : newLines.slice(0, 3)).map((line, i) => (
-                  <div key={`n${i}`} className="claude-diff-line claude-diff-add">
-                    <span className="claude-diff-sign">+</span>
-                    <span className="claude-diff-text">{line}</span>
-                  </div>
-                ))}
-                {isLongDiff && (
-                  <div className="claude-diff-toggle" onClick={() => toggleTool(`diff-${item.id}`)}>
-                    {isDiffExpanded ? 'Collapse' : `Show all ${totalLines} lines...`}
-                  </div>
-                )}
-              </div>
+              <AgentFilePreview
+                input={item.input}
+                variant="edit"
+                expanded={isDiffExpanded}
+                toggleId={`diff-${item.id}`}
+                onToggle={toggleTool}
+              />
               {resultErrors.length > 0 && resultErrors.map((err, i) => (
                 <div key={`err${i}`} className="claude-tool-blocks"><div className="claude-tool-row claude-tool-error-row">
                   <span className="claude-tool-row-label claude-error-label">{t('claude.err')}</span>
@@ -4829,7 +4830,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
                 <div className="claude-tool-body">
                   <div className="claude-tool-input">
                     <div className="claude-tool-label">{t('claude.fullInput')}</div>
-                    <pre>{JSON.stringify(item.input, null, 2)}</pre>
+                    <AgentToolInput input={item.input} />
                   </div>
                 </div>
               )}
@@ -4841,12 +4842,8 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
       // Write tool: show content preview
       if (item.toolName === 'Write' && item.input.content !== undefined) {
         const filePath = String(item.input.file_path || '')
-        const content = String(item.input.content || '')
         const isContentExpanded = expandedTools.has(`write-${item.id}`)
-        const contentLines = content.split('\n')
-        const isLong = contentLines.length > 8
-        const resultRaw = item.result ? (stringifyToolResult(item.result)) : ''
-        const { content: resultText, errors: resultErrors } = splitSystemReminders(resultRaw)
+        const { content: resultText, errors: resultErrors } = getSpecialResult(item)
         return (
           <div key={item.id || index} className="tl-item">
             <div className={`tl-dot ${dotClass}`} />
@@ -4856,19 +4853,13 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
                 <span className="claude-tool-desc"><LinkedText text={filePath} /></span>
                 {item.timestamp > 0 && <span className="claude-tool-time" title={formatFullTimestamp(item.timestamp)}>{formatTimestamp(item.timestamp)}</span>}
               </div>
-              <div className="claude-diff-block">
-                {(isContentExpanded || !isLong ? contentLines : contentLines.slice(0, 8)).map((line, i) => (
-                  <div key={i} className="claude-diff-line claude-diff-add">
-                    <span className="claude-diff-sign">+</span>
-                    <span className="claude-diff-text">{line}</span>
-                  </div>
-                ))}
-                {isLong && (
-                  <div className="claude-diff-toggle" onClick={() => toggleTool(`write-${item.id}`)}>
-                    {isContentExpanded ? 'Collapse' : `Show all ${contentLines.length} lines...`}
-                  </div>
-                )}
-              </div>
+              <AgentFilePreview
+                input={item.input}
+                variant="write"
+                expanded={isContentExpanded}
+                toggleId={`write-${item.id}`}
+                onToggle={toggleTool}
+              />
               {resultErrors.length > 0 && resultErrors.map((err, i) => (
                 <div key={`err${i}`} className="claude-tool-blocks"><div className="claude-tool-row claude-tool-error-row">
                   <span className="claude-tool-row-label claude-error-label">{t('claude.err')}</span>
@@ -4887,7 +4878,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
                 <div className="claude-tool-body">
                   <div className="claude-tool-input">
                     <div className="claude-tool-label">{t('claude.fullInput')}</div>
-                    <pre>{JSON.stringify(item.input, null, 2)}</pre>
+                    <AgentToolInput input={item.input} />
                   </div>
                 </div>
               )}
@@ -4902,11 +4893,8 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
         const parentTask = taskId
           ? allMessages.find(m => isToolCall(m) && m.toolName === 'Task' && m.id === taskId) as ClaudeToolCall | undefined
           : null
-        const resultRaw = item.result ? (stringifyToolResult(item.result)) : ''
-        const { content: resultTextRaw, errors: resultErrors } = splitSystemReminders(resultRaw)
-        const resultText = parseContentBlocks(resultTextRaw)
-        const resultLines = resultText.split('\n')
-        const isLongResult = resultLines.length > 6 || resultText.length > 400
+        const { content: resultText, errors: resultErrors, lineCount: resultLineCount } = getSpecialResult(item)
+        const isLongResult = resultLineCount > 6 || resultText.length > 400
         const isResultExpanded = expandedTools.has(`taskout-result-${item.id}`)
         return (
           <div key={item.id || index} className="tl-item" data-tool-id={item.id}>
@@ -4948,7 +4936,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
                   )}
                   {!isResultExpanded && isLongResult && (
                     <div className="claude-plan-open-btn" onClick={() => setContentModal({ title: 'TaskOutput Result', content: resultText, markdown: true })}>
-                      View result ({resultLines.length} lines)
+                      View result ({resultLineCount} lines)
                     </div>
                   )}
                 </div>
@@ -4957,7 +4945,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
                 <div className="claude-tool-body">
                   <div className="claude-tool-input">
                     <div className="claude-tool-label">{t('claude.fullInput')}</div>
-                    <pre>{JSON.stringify(item.input, null, 2)}</pre>
+                    <AgentToolInput input={item.input} />
                   </div>
                 </div>
               )}
@@ -4994,9 +4982,11 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
               const raw = clampToolOutputText(stringifyToolResult(item.result))
               const normalizedRaw = parseContentBlocks(raw)
               const split = splitSystemReminders(normalizedRaw)
+              const outLineCount = countTextLines(split.content)
               return {
                 outText: split.content,
-                isLongOutput: split.content.split(/\r?\n/).length > 8 || split.content.length > 900,
+                outLineCount,
+                isLongOutput: outLineCount > 8 || split.content.length > 900,
                 outPreviewLines: buildCollapsedOutputPreview(split.content),
                 reminders: split.reminders,
                 errors: split.errors,
@@ -5032,7 +5022,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
               summary={headerSummary}
               timestamp={item.timestamp}
               outSize={layout.outSize}
-              outSizeTitle={displayOutText ? formatContentSize(displayOutText) : null}
+              outSizeTitle={displayOutText ? formatContentSize(displayOutText, toolSearchSummary === null ? toolRender?.outLineCount : undefined) : null}
               elapsed={elapsed}
               failed={toolFailed}
               expanded={rowExpanded}
@@ -5093,7 +5083,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
                             ? <LinkedText text={outText} />
                             : (
                               <span className="claude-tool-collapsed-hint">
-                                <span className="claude-tool-collapsed-meta">{formatContentSize(outText)}</span>
+                                <span className="claude-tool-collapsed-meta">{formatContentSize(outText, toolRender.outLineCount)}</span>
                                 {outPreviewLines.length > 0 && (
                                   <span className="claude-tool-collapsed-preview-lines">
                                     {outPreviewLines.map((line, i) => (
@@ -5159,7 +5149,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
               <div className="claude-tool-body">
                 <div className="claude-tool-input">
                   <div className="claude-tool-label">Full Input</div>
-                  <pre>{JSON.stringify(item.input, null, 2)}</pre>
+                  <AgentToolInput input={item.input} />
                 </div>
               </div>
             )}
@@ -5380,6 +5370,12 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
               </button>
             </div>
           )}
+          {hasNewerArchived && (
+            <div className="claude-load-more">
+              <button className="claude-load-more-btn" onClick={loadNewerArchived} disabled={isLoadingMore}>{t('claude.loadNewerMessages')}</button>
+              <button className="claude-load-more-btn" onClick={loadLatestArchived} disabled={isLoadingMore}>{t('claude.backToLatestMessages')}</button>
+            </div>
+          )}
           {isResumingHistory && (
             <div className="claude-resume-skeleton">
               <span className="claude-resume-skeleton-spinner" />
@@ -5400,7 +5396,13 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
                   <span>{t('claude.unseenDivider')}</span>
                 </div>
               ) : null
-              return <Fragment key={item.id || `msg-${i}`}>{divider}{unseen}{renderMessage(item, i)}</Fragment>
+              const archiveGap = hasNewerArchived && item.id === messages[0]?.id ? (
+                <div className="claude-load-more">
+                  <span>{t('claude.archivedGap', { count: Math.max(0, archivedCountRef.current - archiveWindowRef.current.end) })}</span>
+                  <button className="claude-load-more-btn" onClick={loadNewerArchived} disabled={isLoadingMore}>{t('claude.loadNewerMessages')}</button>
+                </div>
+              ) : null
+              return <Fragment key={item.id || `msg-${i}`}>{archiveGap}{divider}{unseen}{renderMessage(item, i)}</Fragment>
             },
           )}
           {isStreaming && !streamingText && (!streamingThinking || !showThinkingMsg) && (
@@ -6137,6 +6139,8 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
                 )}
               </span>
             )}
+            {!isV2Session && <AgentFastModeCheckbox sessionId={sessionId}
+              disabled={isStreaming} ensureSessionStarted={ensureSessionStarted} />}
             {!isCodexSession && !isV2Session && (
               <select
                 className="claude-effort-select"

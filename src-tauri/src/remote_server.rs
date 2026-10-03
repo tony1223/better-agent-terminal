@@ -2975,6 +2975,16 @@ fn invoke_rust_for_remote(
                     .unwrap_or_else(|| json!(false)))
             })
         }
+        "claude:set-fast-mode" => {
+            let Some(route) = codex_for_remote_session(ctx, channel, params) else { return None; };
+            route.and_then(|(codex, session_id)| {
+                let enabled = params.get("enabled").and_then(Value::as_bool)
+                    .ok_or_else(|| format!("{channel}: enabled must be a boolean"))?;
+                codex.set_fast_mode(&ctx, &session_id, enabled)
+                    .unwrap_or_else(|| Err(crate::sidecar::BridgeError { message: "Session not started".into() }))
+                    .map_err(bridge_error_message)
+            })
+        }
         "claude:reset-session" => {
             let Some(route) = codex_for_remote_session(ctx, channel, params) else {
                 return None;

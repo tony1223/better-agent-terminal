@@ -110,6 +110,8 @@ export function SettingsPanel({ onClose, isRemoteProfile = false, remoteOrigin =
   const { t } = useTranslation()
   const [activeTab, setActiveTab] = useState<SettingsTab>('general')
   const [settings, setSettings] = useState<AppSettings>(settingsStore.getSettings())
+  const [fastModeSaving, setFastModeSaving] = useState(false)
+  const [fastModeError, setFastModeError] = useState('')
   const [availableFonts, setAvailableFonts] = useState<Set<FontType>>(new Set())
 
   // Remote server state
@@ -1089,6 +1091,22 @@ export function SettingsPanel({ onClose, isRemoteProfile = false, remoteOrigin =
 
               <div className="settings-section">
                 <h3>{t('settings.agentBehavior')}</h3>
+                {isDebugMode && <div className="settings-group checkbox-group">
+                  <label>
+                    <input type="checkbox" checked={settings.allowFastMode === true} disabled={fastModeSaving}
+                      onChange={async e => {
+                        const enabled = e.target.checked
+                        setFastModeSaving(true)
+                        setFastModeError('')
+                        try { await settingsStore.setAllowFastMode(enabled) }
+                        catch (err) { setFastModeError(err instanceof Error ? err.message : String(err)) }
+                        finally { setFastModeSaving(false) }
+                      }} />
+                    {t('settings.allowFastMode')}
+                  </label>
+                  <p className="settings-hint">{t('settings.allowFastModeHint')}</p>
+                  {fastModeError && <p className="settings-hint" role="alert">{fastModeError}</p>}
+                </div>}
                 <div className="settings-group checkbox-group">
                   <label>
                     <input type="checkbox" checked={settings.allowBypassPermissions === true} onChange={e => settingsStore.setAllowBypassPermissions(e.target.checked)} />

@@ -467,7 +467,7 @@ async function main() {
     const panelSource = await readFile(`renderer/src/components/${panel}.tsx`, 'utf8')
     assert.match(
       panelSource,
-      /messages\.slice\(0, excess\)\.filter\(m => !archivedIdsRef\.current\.has\(m\.id\)\)/,
+      /snapshots\.filter\(m => !archivedIdsRef\.current\.has\(m\.id\)\)/,
       `${panel} must not re-archive rows it has already flushed`,
     )
     assert.match(

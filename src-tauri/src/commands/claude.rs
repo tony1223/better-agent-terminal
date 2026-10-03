@@ -2333,6 +2333,41 @@ pub(crate) fn load_archived_from_dir(
     if session_id.is_empty() {
         return archive_empty_page();
     }
+    if limit == 0 {
+        // Ignore large tool input/result fields while reading only prompt IDs.
+        // This additive metadata query preserves the existing page contract.
+        #[derive(Deserialize)]
+        struct PromptRow {
+            id: Option<String>,
+            role: Option<String>,
+            #[serde(rename = "toolName")]
+            tool_name: Option<String>,
+        }
+        let file = match fs::File::open(archive_file_path(data_dir, session_id)) {
+            Ok(file) => file,
+            Err(_) => return json!({ "messages": [], "total": 0, "hasMore": false, "promptIds": [] }),
+        };
+        let mut prompt_ids = Vec::new();
+        let mut total = 0usize;
+        for line in BufReader::new(file).lines() {
+            let line = match line {
+                Ok(line) => line,
+                Err(_) => return json!({ "messages": [], "total": 0, "hasMore": false, "promptIds": [] }),
+            };
+            if line.trim().is_empty() {
+                continue;
+            }
+            total += 1;
+            if let Ok(row) = serde_json::from_str::<PromptRow>(&line) {
+                if row.role.as_deref() == Some("user") && row.tool_name.is_none() {
+                    if let Some(id) = row.id {
+                        prompt_ids.push(id);
+                    }
+                }
+            }
+        }
+        return json!({ "messages": [], "total": total, "hasMore": total > offset as usize, "promptIds": prompt_ids });
+    }
     let raw = match fs::read_to_string(archive_file_path(data_dir, session_id)) {
         Ok(value) => value,
         Err(_) => return archive_empty_page(),
@@ -5002,6 +5037,26 @@ pub async fn claude_set_effort(
 
 #[cfg(feature = "desktop")]
 #[tauri::command]
+pub async fn claude_set_fast_mode(
+    app: AppHandle,
+    window: WebviewWindow,
+    state: State<'_, SidecarState>,
+    codex_state: State<'_, CodexAppServerState>,
+    session_id: String,
+    enabled: bool,
+) -> Result<Value, BridgeError> {
+    let ctx = HostContext::from_app(app.clone());
+    if let Some(result) = remote_invoke_for_window(
+        &ctx, &state, &window, "agent:set-fast-mode",
+        vec![json!(session_id.clone()), json!(enabled)], DEFAULT_TIMEOUT,
+    ).await { return result; }
+    ensure_local_agent_session_access(&app, &window, &session_id)?;
+    if let Some(result) = codex_state.set_fast_mode(&ctx, &session_id, enabled) { return result; }
+    call_blocking(app, state, "claude.setFastMode", json!({ "sessionId": session_id, "enabled": enabled })).await
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
 pub async fn claude_reset_session(
     app: AppHandle,
     window: WebviewWindow,
@@ -6466,6 +6521,26 @@ mod tests {
             archive_empty_page()
         );
 
+        fs::remove_dir_all(data_dir).ok();
+    }
+
+    #[test]
+    fn archive_prompt_metadata_does_not_return_message_bodies() {
+        let data_dir = temp_data_dir("archive-prompts");
+        let rows = json!([
+            { "id": "u1", "role": "user", "content": "prompt" },
+            { "id": "a1", "role": "assistant", "content": "x".repeat(1_000_000) },
+            { "id": "tool", "role": "user", "toolName": "AskUserQuestion", "input": {} },
+            { "id": "u2", "role": "user", "content": "next prompt" }
+        ]);
+        archive_messages_in_dir(&data_dir, "session-prompts", &rows).unwrap();
+        let mut file = OpenOptions::new().append(true).open(archive_file_path(&data_dir, "session-prompts")).unwrap();
+        writeln!(file, "malformed\n").unwrap();
+        let metadata = load_archived_from_dir(&data_dir, "session-prompts", 0, 0);
+        assert_eq!(metadata["promptIds"], json!(["u1", "u2"]));
+        assert_eq!(metadata["messages"], json!([]));
+        assert_eq!(metadata["total"], 5);
+        assert_eq!(load_archived_from_dir(&data_dir, "missing", 0, 0)["promptIds"], json!([]));
         fs::remove_dir_all(data_dir).ok();
     }
 

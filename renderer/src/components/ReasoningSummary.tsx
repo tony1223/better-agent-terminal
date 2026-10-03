@@ -23,6 +23,7 @@ export const ReasoningSummary = forwardRef<HTMLDivElement, ReasoningSummaryProps
           cwd={cwd}
           className="claude-markdown claude-thinking-markdown"
           resolvePathLinks={false}
+          cache={false}
         />
       </div>
     )

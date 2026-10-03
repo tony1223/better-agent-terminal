@@ -1,5 +1,8 @@
 {
   "common": {
+    "page": "页数",
+    "nextPage": "下一页",
+    "previousPage": "上一页",
     "cancel": "取消",
     "save": "保存",
     "close": "关闭",
@@ -36,6 +39,8 @@
     "noMatches": "没有符合的终端类型"
   },
   "settings": {
+    "allowFastMode": "允许使用 Fast 模式",
+    "allowFastModeHint": "Fast 可能消耗更多额度或产生额外费用。启用此设置只会显示模型旁的 checkbox，仍需逐个对话手动勾选。关闭设置会撤销先前的勾选，后续回合停用 Fast。远程对话也需要主机允许 Fast。",
     "title": "设置",
     "tabGeneral": "常规",
     "tabAgent": "Agent",
@@ -524,6 +529,16 @@
     "daysAgo": "{{count}} 天前"
   },
   "claude": {
+    "fastModeUnsupported": "此模型不支持 Fast 模式。",
+    "fastModeBusy": "请等待当前回合结束后再切换 Fast。",
+    "fastModeCooldown": "Fast 正在冷却，运行环境暂时使用普通速度。",
+    "fastModePending": "已请求下一回合使用 Fast；是否可用取决于账号与运行环境。",
+    "fastModeHint": "为此对话请求 Fast，可能消耗更多额度或产生额外费用。",
+    "fastModeUnavailable": "此主机尚不支持 Fast 控制。",
+    "fastModeCooling": "冷却中",
+    "archivedGap": "此页与最新消息之间还有 {{count}} 条归档消息",
+    "backToLatestMessages": "回到最新消息",
+    "loadNewerMessages": "加载较新的消息",
     "thinking": "思考中",
     "reasoningSummary": "推理摘要",
     "turnWorking": "处理中",
