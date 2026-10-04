@@ -35,6 +35,7 @@ mod panic_log;
 mod remote_client;
 mod profile_context;
 mod remote_server;
+mod remote_tool_preview;
 mod sidecar;
 #[cfg(feature = "desktop")]
 mod window_registry;

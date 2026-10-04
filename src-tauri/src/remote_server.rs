@@ -83,6 +83,7 @@ static CLAUDE_REMOTE_LOGIN_CLAIM: Mutex<Option<ClaudeRemoteLoginClaim>> = Mutex:
 fn remote_capabilities() -> Value {
     json!({
         "profileContext": 1,
+        "toolPayloadPreview": 1,
         "remoteAuth": {
             "claude": "paste-code-v1",
             "codex": "device-code-v1",
@@ -1291,6 +1292,7 @@ fn handle_client(
     let mut client_id = String::new();
     let mut client_protocol = RemoteProtocol::LegacyV1;
     let mut client_compression = RemoteCompression::None;
+    let mut mobile_tool_previews = false;
     let (out_tx, out_rx) = mpsc::sync_channel::<Value>(REMOTE_OUTBOUND_QUEUE_CAPACITY);
     let close = Arc::new(AtomicBool::new(false));
     let contexts = Arc::new(ProfileContexts::default());
@@ -1307,7 +1309,10 @@ fn handle_client(
         }
         for _ in 0..REMOTE_OUTBOUND_BURST {
             match out_rx.try_recv() {
-                Ok(frame) => send_frame(&mut ws, frame, client_compression)?,
+                Ok(mut frame) => {
+                    if mobile_tool_previews { crate::remote_tool_preview::compact(&mut frame); }
+                    send_frame(&mut ws, frame, client_compression)?;
+                }
                 Err(mpsc::TryRecvError::Empty) | Err(mpsc::TryRecvError::Disconnected) => break,
             }
         }
@@ -1410,6 +1415,7 @@ fn handle_client(
                 })
                 .unwrap_or_default();
             client_compression = negotiate_remote_compression(&offered_compression);
+            mobile_tool_previews = crate::remote_tool_preview::requested(&frame);
             let args = frame.get("args").and_then(Value::as_array);
             let context = args.and_then(|args| args.get(1));
             let client_info = context
