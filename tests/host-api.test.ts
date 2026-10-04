@@ -421,7 +421,7 @@ async function run() {
     await mod.host.debug.log('boot', { phase: 1 }, 42)
     assert.equal(await mod.host.debug.openLogsFolder(), true)
 
-    // git.* — read-only ops mirroring the Electron handlers.
+    // git.* — read-only operations under the existing host contract.
     const ghUrl = await mod.host.git.getGithubUrl('/repo')
     assert.equal(ghUrl, 'https://github.com/owner/repo')
     const branch = await mod.host.git.getBranch('/repo')
@@ -511,7 +511,7 @@ async function run() {
     const toggled = await mod.host.snippet.toggleFavorite(1)
     assert.deepEqual(toggled, { id: 1 })
 
-    // profile.* — single-window MVP returns one default profile.
+    // profile.* — fixture returns one default profile.
     const plist = await mod.host.profile.list()
     assert.deepEqual(plist, {
       profiles: [{ id: 'default', name: 'Default', type: 'local' }],
@@ -532,9 +532,8 @@ async function run() {
     await mod.host.profile.activate('default')
     await mod.host.profile.deactivate('default')
 
-    // claude.* — Phase 2 sidecar bridge. authStatus and accountList route
-    // through the Rust SidecarState into the Node sidecar. The renderer
-    // still sees Promise-returning methods identical to the Electron shape.
+    // claude.* — existing Promise-returning methods route through Rust host
+    // commands. Runtime ownership is selected below the renderer adapter.
     assert.equal(await mod.host.claude.authStatus(), null)
     assert.deepEqual(await mod.host.claude.accountList(), {
       accounts: [], activeAccountId: null, switchWarningShown: false,
@@ -695,9 +694,8 @@ async function run() {
     assert.equal(await mod.host.workerBuffer.readAll('p1'), '')
     assert.equal(await mod.host.workerBuffer.clear('p1'), true)
 
-    // remote.* / tunnel.* — Phase 3 stubs returning shaped objects so the
-    // renderer's polling clientStatus / serverStatus doesn't crash on
-    // .connected / .running destructuring.
+    // remote.* / tunnel.* — fixture responses retain the Rust host's status
+    // shapes used by renderer polling.
     assert.deepEqual(await mod.host.remote.startServer({ port: 9876 }), { error: 'stub' })
     assert.equal(await mod.host.remote.stopServer(), false)
     const srvStatus = await mod.host.remote.serverStatus()
@@ -965,15 +963,13 @@ async function run() {
     ])
   }
 
-  // 4) Tauri detection still throws "not implemented" for unported namespaces
+  // 4) Unknown host methods retain permissive compatibility fallbacks.
   {
     const invoke: TauriInvoke = async () => undefined as unknown as never
     setWindow({ __TAURI_INTERNALS__: { invoke } })
     const mod = await loadFreshAdapter()
-    // remote/tunnel were ported as sidecar stubs in Phase 3 prep; pick a
-    // namespace that's still entirely unrouted (none right now — every
-    // preload namespace is at least stub-routed). We retain the per-method
-    // canaries below to cover that case explicitly.
+    // Known commands use the injected invoke fixture; unknown method canaries
+    // below exercise adapter fallbacks independently of the backend runtime.
     assert.equal(await mod.host.workspace.detach('workspace-1'), undefined)
     // claude.* unported methods used to throw, but the surface is too
     // large for that to be useful — unrecognized keys now return

@@ -49,9 +49,8 @@ fn denied_paths() -> Vec<PathBuf> {
         join(&["Library", "Application Support", "BraveSoftware"]),
         join(&["Library", "Application Support", "Microsoft Edge"]),
         join(&["Library", "Application Support", "Firefox"]),
-        // BAT's own secrets — current Electron/Tauri build uses
-        // productName `BetterAgentTerminal`; the lowercase paths cover the
-        // legacy package-name folder users may still have on disk.
+        // BAT's own secrets in reused legacy data directories. Also protect
+        // the lowercase package-name folders users may still have on disk.
         join(&[
             "Library",
             "Application Support",

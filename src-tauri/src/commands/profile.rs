@@ -1,9 +1,8 @@
 // profile:* — Tauri profile index persistence.
 //
-// Electron stores profile metadata in <userData>/profiles/index.json and keeps
-// remote tokens in a separate secret envelope. Tauri keeps tokens out of
-// index.json and uses the old keyring item only as a migration fallback; this
-// avoids repeated macOS Keychain prompts during normal profile reads/writes.
+// Profile metadata lives in <app-data>/profiles/index.json; remote tokens stay
+// in a separate secret envelope. The old keyring item is a migration fallback,
+// avoiding repeated macOS Keychain prompts during normal profile reads/writes.
 
 use crate::app_data;
 #[cfg(feature = "desktop")]

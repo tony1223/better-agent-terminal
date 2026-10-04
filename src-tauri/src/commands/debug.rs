@@ -1,13 +1,11 @@
 // debug:* — renderer logging surface.
 //
-// Electron exposes `debug.log(...args)` over `ipcRenderer.send('debug:log',
-// ...args)` so the main process can persist the message to disk via the
-// shared logger. Under Tauri, we mirror that with a best-effort append to
-// <app-data>/logs/debug.log and still print to stderr for dev sessions.
+// Renderer debug.log calls append through the shared Rust logger to
+// <app-data>/logs/debug.log and also print to stderr for dev sessions.
 //
-// `isDebugMode` is exposed synchronously from the JS side, not through a
-// command — the adapter reads BAT_DEBUG out of process.env at startup.
-// This file only handles the runtime log call.
+// Rust reads BAT_DEBUG and BAT_TRACE_PTY_INPUT through the flag commands below.
+// The renderer adapter caches their results for synchronous property reads.
+// This module also opens the active logs directory.
 
 use crate::app_data;
 use crate::log_file::append_line;

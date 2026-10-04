@@ -1,10 +1,10 @@
 // Tauri-side host command modules.
 //
-// Each submodule wraps a logical area of the Electron preload surface.
-// As we port more areas, add a new module here and a registration line in
-// lib.rs. The renderer reaches these through the host-api adapter
-// (renderer/src/host-api.ts), so renaming or replacing a command is a one-place
-// edit at this layer plus the adapter route.
+// Each submodule implements a host namespace. Desktop commands are registered
+// in lib.rs and reached through renderer/src/host-api.ts; shared native cores
+// also serve the headless host. Internal refactors must preserve existing
+// renderer-facing methods, command signatures, and event payloads. Add new
+// capabilities without requiring changes to existing callers.
 
 // Modules reachable from the remote-server dispatch (and the codex/remote
 // state) compile in both the desktop and the GUI-free `headless` build. The

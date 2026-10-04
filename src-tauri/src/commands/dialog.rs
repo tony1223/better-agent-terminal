@@ -1,16 +1,14 @@
 // dialog:* — confirmation modal + native file/folder pickers.
 //
-// Electron preload exposes:
+// Renderer-facing host methods:
 //   dialog.confirm(message, title?) -> Promise<bool>          // OK/Cancel
 //   dialog.selectFolder()           -> Promise<string[]|null> // multi, null on cancel
 //   dialog.selectFiles()            -> Promise<string[]>      // multi, [] on cancel
 //   dialog.selectImages()           -> Promise<string[]>      // multi, [] on cancel, image filter
 //
-// We mirror those contracts here so the host-api adapter can route either
-// runtime without changing the renderer call site. The OS-modal nature of
-// these dialogs means they suspend the user until interaction; we wrap the
-// blocking plugin calls in `spawn_blocking` so we don't tie up the async
-// runtime worker.
+// Tauri's native dialog plugin implements these host contracts. Modal dialogs
+// wait for user interaction; `spawn_blocking` keeps their blocking plugin calls
+// off the async runtime worker.
 
 use serde::Serialize;
 use tauri::Manager;

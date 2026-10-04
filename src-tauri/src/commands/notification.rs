@@ -1,13 +1,9 @@
 // notification:* — in-memory notification center.
 //
-// The Electron host pumps notifications in from the agent managers
-// (claude/codex). Tauri keeps the same renderer-facing API and
-// records agent sessions at the command boundary; when the Rust event
+// Rust records agent sessions at the command boundary; when the runtime event
 // hub sees a completed `claude:turn-end`, it inserts an entry here.
 //
-// State is process-local on purpose: the Electron impl
-// (electron/notification-center.ts) does the same thing — entries
-// are not persisted across launches.
+// State is process-local: entries are not persisted across launches.
 
 use std::collections::HashMap;
 use std::path::Path;

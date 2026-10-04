@@ -1,9 +1,9 @@
 // Tauri shell entrypoint for Better Agent Terminal.
 //
-// This file is intentionally small: the Electron preload still owns most of
-// the host surface during the migration. Each new command lands here behind
-// a strongly typed signature, and the renderer reaches it via the
-// host-api adapter (renderer/src/host-api.ts). See plans/tauri-migration-plan.md.
+// Initializes the Rust host, desktop windows, and GUI-free server, and registers
+// the Tauri commands used by renderer/src/host-api.ts. Shared services live in
+// the workspace crates; agent commands select the Rust runtime or Node SDK
+// sidecar while preserving the renderer-facing host API and event contracts.
 
 // Keep the app-facing module paths while the stable libraries compile and cache
 // independently of the Tauri shell and agent session implementations.

@@ -1,10 +1,9 @@
 // Codex Agent sidecar manager.
 //
-// Renderer panels already consume the Claude-shaped event contract
-// (claude:message/tool-use/stream/status/result/turn-end). Electron routes
-// codex-agent sessions through a CodexAgentManager behind that same surface.
-// This module mirrors that split for Tauri: claude.* handlers delegate here
-// when agentPreset is codex-agent / codex-agent-worktree.
+// Node-owned Codex sessions emit the established Claude-shaped events
+// (claude:message/tool-use/stream/status/result/turn-end). Sidecar claude.*
+// handlers delegate here for codex-agent / codex-agent-worktree presets.
+// Runtime ownership stays below the renderer contract.
 
 import { existsSync } from 'node:fs'
 import { mkdir, readFile, readdir, rm, stat, unlink, writeFile } from 'node:fs/promises'

@@ -1,20 +1,13 @@
 // git:* — read-only git operations the renderer surfaces in
 // GitPanel / GitHubPanel / agent panels.
 //
-// We shell out to the system `git` binary (rather than pulling in
-// libgit2/git2-rs) because:
-//  - the renderer only ever needs porcelain output (status, log,
-//    diff text, branch, remote URL) — no plumbing or object reads,
-//  - git is already a hard dependency for the user's workflow,
-//  - libgit2 ships another C dependency that complicates Windows
-//    packaging while we're still rebuilding the pipeline (Phase 3),
-//  - keeping argv close to the Electron handlers makes the porting
-//    contract obvious during code review.
+// bat-git runs the user's system `git` binary and parses its output. This
+// module supplies async command wrappers and remote-profile routing, keeping
+// the shared Git core independent of Tauri and agent session code.
 //
 // All commands return safe defaults (None / empty Vec / empty
-// String) when git fails — the Electron handlers behave the same
-// way and the renderer treats those as "not a repo / nothing to
-// show". We intentionally do NOT propagate stderr to the caller;
+// String) when git fails. The renderer treats those as "not a repo / nothing
+// to show". We intentionally do NOT propagate stderr to the caller;
 // a non-repo cwd is a normal state, not an error.
 
 #[cfg(feature = "desktop")]

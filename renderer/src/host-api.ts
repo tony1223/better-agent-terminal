@@ -1,10 +1,10 @@
 // Host API adapter.
 //
 // Renderer code should import { host } from this module instead of reading
-// window.batAppAPI directly. The adapter routes ported namespaces through
-// Tauri invoke commands. Anything that isn't ported yet
-// throws a clear "not yet implemented" error so missing coverage fails
-// loudly instead of silently no-oping.
+// window.batAppAPI directly. The adapter maps the established host methods and
+// event listeners to Tauri commands and events. Rust owns native services and
+// agent runtime routing; unsupported methods use the compatibility fallbacks
+// defined below.
 //
 // Runtime selection happens via getHostKind() using Tauri's injected
 // window.__TAURI_INTERNALS__ hook; we also accept the legacy __TAURI__ global
@@ -65,8 +65,9 @@ export const host: BatAppAPI = new Proxy({} as BatAppAPI, {
 
 // --- Tauri implementation ----------------------------------------------------
 //
-// Each ported namespace lives in its own factory so adding the next one is a
-// localised change. Anything unported delegates to a "not implemented" stub.
+// Host namespaces map to their command handlers below. Unknown namespaces
+// throw descriptive errors; the agent method proxies and window.batAppAPI shim
+// retain their permissive compatibility fallbacks.
 
 function notImplemented(name: string): never {
   throw new Error(`host-api: ${name} is not yet implemented under Tauri`)
@@ -928,11 +929,9 @@ function createTauriHost(): BatAppAPI {
         getInvoke()<{ status: string; file: string }[]>('git_get_status', { cwd }),
     },
     claude: new Proxy({}, {
-      // The Claude surface is large (30+ host methods).
-      // Phase 2 ports authStatus/accountList plus the four session
-      // lifecycle calls and six event-stream listeners that the renderer
-      // attaches at startup. Everything else still throws a per-method
-      // "not yet implemented". claude_ping is internal-only.
+      // Keep the established agent method and event surface. Rust selects the
+      // native runtime or SDK sidecar below these command routes; renderer
+      // callers do not choose or mix session runtime ownership.
       get(_t, prop) {
         const key = String(prop)
         if (key === 'authStatus') {
@@ -1543,9 +1542,7 @@ function createTauriHost(): BatAppAPI {
         getInvoke()<boolean>('worker_procfile_stop', { panelId, name }),
     },
     remote: {
-      // Phase 3 namespace; sidecar stubs return shaped objects so the
-      // renderer's polling clientStatus() / serverStatus() doesn't crash
-      // when it destructures `.connected` / `.running`.
+      // Rust owns remote server/client lifecycles and their status snapshots.
       startServer: (options?: unknown) =>
         getInvoke()<unknown>('remote_start_server', { options }),
       stopServer: () => getInvoke()<unknown>('remote_stop_server'),
@@ -1646,16 +1643,15 @@ function installTauriMetricLogger(api: BatAppAPI): void {
   })
 }
 
-// Permissive shim used to keep the React tree alive while we port the rest
-// of the host surface. Unlike createTauriHost(), this version returns
-// best-effort no-op values for unimplemented methods so synchronous reads
+// Compatibility shim for the existing window.batAppAPI contract. It forwards
+// supported namespaces to the host adapter and returns best-effort no-op
+// values for unknown namespaces so synchronous reads
 // during render (e.g. window.batAppAPI.platform, getDetachedId(),
-// onSomething(cb)) don't blow up. Each unported access logs once via
+// onSomething(cb)) don't blow up. Each unsupported access logs once via
 // console.warn so the gap is visible in DevTools.
 //
 // Wire via installTauriShim() from main.tsx — it is intentionally NOT the
-// default behaviour of `host`, because tests and ported call sites should
-// continue to fail loudly instead of silently no-oping.
+// default behaviour of `host`, which rejects unknown namespaces.
 
 function detectPlatform(): 'win32' | 'darwin' | 'linux' {
   if (typeof navigator === 'undefined') return 'linux'
@@ -1719,9 +1715,8 @@ export function installTauriShim(): void {
       return new Proxy({}, {
         get(_n, sub) {
           const subKey = String(sub)
-          // getDetachedId is the one synchronous method preload.ts exposes
-          // that the renderer reads during initial render — return null so
-          // React doesn't choke.
+          // getDetachedId is synchronous in the renderer contract and is read
+          // during initial render; its fallback must return a value directly.
           if (key === 'workspace' && subKey === 'getDetachedId') {
             return () => { warnOnce('workspace.getDetachedId'); return null }
           }

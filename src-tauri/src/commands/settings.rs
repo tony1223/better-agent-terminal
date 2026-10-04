@@ -1,16 +1,13 @@
 // settings:load / settings:save / settings:get-shell-path — host settings surface.
 //
-// The renderer treats the payload as opaque JSON text (matching the
-// Electron preload shape: settings.load returns Promise<string|null>,
-// settings.save accepts a JSON string). We keep the same contract here so
-// the host-api adapter can route to either runtime without changing
-// caller types.
+// The renderer treats the payload as opaque JSON text: settings.load returns
+// Promise<string|null> and settings.save accepts a JSON string. Rust handles
+// persistence behind that established host API.
 //
-// The settings file lives at <app-data>/settings.json. Tauri 2's
-// path::app_data_dir resolves to per-user app data, namespaced by the
-// identifier in tauri.conf.json — we deliberately keep the filename
-// "settings.json" so a future Electron→Tauri migration only has to copy
-// the file across the data directory.
+// The settings file lives at <app-data>/settings.json. app_data resolves an
+// explicit override, an existing installation's data directory, or the Tauri
+// app data directory. The filename and JSON format remain compatible with
+// existing installations.
 
 // Only the desktop #[tauri::command] wrappers resolve the data dir from an
 // AppHandle; the *_impl cores take a data_dir: &Path and compile headless.

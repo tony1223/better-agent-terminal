@@ -1,27 +1,16 @@
 // snippet:* — env snippets store, JSON-backed.
 //
-// Mirrors electron/snippet-db.ts:
-//  - Same on-disk shape (`{snippets: [...], nextId: N}`).
-//  - Same filename (`snippets.json`) inside the per-user app data
-//    directory so a future Electron→Tauri migration is a copy
-//    rather than a translation.
-//  - Same field defaults on create (format=plaintext,
+// Preserves the existing snippet file format:
+//  - On-disk shape: `{snippets: [...], nextId: N}`.
+//  - File location: `<app-data>/snippets.json`, including reused legacy data.
+//  - Field defaults on create (format=plaintext,
 //    action=terminal, isFavorite=false).
-//  - Same backfill: any pre-existing snippet missing the `action`
+//  - Backfill: any pre-existing snippet missing the `action`
 //    field gets it set to "terminal" on load (and we re-save).
 //
-// Differences from the Electron impl:
-//  - We don't debounce writes. The renderer mutations come in
-//    one-at-a-time (snippet panel UI, paste shortcut), so a 300 ms
-//    coalescer would just delay the user's edit for a single
-//    write. Atomic write via tempfile + rename keeps integrity.
-//  - We don't auto-reload on external mtime changes. The Tauri
-//    build is single-window MVP, so the only writer is the same
-//    process. Once we have multi-process scenarios we can revisit.
-//
-// State is held in `Arc<Mutex<SnippetData>>` so commands across
-// threads see a consistent view; Tauri commands are dispatched on
-// the worker pool so concurrent reads need to share state.
+// Host commands share `Arc<Mutex<Option<SnippetData>>>`, serializing access
+// across threads and windows. Mutations write immediately using a temporary
+// file and rename. External file changes are not automatically reloaded.
 
 // app_data is only needed by the desktop command wrappers (which resolve the
 // data dir from an AppHandle); the headless dispatch passes ctx.data_dir().

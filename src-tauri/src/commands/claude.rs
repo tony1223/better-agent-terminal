@@ -5,14 +5,10 @@
 // bridge. Keep runtime ownership decisions in ClaudeRuntimeRouter so local Tauri
 // calls and remote-server fallbacks do not grow separate compatibility rules.
 //
-// MVP commands:
-//   claude_ping            — round-trip probe used by tests.
-//   claude_auth_status     — returns null until accounts are wired through.
-//   claude_account_list    — reads Rust account_store index.
-//
-// Each one resolves the SpawnConfig from the AppHandle so the bridge can
-// find both `node` on PATH and the bundled sidecar script. Failures bubble
-// up as { message } strings to the renderer.
+// Account, authentication, session lifecycle, history, and runtime configuration
+// commands share this routing layer. Calls that need the SDK sidecar resolve
+// its Node runtime and script through the host context. Bridge failures retain
+// the renderer's existing error shape.
 
 use crate::account_store;
 use crate::app_data;

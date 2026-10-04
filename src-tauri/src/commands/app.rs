@@ -1,9 +1,8 @@
 // app:* — Tauri window/profile shell.
 //
-// Electron owns multi-window behaviour in its main process. The Tauri port
-// keeps the renderer-facing contract intact, but the window registry and local
-// profile restore now live in Rust so profile windows do not need the Node
-// sidecar.
+// Rust owns the window registry, multi-window lifecycle, and local profile
+// restore. These commands preserve the renderer-facing app API and manage
+// Tauri webview windows directly.
 
 use super::profile as profile_cmd;
 use crate::app_data;

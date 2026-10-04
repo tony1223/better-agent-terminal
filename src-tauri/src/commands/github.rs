@@ -1,16 +1,13 @@
 // github:* — wrappers around the `gh` CLI.
 //
-// The Electron handlers all shell out to the user's installed
-// `gh` binary. We do the same here: gh handles auth, JSON output,
-// and rate-limit retry behaviour, so duplicating that in Rust
-// would be wasted effort. See plans/tauri-migration-plan.md for
-// the parity decision.
+// The user's installed `gh` binary handles authentication and API requests.
+// Rust runs it with bounded execution time and routes remote-profile calls
+// to the owning host.
 //
 // Read commands return the JSON gh emits as an opaque
 // `serde_json::Value` so the renderer can reuse its existing
 // schema-derived types. Write commands (pr-comment, issue-comment)
-// return `{success: true}` or `{error: msg}` matching the Electron
-// shape.
+// return `{success: true}` or `{error: msg}` under the existing host contract.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};

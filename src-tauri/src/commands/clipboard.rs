@@ -1,6 +1,6 @@
 // clipboard:* — local OS clipboard bridge.
 //
-// Electron preload exposes:
+// Renderer-facing host methods:
 //   clipboard.writeText(text)  -> Promise<boolean>
 //   clipboard.saveImage()      -> Promise<string|null>
 //   clipboard.writeImage(file) -> Promise<boolean>

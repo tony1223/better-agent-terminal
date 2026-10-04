@@ -391,7 +391,7 @@ better-agent-terminal/
 - **Frontend:** React 18 + TypeScript + i18next (EN / zh-TW / zh-CN)
 - **Terminal:** xterm.js + node-pty
 - **Framework:** Tauri 2, with Rust as the host/runtime layer
-- **AI:** `@anthropic-ai/claude-agent-sdk` + bundled `@anthropic-ai/claude-code` binary (Claude); Rust-managed app-server from the bundled `@openai/codex` runtime (Codex Agent)
+- **AI:** `@anthropic-ai/claude-agent-sdk` + its bundled platform CLI binary (Claude); Rust-managed app-server from the bundled `@openai/codex` runtime (Codex Agent)
 - **Build:** Vite + Tauri
 - **Storage:** Rust-managed JSON files for app state and snippets; agent runtime transcript files for sessions
 - **Remote:** Rust WebSocket server/client + QR code connection flow
