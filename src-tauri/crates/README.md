@@ -11,14 +11,21 @@ remote routing, and event publication through the existing host API.
 | `bat-git` | Git command parsing and worktree operations |
 | `bat-remote-protocol` | Remote protocol rules and session replay |
 | `bat-runtime` | Runtime catalog and installation |
-| `bat-app-storage` | Settings, snippets, profile metadata/secrets/snapshots, latency metrics |
+| `bat-app-storage` | Settings, snippets, profile and window/workspace snapshots, latency metrics |
 | `bat-agent-bridge` | Node process lifecycle, JSON-RPC requests and event callbacks |
 | `bat-filesystem` | File operations, search, transfers and bounded directory watchers |
+| `bat-pty` | PTY lifecycle, IO, viewport and worker scrollback/Procfile processes |
 
 Keep these crates independent of Tauri and application session/window state.
 The host owns each store, watcher, or bridge state and supplies paths or event
 callbacks. Existing command adapters re-export shared types so desktop and
 headless consumers continue to use the same IPC contracts and data formats.
+
+`bat-pty` receives a data directory and a callback carrying the target window,
+event channel and JSON payload. The host retains remote routing and supplies
+the shared PTY/worker state. Window snapshots live in `bat-app-storage`; the
+desktop registry retains live-window operations and passes file paths to the
+snapshot persistence functions.
 
 CI uses `scripts/stable-rust-crates-cache.mjs` to verify each crate's sources
 and its transitive workspace dependencies before normalizing source timestamps.

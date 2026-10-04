@@ -54,6 +54,7 @@ bat-app-storage = { path = "crates/bat-app-storage" }
 bat-filesystem = { path = "crates/bat-filesystem" }
 bat-git = { path = "crates/bat-git" }
 bat-host-support = { path = "crates/bat-host-support" }
+bat-pty = { path = "crates/bat-pty" }
 bat-remote-protocol = { path = "crates/bat-remote-protocol" }
 bat-runtime = { path = "crates/bat-runtime" }
 tauri = { version = "2", features = [], optional = true }
@@ -68,7 +69,6 @@ tauri-plugin-notification = { version = "2", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"
-libc = "0.2"
 base64 = "0.22"
 flate2 = "1"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
@@ -78,10 +78,6 @@ image = { version = "0.25.10", default-features = false, features = ["png"] }
 # clap, rpassword and friends -- about 200 crates we never called, only to
 # expose `use_native_store`. bat-host-support owns the platform-native stores.
 keyring-core = "1.0.0"
-# Cross-platform PTY (Unix pty + Windows ConPTY). Tauri itself doesn't ship
-# this; we keep the established renderer-facing
-# pty.* surface and let a reader thread emit pty:output / pty:exit events.
-portable-pty = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 tungstenite = "0.29.0"
 rcgen = "0.14.8"
@@ -94,12 +90,6 @@ rustls = { version = "0.23.40", default-features = false, features = ["ring", "s
 # (tauri-plugin-notification's desktop path has no activation callback).
 tauri-winrt-notification = "0.7"
 windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation", "Wdk_System_SystemServices"] }
-
-[dev-dependencies]
-# portable-pty exposes anyhow::Result in its public mockable traits. Keep this
-# test-only direct dependency so PTY lifecycle regression fakes can implement
-# MasterPty without pulling anyhow into the production dependency surface.
-anyhow = "1"
 
 # We keep the application small for the first release: the host commands we
 # expose are read/write JSON config files in the per-user data directory and

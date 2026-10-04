@@ -418,6 +418,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "bat-pty"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bat-app-storage",
+ "bat-host-support",
+ "libc",
+ "portable-pty",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "bat-remote-protocol"
 version = "0.1.0"
 dependencies = [
@@ -444,7 +457,6 @@ dependencies = [
 name = "better-agent-terminal"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "base64 0.22.1",
  "bat-accounts",
  "bat-agent-bridge",
@@ -452,13 +464,12 @@ dependencies = [
  "bat-filesystem",
  "bat-git",
  "bat-host-support",
+ "bat-pty",
  "bat-remote-protocol",
  "bat-runtime",
  "flate2",
  "image",
  "keyring-core",
- "libc",
- "portable-pty",
  "rand 0.10.1",
  "rcgen",
  "reqwest 0.12.28",

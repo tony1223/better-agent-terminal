@@ -25,6 +25,7 @@ const dependencies = {
   'bat-app-storage': ['bat-host-support'],
   'bat-filesystem': ['bat-host-support'],
   'bat-git': ['bat-host-support'],
+  'bat-pty': ['bat-app-storage', 'bat-host-support'],
   'bat-runtime': ['bat-host-support'],
 }
 const hostDependents = STABLE_CRATES.filter(name => name !== 'bat-remote-protocol')
@@ -119,7 +120,7 @@ ${dependencies[name]?.length ? '[dependencies]\n' + dependencies[name].map(dep =
   // its transitive consumer, while the host and other libraries remain Fresh.
   for (const [name, invalidated] of [
     ['bat-filesystem', ['bat-filesystem']],
-    ['bat-app-storage', ['bat-accounts', 'bat-app-storage']],
+    ['bat-app-storage', ['bat-accounts', 'bat-app-storage', 'bat-pty']],
   ]) {
     const source = join(cargoRoot, 'crates', name, 'src/lib.rs')
     await writeFile(source, 'pub fn value() -> u32 { 20 }\n')
@@ -154,8 +155,8 @@ ${dependencies[name]?.length ? '[dependencies]\n' + dependencies[name].map(dep =
   await assertRebuilt(['bat-accounts'])
   await recordStableCratesCache(root)
   await writeFile(join(cargoRoot, 'crates', 'bat-app-storage', 'src/lib.rs'), 'pub fn value() -> u32 { 30 }\n')
-  assert.deepEqual((await restore()).invalidated, ['bat-app-storage'])
-  await assertRebuilt(['bat-app-storage'])
+  assert.deepEqual((await restore()).invalidated, ['bat-app-storage', 'bat-pty'])
+  await assertRebuilt(['bat-app-storage', 'bat-pty'])
   await recordStableCratesCache(root)
 
   // A cleanup failure must not normalize sources or bless partial artifacts.

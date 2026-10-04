@@ -17,6 +17,7 @@ export const STABLE_CRATES = Object.freeze([
   'bat-filesystem',
   'bat-git',
   'bat-host-support',
+  'bat-pty',
   'bat-remote-protocol',
   'bat-runtime',
 ])
