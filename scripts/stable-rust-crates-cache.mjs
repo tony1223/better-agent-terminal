@@ -5,7 +5,7 @@
 // the libraries first on a mismatch, including rollbacks and interrupted builds.
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { mkdir, readFile, readdir, utimes, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, readFile, readdir, realpath, utimes, writeFile } from 'node:fs/promises'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -23,6 +23,7 @@ export const STABLE_CRATES = Object.freeze([
 ])
 const SOURCE_TIME = new Date('2000-01-01T00:00:00Z')
 const METADATA_SECTION = 'package.metadata.bat-stable-crates-cache'
+const CACHE_TAG_SIGNATURE = 'Signature: 8a477f597d28d172789f06886806bc55'
 
 async function sourceFiles(directory) {
   const files = []
@@ -127,7 +128,40 @@ export async function restoreStableCratesCache(root = repoRoot, clean = cleanSta
   return { key, matched: invalidated.length === 0, invalidated }
 }
 
-function cleanStableCrates(root, names, targetDir) {
+async function cleanStableCrates(root, names, targetDir) {
+  let targetInfo
+  try {
+    targetInfo = await lstat(targetDir)
+  } catch (error) {
+    // A cold checkout has no artifacts to invalidate.
+    if (error.code === 'ENOENT') return
+    throw error
+  }
+  if (!targetInfo.isDirectory() || targetInfo.isSymbolicLink()) {
+    throw new Error(`Refusing to clean a non-directory or linked Cargo target: ${targetDir}`)
+  }
+  const tagPath = join(targetDir, 'CACHEDIR.TAG')
+  let tagInfo
+  try {
+    tagInfo = await lstat(tagPath)
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error
+  }
+  if (tagInfo) {
+    if (!tagInfo.isFile() || !(await readFile(tagPath, 'utf8')).startsWith(CACHE_TAG_SIGNATURE)) {
+      throw new Error(`Refusing to clean a Cargo target with an invalid CACHEDIR.TAG: ${targetDir}`)
+    }
+  } else {
+    // rust-cache restores build artifacts without Cargo's cache-directory tag.
+    // Restore it only for this repository's physical default target directory;
+    // an external target must already carry Cargo's own valid ownership marker.
+    const expected = resolve(root, 'src-tauri', 'target')
+    const physicalExpected = join(await realpath(join(root, 'src-tauri')), 'target')
+    if (targetDir !== expected || await realpath(targetDir) !== physicalExpected) {
+      throw new Error(`Refusing to initialize an unmarked external Cargo target: ${targetDir}`)
+    }
+    await writeFile(tagPath, `${CACHE_TAG_SIGNATURE}\n# Cargo build cache restored by BetterAgentTerminal CI.\n`, { flag: 'wx' })
+  }
   execFileSync('cargo', [
     'clean', '--manifest-path', join(root, 'src-tauri', 'Cargo.toml'),
     '--target-dir', targetDir,

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
-import { mkdtemp, mkdir, readFile, readdir, rm, stat, utimes, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -84,8 +84,15 @@ ${dependencies[name]?.length ? '[dependencies]\n' + dependencies[name].map(dep =
     await writeFile(join(directory, 'src/lib.rs'), source)
   }
 
+  // Resource preparation creates target/ before Cargo runs. Restored CI caches
+  // also omit CACHEDIR.TAG, which recent Cargo requires for --target-dir clean.
+  await mkdir(target, { recursive: true })
+  await writeFile(join(target, 'bundle-mode.txt'), 'all-in-one\n')
   const initialKey = await prepareStableCratesCache(root)
   assert.deepEqual((await restore()).invalidated, STABLE_CRATES)
+  const cargoTag = await readFile(join(target, 'CACHEDIR.TAG'), 'utf8')
+  assert.ok(cargoTag.startsWith('Signature: 8a477f597d28d172789f06886806bc55'))
+  assert.equal(await readFile(join(target, 'bundle-mode.txt'), 'utf8'), 'all-in-one\n')
   await assertRebuilt(STABLE_CRATES)
   assert.equal(await result(), '111')
   await recordStableCratesCache(root)
@@ -104,8 +111,10 @@ ${dependencies[name]?.length ? '[dependencies]\n' + dependencies[name].map(dep =
   const hostSource = join(cargoRoot, 'crates', 'bat-host-support', 'src/lib.rs')
   await writeFile(hostSource, 'pub fn value() -> u32 { 200 }\n')
   await utimes(hostSource, new Date(0), new Date(0))
+  await rm(join(target, 'CACHEDIR.TAG'))
   assert.notEqual(await prepareStableCratesCache(root), initialKey)
   assert.deepEqual((await restore()).invalidated, hostDependents)
+  assert.equal(await readFile(join(target, 'CACHEDIR.TAG'), 'utf8'), cargoTag)
   await assertRebuilt(hostDependents)
   assert.equal(await result(), '211')
   // No record after an interrupted/failed release: the old cache key remains
@@ -175,6 +184,25 @@ ${dependencies[name]?.length ? '[dependencies]\n' + dependencies[name].map(dep =
   assert.ok(outsideLib)
   const outsideArtifact = join(outsideTarget, 'debug', 'deps', outsideLib)
   const outsideModified = (await stat(outsideArtifact)).mtimeMs
+  const outsideTagPath = join(outsideTarget, 'CACHEDIR.TAG')
+  const outsideTag = await readFile(outsideTagPath, 'utf8')
+  await rm(outsideTagPath)
+  await assert.rejects(restoreStableCratesCache(root, undefined, { targetDir: outsideTarget }), /unmarked external Cargo target/)
+  await assert.rejects(readFile(outsideTagPath), { code: 'ENOENT' })
+  assert.equal((await stat(outsideArtifact)).mtimeMs, outsideModified)
+  assert.equal((await stat(hostSource)).mtime.getTime(), 0)
+  assert.equal(await readFile(cacheState, 'utf8'), stateBeforeFailure)
+  await writeFile(outsideTagPath, outsideTag)
+  const linkedTarget = join(root, 'linked-target')
+  await symlink(outsideTarget, linkedTarget, process.platform === 'win32' ? 'junction' : 'dir')
+  await assert.rejects(restoreStableCratesCache(root, undefined, { targetDir: linkedTarget }), /linked Cargo target/)
+  assert.equal((await stat(outsideArtifact)).mtimeMs, outsideModified)
+  await rm(linkedTarget)
+  await writeFile(join(target, 'CACHEDIR.TAG'), 'invalid tag\n')
+  await assert.rejects(restore(), /invalid CACHEDIR.TAG/)
+  assert.equal((await stat(hostSource)).mtime.getTime(), 0)
+  assert.equal(await readFile(cacheState, 'utf8'), stateBeforeFailure)
+  await writeFile(join(target, 'CACHEDIR.TAG'), cargoTag)
   const inheritedTarget = process.env.CARGO_TARGET_DIR
   try {
     process.env.CARGO_TARGET_DIR = outsideTarget
