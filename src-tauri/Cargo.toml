@@ -6,6 +6,11 @@ authors = ["TonyQ CO., LTD."]
 edition = "2021"
 default-run = "better-agent-terminal"
 
+[workspace]
+members = [".", "crates/*"]
+default-members = ["."]
+resolver = "2"
+
 [lib]
 # Desktop and headless binaries link this crate as an rlib. Building cdylib and
 # staticlib here made every release also link unused ~20 MB/~250 MB library
@@ -43,6 +48,9 @@ serde_json = "1"
 # headless Linux hosts (issue #117). The headless build is being stood up
 # incrementally; until it lands, every supported build keeps `desktop` on.
 [dependencies]
+bat-host-support = { path = "crates/bat-host-support" }
+bat-remote-protocol = { path = "crates/bat-remote-protocol" }
+bat-runtime = { path = "crates/bat-runtime" }
 tauri = { version = "2", features = [], optional = true }
 # Direct tokio dep backs the headless async runtime (crate::async_rt); on desktop
 # the shim re-exports tauri's bundled runtime, so this is only load-bearing headless.
@@ -57,21 +65,15 @@ serde_json = "1"
 thiserror = "1"
 libc = "0.2"
 base64 = "0.22"
-aes-gcm = "0.10"
-aes = "0.8"
-cbc = "0.1"
 flate2 = "1"
-pbkdf2 = "0.12"
-sha1 = "0.10"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 # keyring-core plus the one native store each platform actually uses. The
 # `keyring` 4.x meta-crate that used to sit here also pulled in db-keystore
 # (turso, a SQLite reimplementation, and tantivy, a full-text search engine),
 # clap, rpassword and friends -- about 200 crates we never called, only to
-# expose `use_native_store`. See src/native_keyring.rs for the replacement.
+# expose `use_native_store`. bat-host-support owns the platform-native stores.
 keyring-core = "1.0.0"
 notify = "8"
-get_if_addrs = "0.5"
 # Cross-platform PTY (Unix pty + Windows ConPTY). Tauri itself doesn't ship
 # this; we keep the renderer-side shape identical to the Electron preload's
 # pty.* surface and let a reader thread emit pty:output / pty:exit events.
@@ -87,15 +89,8 @@ rustls-pki-types = "1.14.1"
 [target.'cfg(windows)'.dependencies]
 # Direct WinRT toasts on Windows so a click can bring the BAT window back
 # (tauri-plugin-notification's desktop path has no activation callback).
-windows-native-keyring-store = "1.0.0"
 tauri-winrt-notification = "0.7"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Memory", "Win32_System_SystemInformation", "Wdk_System_SystemServices"] }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-apple-native-keyring-store = { version = "1.0.0", features = ["keychain"] }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-linux-keyutils-keyring-store = "1.0.0"
 
 [dev-dependencies]
 # portable-pty exposes anyhow::Result in its public mockable traits. Keep this

@@ -3,7 +3,7 @@
 // pinned native runtime versions (Claude agent-sdk CLI, Codex CLI, Node) and
 // their per-platform download integrity.
 //
-// Both the Rust host (src-tauri/src/runtime_catalog.rs via include_str!) and
+// Both the Rust host (src-tauri/crates/bat-runtime/src/runtime_catalog.rs via include_str!) and
 // the Node sidecar (node-sidecar/src/handlers/claude-auth.mjs via JSON import)
 // read this file, so the managed-runtime installer, the bundled-runtime
 // resolver, and the sidecar's native-binary downloader all agree on one set of

@@ -1,6 +1,6 @@
 // Offline guard for runtime-catalog.json — the single source of truth for the
 // pinned native runtime versions (Claude agent-sdk CLI, Codex CLI, Node) read
-// by both the Rust host (src-tauri/src/runtime_catalog.rs) and the Node sidecar
+// by both the Rust host (src-tauri/crates/bat-runtime/src/runtime_catalog.rs) and the Node sidecar
 // (node-sidecar/src/handlers/claude-auth.mjs).
 //
 // It asserts the committed catalog versions track the installed dependencies

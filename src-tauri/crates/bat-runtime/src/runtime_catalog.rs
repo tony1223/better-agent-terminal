@@ -12,7 +12,7 @@ use std::sync::OnceLock;
 
 const RUNTIME_CATALOG_JSON: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../runtime-catalog.json"
+    "/../../../runtime-catalog.json"
 ));
 
 #[derive(Debug, Deserialize)]

@@ -341,23 +341,63 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
-name = "better-agent-terminal"
+name = "bat-host-support"
 version = "0.1.0"
 dependencies = [
  "aes",
  "aes-gcm",
- "anyhow",
  "apple-native-keyring-store",
  "base64 0.22.1",
  "cbc",
- "flate2",
  "get_if_addrs",
+ "keyring-core",
+ "linux-keyutils-keyring-store",
+ "pbkdf2",
+ "rand 0.10.1",
+ "serde",
+ "serde_json",
+ "sha1",
+ "windows-native-keyring-store",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "bat-remote-protocol"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "rand 0.10.1",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "bat-runtime"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "bat-host-support",
+ "flate2",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "better-agent-terminal"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "bat-host-support",
+ "bat-remote-protocol",
+ "bat-runtime",
+ "flate2",
  "image",
  "keyring-core",
  "libc",
- "linux-keyutils-keyring-store",
  "notify",
- "pbkdf2",
  "portable-pty",
  "rand 0.10.1",
  "rcgen",
@@ -366,7 +406,6 @@ dependencies = [
  "rustls-pki-types",
  "serde",
  "serde_json",
- "sha1",
  "sha2",
  "tauri",
  "tauri-build",
@@ -379,7 +418,6 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tungstenite",
- "windows-native-keyring-store",
  "windows-sys 0.61.2",
 ]
 

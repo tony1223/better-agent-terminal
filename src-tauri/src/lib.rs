@@ -5,6 +5,16 @@
 // a strongly typed signature, and the renderer reaches it via the
 // host-api adapter (renderer/src/host-api.ts). See plans/tauri-migration-plan.md.
 
+// Keep the app-facing module paths while the stable libraries compile and cache
+// independently of the Tauri shell and agent session implementations.
+use bat_host_support::{
+    electron_safe_storage, linux_wayland, log_file, native_keyring, network_addresses, path_guard,
+    subprocess,
+};
+pub use bat_remote_protocol::remote_core;
+use bat_remote_protocol::session_replay;
+use bat_runtime::{runtime_catalog, runtime_install};
+
 mod account_store;
 mod app_data;
 #[cfg(feature = "desktop")]
@@ -17,30 +27,16 @@ mod codex_account_store;
 mod codex_app_server;
 mod codex_auth;
 mod commands;
-mod electron_safe_storage;
 mod event_hub;
 mod host_context;
 // Not desktop-gated: turns run on the headless bat-server too, and its samples
 // are the ones worth having — that is the machine actually calling the API.
 mod latency_store;
-mod linux_wayland;
-mod log_file;
-mod native_keyring;
-mod network_addresses;
 mod panic_log;
-mod path_guard;
 mod remote_client;
 mod profile_context;
-pub mod remote_core;
 mod remote_server;
-mod session_replay;
-mod runtime_catalog;
-// Tauri-free managed-runtime install core, shared by the desktop installer
-// (commands/runtime.rs delegates the codex download/extract/place to it) and
-// the headless bat-server, which self-provisions codex from it on startup.
-mod runtime_install;
 mod sidecar;
-mod subprocess;
 #[cfg(feature = "desktop")]
 mod window_registry;
 

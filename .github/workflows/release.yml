@@ -496,8 +496,8 @@ jobs:
         id: rust-base-cache-key
         run: node scripts/rust-base-cache-key.mjs
 
-      # The next three caches — Cargo registry, Rust target dir, Tauri bundle
-      # tools — are hosted-only. On a self-hosted runner they are worse than
+      # Cargo registry, Rust target dir and Tauri bundle tool caches are
+      # hosted-only. On a self-hosted runner they are worse than
       # useless: ~/.cargo, src-tauri/target and the Tauri tool cache all live
       # outside the git tree, so they already survive the reset above and
       # restoring them is redundant. *Saving* them is actively harmful — 600-735
@@ -525,23 +525,6 @@ jobs:
           key: ${{ runner.os }}-${{ matrix.arch }}-cargo-registry-base-${{ steps.rust-base-cache-key.outputs.base }}
           restore-keys: |
             ${{ runner.os }}-${{ matrix.arch }}-cargo-registry-base-
-
-      - name: Cache Rust build outputs
-        if: env.BUILD_MATRIX_ENTRY == 'true' && runner.environment == 'github-hosted'
-        continue-on-error: true
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri -> target
-          shared-key: release-${{ matrix.platform }}-${{ matrix.arch }}
-          key: base-${{ steps.rust-base-cache-key.outputs.base }}
-          cache-on-failure: true
-          # ~/.cargo/bin is freshly populated by dtolnay/rust-toolchain on
-          # every run. Caching it means a later restore can overwrite the
-          # fresh rustup shims with stale binaries — on macOS-14 this has
-          # surfaced as `cargo metadata` invoking the rustup-init installer
-          # instead of cargo. Skip the bin cache; only target/ + registry
-          # caches matter for build speed.
-          cache-bin: "false"
 
       - name: Cache Tauri bundle tools
         if: env.BUILD_MATRIX_ENTRY == 'true' && runner.environment == 'github-hosted'
@@ -670,6 +653,37 @@ jobs:
             pnpm run verify:tauri-preview-readiness:all-in-one
           fi
 
+      - name: Compute stable Rust crate cache key
+        if: env.BUILD_MATRIX_ENTRY == 'true' && runner.environment == 'github-hosted'
+        run: node scripts/stable-rust-crates-cache.mjs prepare
+
+      # Keep workspace rlibs as well as registry dependencies. The source key
+      # participates in the manifest hash; restore verifies it before backdating
+      # source files, so fresh checkout timestamps cannot force a stable rebuild.
+      # Failure caches cannot carry a successful build's source verification.
+      - name: Cache Rust build outputs
+        if: env.BUILD_MATRIX_ENTRY == 'true' && runner.environment == 'github-hosted'
+        continue-on-error: true
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          shared-key: release-${{ matrix.platform }}-${{ matrix.arch }}
+          key: base-${{ steps.rust-base-cache-key.outputs.base }}
+          cache-on-failure: false
+          # ~/.cargo/bin is freshly populated by dtolnay/rust-toolchain on
+          # every run. Caching it means a later restore can overwrite the
+          # fresh rustup shims with stale binaries — on macOS-14 this has
+          # surfaced as `cargo metadata` invoking the rustup-init installer
+          # instead of cargo. Skip the bin cache; only target/ + registry
+          # caches matter for build speed.
+          cache-bin: "false"
+          cache-workspace-crates: "true"
+          cache-directories: .bat-rust-cache
+
+      - name: Restore stable Rust crate timestamps
+        if: env.BUILD_MATRIX_ENTRY == 'true' && runner.environment == 'github-hosted'
+        run: node scripts/stable-rust-crates-cache.mjs restore
+
       - name: Sign macOS resource binaries
         if: env.BUILD_MATRIX_ENTRY == 'true' && matrix.platform == 'mac' && matrix.bundle_mode == 'all-in-one'
         env:
@@ -757,6 +771,10 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: node scripts/tauri-build-mode.mjs --mode ${{ matrix.bundle_mode }} --bundles ${{ matrix.bundle }}
+
+      - name: Record built stable Rust crates
+        if: env.BUILD_MATRIX_ENTRY == 'true' && runner.environment == 'github-hosted'
+        run: node scripts/stable-rust-crates-cache.mjs record
 
       - name: Normalize release asset names
         if: env.BUILD_MATRIX_ENTRY == 'true'
@@ -1187,16 +1205,6 @@ jobs:
         id: rust-base-cache-key
         run: node scripts/rust-base-cache-key.mjs
 
-      - name: Cache bat-server Rust build outputs
-        continue-on-error: true
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri -> target
-          shared-key: bat-server-${{ matrix.bundle_target }}
-          key: base-${{ steps.rust-base-cache-key.outputs.base }}
-          cache-on-failure: true
-          cache-bin: "false"
-
       - name: Install libfuse2 (appimagetool runtime) + musl toolchain
         run: |
           sudo apt-get update
@@ -1226,6 +1234,24 @@ jobs:
           # Codex is optional; a failure here just yields a Claude-only bundle.
           pnpm run prepare:tauri-codex-runtime || echo "codex runtime prep failed; bundle will be Claude-only"
 
+      - name: Compute stable Rust crate cache key
+        run: node scripts/stable-rust-crates-cache.mjs prepare
+
+      - name: Cache bat-server Rust build outputs
+        continue-on-error: true
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          shared-key: bat-server-${{ matrix.bundle_target }}
+          key: base-${{ steps.rust-base-cache-key.outputs.base }}
+          cache-on-failure: false
+          cache-bin: "false"
+          cache-workspace-crates: "true"
+          cache-directories: .bat-rust-cache
+
+      - name: Restore stable Rust crate timestamps
+        run: node scripts/stable-rust-crates-cache.mjs restore
+
       - name: Build bat-server (headless, static musl)
         # Static musl build so the server runs on any Linux regardless of
         # glibc age. Building on ubuntu-22.04 for the gnu target linked
@@ -1237,6 +1263,9 @@ jobs:
           CC_x86_64_unknown_linux_musl: musl-gcc
           CC_aarch64_unknown_linux_musl: musl-gcc
         run: cargo build --release --target ${{ matrix.rust_target }} --bin bat-server --no-default-features --features headless --manifest-path src-tauri/Cargo.toml
+
+      - name: Record built stable Rust crates
+        run: node scripts/stable-rust-crates-cache.mjs record
 
       - name: Verify bat-server is fully static
         run: |

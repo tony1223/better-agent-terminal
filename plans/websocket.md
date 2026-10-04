@@ -8,7 +8,7 @@ Implementation entry points:
 
 - Server: `src-tauri/src/remote_server.rs`
 - Client: `src-tauri/src/remote_client.rs`
-- Shared protocol helpers: `src-tauri/src/remote_core.rs`
+- Shared protocol helpers: `src-tauri/crates/bat-remote-protocol/src/remote_core.rs`
 
 ## Transport
 

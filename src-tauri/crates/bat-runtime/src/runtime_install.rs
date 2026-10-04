@@ -10,7 +10,7 @@
 // same single source the desktop installer and the Node sidecar read from.
 
 use crate::runtime_catalog;
-use crate::subprocess::hide_console_window;
+use bat_host_support::subprocess::hide_console_window;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use flate2::read::GzDecoder;
 use sha2::{Digest, Sha512};
@@ -90,7 +90,6 @@ pub fn managed_codex_cli_path(runtimes: &Path) -> Option<PathBuf> {
 /// True when a working managed codex binary already exists under `runtimes`.
 /// Only the headless bat-server startup consults this; the desktop installer
 /// relies on install_codex's own idempotence check.
-#[cfg(not(feature = "desktop"))]
 pub fn codex_is_installed(runtimes: &Path) -> bool {
     managed_codex_cli_path(runtimes)
         .map(|path| candidate_is_ready(&path, &["--version"]))

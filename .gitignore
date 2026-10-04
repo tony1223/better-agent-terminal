@@ -6,6 +6,7 @@ release/
 # Tauri Rust target dir + generated bundle output
 src-tauri/target/
 src-tauri/gen/
+.bat-rust-cache/
 *.log
 .DS_Store
 
