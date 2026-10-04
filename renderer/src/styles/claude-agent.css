@@ -2128,6 +2128,20 @@
   background: rgba(255, 255, 255, 0.12);
 }
 
+button.claude-session-reload {
+  background: transparent;
+  border: 0;
+  color: inherit;
+  font: inherit;
+}
+button.claude-session-reload:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+button.claude-session-reload:disabled:hover {
+  background: transparent;
+}
+
 .claude-effort-select {
   background: transparent;
   color: inherit;

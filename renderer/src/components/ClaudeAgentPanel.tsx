@@ -46,6 +46,9 @@ import { useRafBatchedString } from '../utils/use-raf-batched-string'
 import { translateRuntimeMessage } from '../utils/runtime-status-message'
 import { agentSendResultError, isMissingSessionCwdError } from '../utils/agent-send-recovery'
 import { dispatchWorkerCommand, parseWorkerSlashCommand } from '../utils/worker-command'
+import { BAT_FAST_SLASH_COMMAND, executeBatFastCommand, parseBatFastCommand } from '../utils/fast-mode-command'
+import { BAT_RELOAD_SLASH_COMMAND } from '../utils/session-reload'
+import { useSessionReload } from '../hooks/useSessionReload'
 import { buildCollapsedOutputPreview, clampToolOutputText, formatContentSize, formatToolElapsed, parseShellInvocation, stringifyToolResult, summarizeToolCommandInput, summarizeToolSearchResult, toolRowLayout, truncateMiddle } from './CodexAgentPanel.helpers'
 import { AgentToolRow } from './AgentToolRow'
 import { buildAskUserQnA, formatAskUserPrompt, normalizePendingAskUser, summarizeAskUserInput, wrapPreviewHtml } from './AskUserQuestion.helpers'
@@ -577,6 +580,8 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
   const [cacheEntryModal, setCacheEntryModal] = useState<number | null>(null)
   const [cacheCountdown, setCacheCountdown] = useState<{ m5: number; h1: number } | null>(null)
   const cacheAlarmEnabled = useSettings(s => s.cacheAlarmTimer === true)
+  const allowFastMode = useSettings(s => s.allowFastMode === true)
+  const fastModeCommandPendingRef = useRef(false)
   const statuslineConfig = useSettings(() => settingsStore.getStatuslineItems(), shallowEqual)
   const [contextUsagePopup, setContextUsagePopup] = useState<{
     categories: { name: string; tokens: number; color: string; isDeferred?: boolean }[]
@@ -1994,7 +1999,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
       // subdirectory, plugins reloaded). Its contract is REPLACE, not merge.
       api.onCommands((sid: string, commands: SlashCommandInfo[]) => {
         if (sid !== sessionId) return
-        if (!Array.isArray(commands) || commands.length === 0) return
+        if (!Array.isArray(commands)) return
         setSlashCommands(commands)
         window.dispatchEvent(new CustomEvent('claude-skills-updated', { detail: { sessionId, commands } }))
       }),
@@ -3114,6 +3119,18 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
   }, [setInputValue])
   usePanelActiveEffect(activation, bindActiveSkillInsertion)
 
+  const reloadFeedback = useCallback((content: string) => {
+    setMessages(prev => [...prev, {
+      id: `sys-reload-${Date.now()}`, sessionId, role: 'system' as const,
+      content, timestamp: Date.now(),
+    }])
+  }, [sessionId])
+  const { reload: reloadSession, pending: reloadPending } = useSessionReload({
+    sessionId, available: isCodexSession || !isV2Session,
+    busy: sessionMeta?.runtimeStatus === 'reloading',
+    ensureSessionStarted, onFeedback: reloadFeedback,
+  })
+
   const handleSend = useCallback(async () => {
     const __sendT0 = performance.now()
     const trimmed = inputValueRef.current.trim()
@@ -3158,6 +3175,32 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
       }
       setMessages(prev => [...prev, {
         id: `sys-ac-${Date.now()}`, sessionId, role: 'system' as const,
+        content, timestamp: Date.now(),
+      }])
+      return
+    }
+
+    if (trimmed === '/bat-reload' || trimmed === '/reload') {
+      clearInput()
+      setShowSlashMenu(false)
+      await reloadSession()
+      return
+    }
+    if (reloadPending) return
+
+    const fastCommand = parseBatFastCommand(trimmed)
+    if (fastCommand !== null) {
+      clearInput()
+      setShowSlashMenu(false)
+      const content = await executeBatFastCommand(fastCommand, {
+        sessionId,
+        available: isCodexSession || !isV2Session,
+        busy: isStreaming,
+        pending: fastModeCommandPendingRef,
+        ensureSessionStarted,
+      })
+      setMessages(prev => [...prev, {
+        id: `sys-fast-${Date.now()}`, sessionId, role: 'system' as const,
         content, timestamp: Date.now(),
       }])
       return
@@ -3601,7 +3644,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
         host.debug.log(`[handleSend] sync=${sync.toFixed(1)}ms invoke=${invoke.toFixed(1)}ms total=${total.toFixed(1)}ms sessionId=${sessionId} promptLen=${trimmed.length}`)
       }
     }
-  }, [isRemoteConnected, isStreaming, isInterrupted, sessionId, attachedImages, attachedFiles, clearInput, setInputValue, sendClaudeMessage, onRequestLogin, resetSubagentState])
+  }, [isRemoteConnected, isStreaming, isInterrupted, sessionId, attachedImages, attachedFiles, clearInput, setInputValue, sendClaudeMessage, onRequestLogin, resetSubagentState, ensureSessionStarted, isCodexSession, isV2Session, reloadSession, reloadPending])
 
   const handleInterrupt = useCallback(() => {
     if (!isStreaming) return
@@ -3694,6 +3737,10 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
           { name: 'whoami', description: 'Show current account info', argumentHint: '' },
           { name: 'switch', description: 'Switch between registered accounts', argumentHint: '<number|email>' },
         ]
+    if (isCodexSession || !isV2Session) builtIn.push(BAT_RELOAD_SLASH_COMMAND)
+    if (allowFastMode && host.debug.isDebugMode === true && (isCodexSession || !isV2Session)) {
+      builtIn.push(BAT_FAST_SLASH_COMMAND)
+    }
     // slashCommands is Claude Code's own list — its built-ins, plugin commands
     // and skills. Merged rather than concatenated because the two sides share
     // half a dozen names (/model, /compact, /login …) that BAT intercepts before
@@ -3701,7 +3748,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
     return groupSlashCommands(
       filterSlashCommands(mergeSlashCommands(builtIn, slashCommands), slashFilter),
     )
-  }, [showSlashMenu, slashFilter, slashCommands, isCodexSession])
+  }, [showSlashMenu, slashFilter, slashCommands, isCodexSession, isV2Session, allowFastMode])
 
   // Arrow keys index this flat list while the menu renders headed sections.
   // Deriving it from the groups (instead of building both from the same source)
@@ -3749,7 +3796,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
   }, [])
 
   const handleSlashSelect = useCallback((cmd: SlashCommandInfo) => {
-    setInputValue('/' + cmd.name)
+    setInputValue('/' + cmd.name + (cmd.name === 'bat-fast' ? ' ' : ''))
     setShowSlashMenu(false)
     textareaRef.current?.focus()
   }, [setInputValue])
@@ -5379,7 +5426,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
           {isResumingHistory && (
             <div className="claude-resume-skeleton">
               <span className="claude-resume-skeleton-spinner" />
-              <span>{t('claude.resumingHistory')}</span>
+              <span>{sessionMeta?.runtimeStatus === 'reloading' ? 'Reloading session…' : t('claude.resumingHistory')}</span>
             </div>
           )}
           {buildMessageStream(
@@ -6088,6 +6135,14 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
         )}
         <div className="claude-input-footer">
           <div className="claude-input-controls">
+            {(isCodexSession || !isV2Session) && (
+              <button type="button" className="claude-status-btn claude-session-reload"
+                disabled={reloadPending || sessionMeta?.runtimeStatus === 'reloading'}
+                title="Stop the current agent and restart with fresh MCP settings; preserve the conversation (/bat-reload)"
+                onClick={() => void reloadSession()}>
+                {reloadPending || sessionMeta?.runtimeStatus === 'reloading' ? 'Reloading…' : '↻ Reload'}
+              </button>
+            )}
             {isCodexSession && (
               <>
                 <select

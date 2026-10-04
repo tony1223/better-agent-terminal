@@ -2830,6 +2830,16 @@ impl ClaudeRuntimeRouter {
             .unwrap_or(false))
     }
 
+    async fn reload_session(&self, session_id: String) -> Result<Value, BridgeError> {
+        if self.codex.is_owned(&session_id) {
+            let codex = self.codex.clone();
+            let app = self.app.clone();
+            return crate::async_rt::spawn_blocking(move || codex.reload_session(&app, &session_id))
+                .await.map_err(|err| BridgeError { message: format!("Codex reload worker failed: {err}") })?;
+        }
+        self.sidecar_call("claude.reloadSession", json!({ "sessionId": session_id }), Duration::from_secs(45)).await
+    }
+
     async fn reset_session(&self, session_id: String) -> Result<Value, BridgeError> {
         if self.codex.is_owned(&session_id) {
             let codex = self.codex.clone();
@@ -5053,6 +5063,23 @@ pub async fn claude_set_fast_mode(
     ensure_local_agent_session_access(&app, &window, &session_id)?;
     if let Some(result) = codex_state.set_fast_mode(&ctx, &session_id, enabled) { return result; }
     call_blocking(app, state, "claude.setFastMode", json!({ "sessionId": session_id, "enabled": enabled })).await
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn claude_reload_session(
+    app: AppHandle,
+    window: WebviewWindow,
+    state: State<'_, SidecarState>,
+    codex_state: State<'_, CodexAppServerState>,
+    session_id: String,
+) -> Result<Value, BridgeError> {
+    if let Some(result) = remote_invoke_for_window(
+        &HostContext::from_app(app.clone()), &state, &window, "agent:reload-session",
+        vec![json!(session_id.clone())], Duration::from_secs(300),
+    ).await { return result; }
+    ensure_local_agent_session_access(&app, &window, &session_id)?;
+    ClaudeRuntimeRouter::from_states(app, &state, &codex_state).reload_session(session_id).await
 }
 
 #[cfg(feature = "desktop")]

@@ -395,6 +395,7 @@ fn legacy_v1_param_keys(channel: &str) -> Option<&'static [&'static str]> {
         | "claude:abort-session"
         | "claude:get-auto-continue"
         | "claude:reset-session"
+        | "claude:reload-session"
         | "claude:get-account-info"
         | "claude:get-supported-commands"
         | "claude:get-supported-agents"
@@ -1254,6 +1255,11 @@ mod tests {
 
     #[test]
     fn maps_legacy_claude_args_to_named_params() {
+        for channel in ["agent:reload-session", "claude:reload-session"] {
+            assert_eq!(legacy_v1_args_to_params(channel, &[json!("s1")]), json!({ "sessionId": "s1" }));
+            assert_eq!(invoke_params_for_protocol(RemoteProtocol::V2, channel, &[], Some(json!({ "sessionId": "s1" }))),
+                json!({ "sessionId": "s1" }));
+        }
         assert_eq!(
             legacy_v1_args_to_params(
                 "claude:start-session",

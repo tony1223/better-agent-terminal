@@ -1272,6 +1272,9 @@ function createTauriHost(): BatAppAPI {
           return (sessionId: string) =>
             getInvoke()<unknown>('claude_reset_session', { sessionId })
         }
+        if (key === 'reloadSession') {
+          return (sessionId: string) => getInvoke()<unknown>('claude_reload_session', { sessionId })
+        }
         // canUseTool round-trip resolution. Renderer's permission UI calls
         // these when the user clicks Allow/Deny on a permission prompt or
         // submits answers to AskUserQuestion.

@@ -2985,6 +2985,10 @@ fn invoke_rust_for_remote(
                     .map_err(bridge_error_message)
             })
         }
+        "claude:reload-session" => {
+            let Some(route) = codex_for_remote_session(ctx, channel, params) else { return None; };
+            route.and_then(|(codex, session_id)| codex.reload_session(&ctx, &session_id).map_err(bridge_error_message))
+        }
         "claude:reset-session" => {
             let Some(route) = codex_for_remote_session(ctx, channel, params) else {
                 return None;
@@ -3980,6 +3984,7 @@ fn remote_invoke_timeout(channel: &str) -> Duration {
         "runtime:get-status" => RUNTIME_STATUS_TIMEOUT,
         "claude:start-session"
         | "claude:resume-session"
+        | "claude:reload-session"
         | "claude:client-resume"
         | "claude:send-message"
         | "claude:auth-login-start"

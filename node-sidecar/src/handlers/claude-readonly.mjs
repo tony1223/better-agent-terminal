@@ -228,24 +228,26 @@ async function cachedSdkRead(key, build, worthCaching) {
     return entry.value
   }
   if (entry?.inflight) return entry.inflight
+  const pending = { value: entry?.value, ts: entry?.ts ?? 0, inflight: null }
+  metaCache.set(key, pending)
   const inflight = (async () => {
     try {
       const value = await build()
       if (worthCaching && !worthCaching(value)) {
         // Hand the value back but leave the slot cold, so the next caller asks
         // again rather than inheriting a placeholder.
-        metaCache.set(key, { value: undefined, ts: 0, inflight: null })
+        if (metaCache.get(key) === pending) metaCache.set(key, { value: undefined, ts: 0, inflight: null })
         return value
       }
-      metaCache.set(key, { value, ts: Date.now(), inflight: null })
+      if (metaCache.get(key) === pending) metaCache.set(key, { value, ts: Date.now(), inflight: null })
       return value
     } catch (err) {
       // On error we don't poison the cache — next call retries cold.
-      metaCache.set(key, { value: undefined, ts: 0, inflight: null })
+      if (metaCache.get(key) === pending) metaCache.set(key, { value: undefined, ts: 0, inflight: null })
       throw err
     }
   })()
-  metaCache.set(key, { value: entry?.value, ts: entry?.ts ?? 0, inflight })
+  pending.inflight = inflight
   return inflight
 }
 
@@ -268,6 +270,7 @@ export function invalidateSessionCommandCache(sessionId) {
   if (typeof sessionId !== 'string' || !sessionId) return
   metaCache.delete(`getSupportedCommands:${sessionId}`)
   metaCache.delete(`getSupportedAgents:${sessionId}`)
+  metaCache.delete(`getAccountInfo:${sessionId}`)
 }
 
 // Test hook: clear the cache so tests can verify cold-path behaviour
@@ -331,7 +334,8 @@ function readFromLiveQuery(sessionId, method, fallback) {
   const session = sessions.get(sessionId)
   const q = session?.currentQuery
   if (!q || typeof q[method] !== 'function') return fallback
-  return q[method]().catch(() => fallback)
+  return q[method]().then(value => sessions.get(sessionId) === session && session.currentQuery === q ? value : fallback)
+    .catch(() => fallback)
 }
 
 registerHandler('claude.getSupportedCommands', async (params) =>

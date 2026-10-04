@@ -38,6 +38,9 @@ import { useRafBatchedString } from '../utils/use-raf-batched-string'
 import { translateRuntimeMessage } from '../utils/runtime-status-message'
 import { agentSendResultError, isMissingSessionCwdError } from '../utils/agent-send-recovery'
 import { dispatchWorkerCommand, parseWorkerSlashCommand } from '../utils/worker-command'
+import { BAT_FAST_SLASH_COMMAND, executeBatFastCommand, parseBatFastCommand } from '../utils/fast-mode-command'
+import { BAT_RELOAD_SLASH_COMMAND } from '../utils/session-reload'
+import { useSessionReload } from '../hooks/useSessionReload'
 import { buildAskUserQnA, normalizePendingAskUser, wrapPreviewHtml } from './AskUserQuestion.helpers'
 import { AgentAskUserQnA } from './AgentAskUserQnA'
 import { autoContinueTurnEndKey, buildCollapsedOutputPreview, clampToolOutputText, formatContentSize, formatElapsed, formatFullTimestamp, formatTimestamp, parseContentBlocks, parseShellInvocation, shouldAutoContinueForTrigger, shouldShowTimeDivider, splitSystemReminders, stringifyToolResult, summarizeToolSearchResult, toolDescription, toolInputContent, toolInputSummary, truncateMiddle } from './CodexAgentPanel.helpers'
@@ -587,6 +590,8 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
   const [cacheEntryModal, setCacheEntryModal] = useState<number | null>(null)
   const [cacheCountdown, setCacheCountdown] = useState<{ m5: number; h1: number } | null>(null)
   const cacheAlarmEnabled = useSettings(s => s.cacheAlarmTimer === true)
+  const allowFastMode = useSettings(s => s.allowFastMode === true)
+  const fastModeCommandPendingRef = useRef(false)
   const statuslineConfig = useSettings(() => settingsStore.getStatuslineItems(), shallowEqual)
   const [contextUsagePopup, setContextUsagePopup] = useState<{
     categories: { name: string; tokens: number; color: string; isDeferred?: boolean }[]
@@ -1663,6 +1668,7 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
           host.debug.log(`${tag} onStatus sdkSessionId=${((meta as unknown as SessionMeta).sdkSessionId || '').slice(0, 8)}`)
         }
         const m = meta as unknown as SessionMeta
+        if (m.runtimeStatus === 'reloading') clearPendingAutoContinue()
         if (typeof m.isStreaming === 'boolean') {
           setIsStreaming(m.isStreaming)
         } else if (m.runtimeStatus) {
@@ -2611,6 +2617,18 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
   }, [setInputValue])
   usePanelActiveEffect(activation, bindActiveSkillInsertion)
 
+  const reloadFeedback = useCallback((content: string) => {
+    setMessages(prev => [...prev, {
+      id: `sys-reload-${Date.now()}`, sessionId, role: 'system' as const,
+      content, timestamp: Date.now(),
+    }])
+  }, [sessionId])
+  const { reload: reloadSession, pending: reloadPending } = useSessionReload({
+    sessionId, available: isCodexSession || !isV2Session,
+    busy: sessionMeta?.runtimeStatus === 'reloading',
+    ensureSessionStarted: async () => { clearPendingAutoContinue(); await ensureSessionStarted() }, onFeedback: reloadFeedback,
+  })
+
   const handleSend = useCallback(async () => {
     const sendStart = performance.now()
     const trimmed = inputValueRef.current.trim()
@@ -2671,6 +2689,32 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
       }
       setMessages(prev => [...prev, {
         id: `sys-ac-${Date.now()}`, sessionId, role: 'system' as const,
+        content, timestamp: Date.now(),
+      }])
+      return
+    }
+
+    if (trimmed === '/bat-reload' || trimmed === '/reload') {
+      clearInput()
+      setShowSlashMenu(false)
+      await reloadSession()
+      return
+    }
+    if (reloadPending) return
+
+    const fastCommand = parseBatFastCommand(trimmed)
+    if (fastCommand !== null) {
+      clearInput()
+      setShowSlashMenu(false)
+      const content = await executeBatFastCommand(fastCommand, {
+        sessionId,
+        available: isCodexSession || !isV2Session,
+        busy: isStreaming,
+        pending: fastModeCommandPendingRef,
+        ensureSessionStarted,
+      })
+      setMessages(prev => [...prev, {
+        id: `sys-fast-${Date.now()}`, sessionId, role: 'system' as const,
         content, timestamp: Date.now(),
       }])
       return
@@ -3099,7 +3143,7 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
         }])
       }
     }
-  }, [isRemoteConnected, isStreaming, isInterrupted, sessionId, attachedImages, attachedFiles, clearInput, setInputValue, clearPendingAutoContinue, sendClaudeMessage, onRequestLogin, resetSubagentState])
+  }, [isRemoteConnected, isStreaming, isInterrupted, sessionId, attachedImages, attachedFiles, clearInput, setInputValue, clearPendingAutoContinue, sendClaudeMessage, onRequestLogin, resetSubagentState, ensureSessionStarted, isCodexSession, isV2Session, reloadSession, reloadPending])
 
   const handleInterrupt = useCallback(() => {
     if (!isStreaming) return
@@ -3252,9 +3296,13 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
           { name: 'whoami', description: 'Show current account info', argumentHint: '' },
           { name: 'switch', description: 'Switch between registered accounts', argumentHint: '<number|email>' },
         ]
+    if (isCodexSession || !isV2Session) builtIn.push(BAT_RELOAD_SLASH_COMMAND)
+    if (allowFastMode && host.debug.isDebugMode === true && (isCodexSession || !isV2Session)) {
+      builtIn.push(BAT_FAST_SLASH_COMMAND)
+    }
     const all = [...builtIn, ...slashCommands]
     return q ? all.filter(c => c.name.toLowerCase().includes(q)) : all
-  }, [showSlashMenu, slashFilter, slashCommands, isCodexSession])
+  }, [showSlashMenu, slashFilter, slashCommands, isCodexSession, isV2Session, allowFastMode])
 
   // Auto-resize textarea to fit content
   const autoResizeTextarea = useCallback(() => {
@@ -3279,7 +3327,7 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
   }, [])
 
   const handleSlashSelect = useCallback((cmd: SlashCommandInfo) => {
-    setInputValue('/' + cmd.name)
+    setInputValue('/' + cmd.name + (cmd.name === 'bat-fast' ? ' ' : ''))
     setShowSlashMenu(false)
     textareaRef.current?.focus()
   }, [setInputValue])
@@ -4835,7 +4883,7 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
           {isResumingHistory && (
             <div className="claude-resume-skeleton">
               <span className="claude-resume-skeleton-spinner" />
-              <span>{t('claude.resumingHistory')}</span>
+              <span>{sessionMeta?.runtimeStatus === 'reloading' ? 'Reloading session…' : t('claude.resumingHistory')}</span>
             </div>
           )}
           {buildMessageStream(
@@ -5517,6 +5565,14 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
         )}
         <div className="claude-input-footer">
           <div className="claude-input-controls">
+            {(isCodexSession || !isV2Session) && (
+              <button type="button" className="claude-status-btn claude-session-reload"
+                disabled={reloadPending || sessionMeta?.runtimeStatus === 'reloading'}
+                title="Stop the current agent and restart with fresh MCP settings; preserve the conversation (/bat-reload)"
+                onClick={() => void reloadSession()}>
+                {reloadPending || sessionMeta?.runtimeStatus === 'reloading' ? 'Reloading…' : '↻ Reload'}
+              </button>
+            )}
             {isCodexSession && (
               <>
                 <select

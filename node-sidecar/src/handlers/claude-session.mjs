@@ -19,7 +19,7 @@ import {
 } from '../lib/state.mjs'
 import { normalizeClaudeEffortMode, isUltracodeMode, runtimeEffortForMode } from '../lib/claude-effort.mjs'
 import { autoCompactWindowForClaudeSelection, expectedContextWindowForModel, sdkModelForClaudeSelection } from '../lib/models.mjs'
-import { closeLiveQuery } from './claude-send.mjs'
+import { closeLiveQuery, reloadClaudeSession } from './claude-send.mjs'
 import { readFastModePolicy, supportsClaudeFastMode, refreshFastMode, isFastModeDebugEnabled } from '../lib/fast-mode.mjs'
 
 function applyEffortOptions(session, options) {
@@ -40,6 +40,7 @@ import {
   isCodexResting,
   isCodexSession,
   resetCodexSession,
+  reloadCodexSession,
   restCodexSession,
   resumeCodexSession,
   setCodexApprovalPolicy,
@@ -295,6 +296,13 @@ registerHandler('claude.clientResume', async (params) => {
 // streaming guard, and emit a single system-message hint so the panel
 // shows "tap to wake". Wake clears the flag; the next sendMessage also
 // clears it (see claude.sendMessage below).
+registerHandler('claude.reloadSession', async (params) => {
+  const sessionId = params?.sessionId
+  if (typeof sessionId !== 'string' || !sessionId) throw new Error('claude.reloadSession: missing sessionId')
+  if (isCodexSession(sessionId)) return reloadCodexSession(params)
+  return reloadClaudeSession(sessionId)
+})
+
 registerHandler('claude.restSession', async (params) => {
   const sessionId = params?.sessionId
   if (typeof sessionId !== 'string' || !sessionId) return false

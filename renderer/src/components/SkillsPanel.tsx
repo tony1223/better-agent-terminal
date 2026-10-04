@@ -68,8 +68,9 @@ export function SkillsPanel({ isVisible, activeCwd, activeSessionId }: SkillsPan
   // Listen for broadcast from ClaudeAgentPanel
   useEffect(() => {
     const handler = (e: Event) => {
-      const detail = (e as CustomEvent).detail as { commands: { name: string; description: string; argumentHint: string }[] } | undefined
-      if (detail?.commands?.length) {
+      const detail = (e as CustomEvent).detail as { sessionId: string; commands: { name: string; description: string; argumentHint: string }[] } | undefined
+      if (detail?.sessionId !== activeSessionId) return
+      if (Array.isArray(detail?.commands)) {
         setSdkCommands(detail.commands.map(c => ({
           name: c.name,
           description: c.description,
@@ -80,7 +81,7 @@ export function SkillsPanel({ isVisible, activeCwd, activeSessionId }: SkillsPan
     }
     window.addEventListener('claude-skills-updated', handler)
     return () => window.removeEventListener('claude-skills-updated', handler)
-  }, [])
+  }, [activeSessionId])
 
   // Scan filesystem .claude/commands/
   useEffect(() => {

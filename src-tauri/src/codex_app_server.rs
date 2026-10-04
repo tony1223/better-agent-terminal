@@ -16,7 +16,7 @@ use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::hash_map::DefaultHasher;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::hash::Hasher;
 use std::io::{BufRead, BufReader, Write};
@@ -294,9 +294,18 @@ impl CodexConnection {
 
 impl Drop for CodexConnection {
     fn drop(&mut self) {
+        self.terminate();
+    }
+}
+
+impl CodexConnection {
+    fn terminate(&self) {
         if let Ok(mut child) = self.child.lock() {
             let _ = child.kill();
             let _ = child.wait();
+        }
+        for tx in self.pending.drain_all() {
+            let _ = tx.send(Err("codex agent process stopped".to_string()));
         }
     }
 }
@@ -318,10 +327,25 @@ struct PendingApproval {
 }
 
 #[derive(Default)]
+struct CodexRuntime {
+    connection: Mutex<Option<Arc<CodexConnection>>>,
+    last_connection_activity: Mutex<Option<Instant>>,
+    idle_reaper_running: AtomicBool,
+    spawn_lock: Mutex<()>,
+    pending_unarchive: Mutex<Option<String>>,
+}
+
+#[derive(Default)]
 struct CodexInner {
     connection: Mutex<Option<Arc<CodexConnection>>>,
     last_connection_activity: Mutex<Option<Instant>>,
     idle_reaper_running: AtomicBool,
+    spawn_lock: Mutex<()>,
+    // A reloaded session moves off the shared app-server so later reloads
+    // can kill its process without interrupting another session.
+    session_runtimes: Mutex<HashMap<String, Arc<CodexRuntime>>>,
+    reloading_sessions: Mutex<HashSet<String>>,
+    notification_lock: Mutex<()>,
     sessions: Mutex<HashMap<String, CodexSession>>,
     // Serialize send/replace/abort operations per session without blocking
     // independent agents. Notifications intentionally do not take this lock.
@@ -344,6 +368,19 @@ struct CodexInner {
     // Covers the gap between account/login/start request and storing the
     // returned app-server login id, so concurrent clients cannot both start.
     device_login_start_lock: Mutex<()>,
+}
+
+struct SessionReloadGuard {
+    inner: Arc<CodexInner>,
+    session_id: String,
+}
+
+impl Drop for SessionReloadGuard {
+    fn drop(&mut self) {
+        if let Ok(mut sessions) = self.inner.reloading_sessions.lock() {
+            sessions.remove(&self.session_id);
+        }
+    }
 }
 
 enum DeviceLoginStatus {
@@ -390,6 +427,32 @@ struct RecycledConnection {
     binary_identity: String,
 }
 
+// Initialize the replacement process without starting a model turn. A persisted
+// conversation must resume successfully; failure never creates a fresh thread.
+fn reload_codex_runtime(
+    session: &CodexSession,
+    mut request: impl FnMut(&str, Value) -> Result<Value, BridgeError>,
+) -> Result<String, BridgeError> {
+    let response = if session.thread_has_started_turn {
+        let thread_id = session.thread_id.as_ref()
+            .ok_or_else(|| bridge_error("Codex thread not started"))?;
+        let mut params = build_thread_resume_params(thread_id, &session.model, &session.cwd,
+            &session.approval_policy, &session.sandbox_mode);
+        params["serviceTier"] = json!(if session.effective_fast_mode() { "fast" } else { "default" });
+        request("thread/resume", params)?
+    } else {
+        request("thread/start", build_thread_start_params(&session.model, &session.cwd,
+            &session.approval_policy, &session.sandbox_mode))?
+    };
+    let thread_id = response.get("thread").and_then(|thread| thread.get("id"))
+        .and_then(Value::as_str).or_else(|| response.get("threadId").and_then(Value::as_str))
+        .ok_or_else(|| bridge_error("Codex agent restart returned no thread id"))?;
+    if session.thread_has_started_turn && session.thread_id.as_deref() != Some(thread_id) {
+        return Err(bridge_error("Codex agent restart returned a different conversation"));
+    }
+    Ok(thread_id.to_string())
+}
+
 /// Outcome of checking the running app-server against what resolves now.
 enum ConnectionReuse {
     /// No app-server is running; the caller must spawn one.
@@ -408,6 +471,7 @@ enum ConnectionReuse {
 #[derive(Clone, Default)]
 pub struct CodexAppServerState {
     inner: Arc<CodexInner>,
+    runtime: Option<Arc<CodexRuntime>>,
 }
 
 #[derive(Clone)]
@@ -480,6 +544,52 @@ struct TurnInterruptResolution {
 }
 
 impl CodexSession {
+    fn check_reload_available(&self) -> Result<(), BridgeError> {
+        if self.runtime_status.as_deref() == Some("reloading") {
+            return Err(bridge_error("Session is already reloading"));
+        }
+        Ok(())
+    }
+
+    fn prepare_reload(&mut self) -> (Option<Value>, Vec<Value>, bool) {
+        let had_work = self.is_running || self.active_turn_key.is_some();
+        if let Some(turn_id) = self.active_turn_id.clone() { remember_ignored_turn(self, turn_id); }
+        let partial = if had_work && (!self.assistant_text.is_empty() || !self.thinking_text.is_empty()) {
+            let message = json!({
+                "id": format!("assistant-reload-{}", now_millis()), "sessionId": self.session_id,
+                "role": "assistant", "content": self.assistant_text,
+                "thinking": self.thinking_text, "timestamp": now_millis(),
+            });
+            // Completed assistant items have already entered the transcript.
+            let duplicate = self.messages.iter().rev().find(|item| item["role"] == "assistant").is_some_and(|last|
+                last["role"] == "assistant" && last["content"] == message["content"]
+                && (message["thinking"] == "" || last["thinking"] == message["thinking"]));
+            if duplicate { None } else {
+                push_session_item(self, message.clone());
+                Some(message)
+            }
+        } else { None };
+        self.assistant_text.clear();
+        self.thinking_text.clear();
+        self.is_running = false;
+        self.active_turn_id = None;
+        self.active_turn_key = None;
+        self.active_turn_started = false;
+        self.abort_requested = false;
+        self.command_outputs.clear();
+        self.command_output_last_emit.clear();
+        set_runtime_status(self, "reloading", "Stopping the current agent and restarting with fresh MCP configuration.");
+        let mut interrupted_tools = Vec::new();
+        for item in &mut self.messages {
+            if item.get("toolName").is_some() && item["status"] == "running" {
+                item["status"] = json!("error");
+                item["result"] = json!("Interrupted by session restart");
+                interrupted_tools.push(json!({ "id": item["id"], "status": "error", "result": item["result"] }));
+            }
+        }
+        (partial, interrupted_tools, had_work)
+    }
+
     fn effective_fast_mode(&self) -> bool {
         if !self.fast_mode { return false; }
         let (allowed, epoch) = crate::commands::settings::fast_mode_policy(self.fast_mode_data_dir.as_deref());
@@ -2976,6 +3086,70 @@ fn turn_id_from_params(params: &Value) -> Option<String> {
 }
 
 impl CodexAppServerState {
+    fn for_session(&self, session_id: &str) -> Self {
+        let runtime = self.inner.session_runtimes.lock().expect("codex runtime map lock")
+            .get(session_id).cloned();
+        Self { inner: self.inner.clone(), runtime }
+    }
+
+    fn connection_slot(&self) -> &Mutex<Option<Arc<CodexConnection>>> {
+        self.runtime.as_ref().map(|runtime| &runtime.connection).unwrap_or(&self.inner.connection)
+    }
+
+    fn activity_slot(&self) -> &Mutex<Option<Instant>> {
+        self.runtime.as_ref().map(|runtime| &runtime.last_connection_activity)
+            .unwrap_or(&self.inner.last_connection_activity)
+    }
+
+    fn reaper_flag(&self) -> &AtomicBool {
+        self.runtime.as_ref().map(|runtime| &runtime.idle_reaper_running)
+            .unwrap_or(&self.inner.idle_reaper_running)
+    }
+
+    fn spawn_lock(&self) -> &Mutex<()> {
+        self.runtime.as_ref().map(|runtime| &runtime.spawn_lock).unwrap_or(&self.inner.spawn_lock)
+    }
+
+    fn owns_session_runtime(&self, session_id: &str) -> bool {
+        let runtimes = self.inner.session_runtimes.lock().expect("codex runtime map lock");
+        match (&self.runtime, runtimes.get(session_id)) {
+            (Some(current), Some(owner)) => Arc::ptr_eq(current, owner),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+
+    fn ensure_session_connection(&self, app: &HostContext, session_id: &str) -> Result<Arc<CodexConnection>, String> {
+        let state = self.for_session(session_id);
+        let connection = state.ensure_connection(app)?;
+        if let Some(runtime) = &state.runtime {
+            let pending = runtime.pending_unarchive.lock().expect("codex unarchive lock").clone();
+            if let Some(thread_id) = pending {
+                connection.request_logged(app, session_id, "thread/unarchive", json!({ "threadId": thread_id }), REQUEST_TIMEOUT)?;
+                *runtime.pending_unarchive.lock().expect("codex unarchive lock") = None;
+            }
+        }
+        Ok(connection)
+    }
+
+    fn terminate_runtime(&self) {
+        let old = self.connection_slot().lock().expect("codex connection lock").take();
+        if let Some(connection) = old { connection.terminate(); }
+    }
+
+    fn live_connection(&self) -> Option<Arc<CodexConnection>> {
+        let connection = self.connection_slot().lock().ok()?.as_ref().cloned()?;
+        let alive = connection.child.lock().ok()?.try_wait().ok()?.is_none();
+        alive.then_some(connection)
+    }
+
+    fn accepts_session_events(&self, session_id: &str) -> bool {
+        if !self.owns_session_runtime(session_id) { return false; }
+        if self.inner.reloading_sessions.lock().expect("codex reload lock").contains(session_id) { return false; }
+        self.inner.sessions.lock().expect("codex sessions lock").get(session_id)
+            .is_some_and(|session| session.runtime_status.as_deref() != Some("reloading"))
+    }
+
     pub fn is_owned(&self, session_id: &str) -> bool {
         self.inner
             .sessions
@@ -3270,23 +3444,28 @@ impl CodexAppServerState {
     }
 
     fn any_session_running(&self) -> bool {
-        self.inner
+        if !self.inner.reloading_sessions.lock().expect("codex reload lock").is_empty() { return true; }
+        self.inner.sessions.lock().map(|sessions| sessions.values().any(|session| session.is_running)).unwrap_or(false)
+    }
+
+    fn any_runtime_session_running(&self) -> bool {
+        let running = self.inner
             .sessions
             .lock()
-            .map(|sessions| sessions.values().any(|session| session.is_running))
-            .unwrap_or(false)
+            .map(|sessions| sessions.values().filter(|session| session.is_running)
+                .map(|session| session.session_id.clone()).collect::<Vec<_>>())
+            .unwrap_or_default();
+        running.iter().any(|id| self.owns_session_runtime(id))
     }
 
     fn touch_connection_activity(&self) {
-        if let Ok(mut last_activity) = self.inner.last_connection_activity.lock() {
+        if let Ok(mut last_activity) = self.activity_slot().lock() {
             *last_activity = Some(Instant::now());
         }
     }
 
     fn ensure_idle_reaper(&self, app: &HostContext) {
-        if self
-            .inner
-            .idle_reaper_running
+        if self.reaper_flag()
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_err()
         {
@@ -3297,47 +3476,40 @@ impl CodexAppServerState {
         std::thread::spawn(move || {
             loop {
                 std::thread::sleep(CODEX_IDLE_REAPER_INTERVAL);
-                let has_connection = state
-                    .inner
-                    .connection
+                let has_connection = state.connection_slot()
                     .lock()
                     .map(|connection| connection.is_some())
                     .unwrap_or(false);
                 if !has_connection {
                     break;
                 }
-                let idle_for = state
-                    .inner
-                    .last_connection_activity
+                let idle_for = state.activity_slot()
                     .lock()
                     .ok()
                     .and_then(|last| last.as_ref().map(Instant::elapsed))
                     .unwrap_or_default();
-                let has_pending_approval = state
+                let approval_sessions = state
                     .inner
                     .pending_approvals
                     .lock()
-                    .map(|pending| !pending.is_empty())
-                    .unwrap_or(true);
+                    .map(|pending| pending.values().map(|approval| approval.session_id.clone()).collect::<Vec<_>>());
+                let has_pending_approval = approval_sessions
+                    .map(|sessions| sessions.iter().any(|id| state.owns_session_runtime(id))).unwrap_or(true);
                 if should_reap_codex_connection(
                     idle_for,
-                    state.any_session_running(),
-                    state.any_login_in_progress(),
+                    state.any_runtime_session_running(),
+                    state.runtime.is_none() && state.any_login_in_progress(),
                     has_pending_approval,
                 ) {
                     state.drop_connection(&app, "idle-timeout");
                     break;
                 }
             }
-            state
-                .inner
-                .idle_reaper_running
+            state.reaper_flag()
                 .store(false, Ordering::SeqCst);
             // Close the narrow spawn/exit race: a new connection may have been
             // installed while the old reaper still owned the flag.
-            if state
-                .inner
-                .connection
+            if state.connection_slot()
                 .lock()
                 .map(|connection| connection.is_some())
                 .unwrap_or(false)
@@ -3351,7 +3523,7 @@ impl CodexAppServerState {
     /// Returns the pid that was running, if any. Takes no HostContext so the
     /// recycle decision in reuse_or_recycle_connection() stays unit-testable.
     fn take_connection_for_reap(&self) -> Option<u32> {
-        let old = match self.inner.connection.lock() {
+        let old = match self.connection_slot().lock() {
             Ok(mut guard) => guard.take(),
             Err(_) => return None,
         };
@@ -3361,11 +3533,19 @@ impl CodexAppServerState {
         // switch snappy and lets the new app-server spawn in parallel.
         let old = old?;
         let pid = old.pid;
-        std::thread::spawn(move || drop(old));
+        std::thread::spawn(move || old.terminate());
         Some(pid)
     }
 
     fn drop_connection(&self, app: &HostContext, reason: &str) {
+        if matches!(reason, "unified-switch" | "unified-migrate" | "account-login" | "account-remove" | "legacy-switch" | "sync-active-changed") {
+            let runtimes = self.inner.session_runtimes.lock().expect("codex runtime map lock")
+                .values().cloned().collect::<Vec<_>>();
+            for runtime in runtimes {
+                *runtime.pending_unarchive.lock().expect("codex unarchive lock") = None;
+                Self { inner: self.inner.clone(), runtime: Some(runtime) }.take_connection_for_reap();
+            }
+        }
         match self.take_connection_for_reap() {
             Some(pid) => log_codex_global(
                 app,
@@ -3380,7 +3560,7 @@ impl CodexAppServerState {
     /// The connection mutex is locked only for single statements here: once to
     /// clone the slot, and (inside take_connection_for_reap) once to empty it.
     /// The recycle branches used to live inside
-    /// `if let Some(existing) = self.inner.connection.lock()?.clone() { .. }`;
+    /// `if let Some(existing) = self.connection_slot().lock()?.clone() { .. }`;
     /// under Rust 2021 temporary-lifetime rules that guard stays held for the
     /// whole body, so the nested drop_connection() re-locked the same mutex and
     /// parked the invoke thread forever. Every later Codex call then queued on
@@ -3392,9 +3572,7 @@ impl CodexAppServerState {
         current_auth_id: &Option<String>,
         resolved_identity: &str,
     ) -> Result<ConnectionReuse, String> {
-        let existing = self
-            .inner
-            .connection
+        let existing = self.connection_slot()
             .lock()
             .map_err(|_| "codex connection lock poisoned")?
             .clone();
@@ -3404,7 +3582,7 @@ impl CodexAppServerState {
 
         let reason = if unified && existing.auth_account_id != *current_auth_id {
             Some(RecycleReason::AuthMismatch)
-        } else if existing.binary_identity != resolved_identity && !self.any_session_running() {
+        } else if existing.binary_identity != resolved_identity && !self.any_runtime_session_running() {
             // A different codex binary resolves now — typically the managed
             // runtime finished installing after this app-server was spawned
             // from a PATH/npm fallback (which can be releases old and reject
@@ -4217,7 +4395,7 @@ impl CodexAppServerState {
             return Ok(thread_id);
         }
 
-        let connection = self.ensure_connection(app).map_err(|err| {
+        let connection = self.ensure_session_connection(app, session_id).map_err(|err| {
             self.inner
                 .sessions
                 .lock()
@@ -4730,7 +4908,11 @@ impl CodexAppServerState {
     // poll covers every session/window). Returns None when codex isn't in use:
     // we never spawn an app-server just to read usage.
     pub fn fetch_account_rate_limits(&self, app: &HostContext) -> Option<Value> {
-        let connection = self.inner.connection.lock().ok()?.as_ref().cloned()?;
+        let connection = self.live_connection().or_else(|| {
+            let runtimes = self.inner.session_runtimes.lock().ok()?.values().cloned().collect::<Vec<_>>();
+            runtimes.into_iter().find_map(|runtime|
+                Self { inner: self.inner.clone(), runtime: Some(runtime) }.live_connection())
+        })?;
         connection
             .request_logged(
                 app,
@@ -4743,7 +4925,7 @@ impl CodexAppServerState {
     }
 
     fn clear_connection_if_pid(&self, pid: u32) -> bool {
-        let Ok(mut guard) = self.inner.connection.lock() else {
+        let Ok(mut guard) = self.connection_slot().lock() else {
             return false;
         };
         let should_clear = guard
@@ -4757,6 +4939,7 @@ impl CodexAppServerState {
     }
 
     fn ensure_connection(&self, app: &HostContext) -> Result<Arc<CodexConnection>, String> {
+        let _spawn_guard = self.spawn_lock().lock().map_err(|_| "codex spawn lock poisoned")?;
         let (active_changed, current_auth_id) =
             self.sync_unified_active_from_shared(app, "ensure-connection")?;
         if active_changed {
@@ -4919,9 +5102,7 @@ impl CodexAppServerState {
         });
 
         {
-            let mut guard = self
-                .inner
-                .connection
+            let mut guard = self.connection_slot()
                 .lock()
                 .map_err(|_| "codex connection lock poisoned")?;
             *guard = Some(connection.clone());
@@ -5040,7 +5221,7 @@ impl CodexAppServerState {
             .expect("codex sessions lock")
             .insert(session_id.clone(), session);
 
-        let connection = self.ensure_connection(app).map_err(|err| {
+        let connection = self.ensure_session_connection(app, &session_id).map_err(|err| {
             self.inner
                 .sessions
                 .lock()
@@ -5148,7 +5329,7 @@ impl CodexAppServerState {
                 context_markdown.len()
             ),
         );
-        let connection = self.ensure_connection(app).map_err(bridge_error)?;
+        let connection = self.ensure_session_connection(app, &session_id).map_err(bridge_error)?;
         connection
             .request_logged(
                 app,
@@ -5207,7 +5388,7 @@ impl CodexAppServerState {
                 sdk_session_id
             ),
         );
-        let connection = self.ensure_connection(app).map_err(bridge_error)?;
+        let connection = self.ensure_session_connection(app, &session_id).map_err(bridge_error)?;
         emit(
             app,
             "claude:resume-loading",
@@ -5379,6 +5560,10 @@ impl CodexAppServerState {
         prompt: String,
         images: Vec<String>,
     ) -> Result<Value, BridgeError> {
+        let owner = self.for_session(&session_id);
+        if self.inner.reloading_sessions.lock().expect("codex reload lock").contains(&session_id) {
+            return Err(bridge_error("Session is reloading; wait before sending a message"));
+        }
         let image_count = images.len();
         let prompt = if prompt.trim().is_empty() && !images.is_empty() {
             "Please analyze the attached image.".to_string()
@@ -5402,6 +5587,10 @@ impl CodexAppServerState {
         let _turn_operation_guard = turn_operation_lock
             .lock()
             .map_err(|_| bridge_error("Codex turn operation lock poisoned"))?;
+        if !owner.owns_session_runtime(&session_id)
+            || self.inner.reloading_sessions.lock().expect("codex reload lock").contains(&session_id) {
+            return Ok(json!({ "ok": false, "cancelled": true, "error": "Agent restarted; queued message cancelled" }));
+        }
         let (input, mut temp_image_paths) = match build_turn_input(&prompt, images) {
             Ok(input) => input,
             Err(err) => {
@@ -5497,7 +5686,7 @@ impl CodexAppServerState {
                 session.thread_has_started_turn,
             )
         };
-        let connection = match self.ensure_connection(app) {
+        let connection = match self.ensure_session_connection(app, &session_id) {
             Ok(connection) => connection,
             Err(err) => {
                 cleanup_temp_images(temp_image_paths);
@@ -5951,7 +6140,7 @@ impl CodexAppServerState {
             );
             return Ok(json!({ "ok": true, "alreadyFinished": true }));
         };
-        let connection = self.ensure_connection(app).map_err(bridge_error)?;
+        let connection = self.ensure_session_connection(app, &session_id).map_err(bridge_error)?;
         let resolution = match self.interrupt_turn_for_replacement(
             app,
             &connection,
@@ -6037,6 +6226,10 @@ impl CodexAppServerState {
         } else {
             json!({ "ok": true, "existed": false })
         };
+        let runtime = self.inner.session_runtimes.lock().expect("codex runtime map lock").remove(&session_id);
+        if let Some(runtime) = runtime {
+            Self { inner: self.inner.clone(), runtime: Some(runtime) }.terminate_runtime();
+        }
         drop(turn_operation_guard);
         self.inner
             .turn_operation_locks
@@ -6071,7 +6264,7 @@ impl CodexAppServerState {
         if let Some(thread_id) = thread_id {
             self.remove_thread_owner_if_session(&thread_id, &session_id);
         }
-        let connection = self.ensure_connection(app).map_err(bridge_error)?;
+        let connection = self.ensure_session_connection(app, &session_id).map_err(bridge_error)?;
         let response = connection
             .request_logged(
                 app,
@@ -6136,6 +6329,101 @@ impl CodexAppServerState {
         );
         emit(app, "claude:status", &session_id, "meta", meta);
         Ok(json!(true))
+    }
+
+    pub fn reload_session(&self, app: &HostContext, session_id: &str) -> Result<Value, BridgeError> {
+        if !self.inner.reloading_sessions.lock().expect("codex reload lock").insert(session_id.to_string()) {
+            return Err(bridge_error("Session is already reloading"));
+        }
+        let _reload_guard = SessionReloadGuard { inner: self.inner.clone(), session_id: session_id.to_string() };
+        // Wait for turn/start to return, then terminate the target even when a
+        // turn, approval or background task is still in progress.
+        let operation_lock = self.turn_operation_lock(session_id);
+        let _guard = operation_lock.lock()
+            .map_err(|_| bridge_error("Codex turn operation lock poisoned"))?;
+        let (mut snapshot, partial, interrupted_tools, had_work) = {
+            let _notifications = self.inner.notification_lock.lock().expect("codex notification lock");
+            let mut sessions = self.inner.sessions.lock().expect("codex sessions lock");
+            let session = sessions.get_mut(session_id)
+                .ok_or_else(|| bridge_error("Codex session not started"))?;
+            session.check_reload_available()?;
+            let (partial, interrupted_tools, had_work) = session.prepare_reload();
+            (session.clone(), partial, interrupted_tools, had_work)
+        };
+        emit(app, "claude:status", session_id, "meta", snapshot.metadata());
+        emit(app, "claude:resume-loading", session_id, "loading", json!(true));
+        if let Some(message) = partial { emit(app, "claude:message", session_id, "message", message); }
+        if had_work {
+            emit(app, "claude:turn-end", session_id, "payload",
+                json!({ "reason": "aborted", "sdkSessionId": snapshot.thread_id }));
+        }
+        for result in interrupted_tools { emit(app, "claude:tool-result", session_id, "result", result); }
+        self.cancel_pending_approvals(app, session_id);
+        let old_state = self.for_session(session_id);
+        let result = (|| {
+            let old_connection = old_state.live_connection();
+            let mut archived = false;
+            // Archive flushes the rollout and shuts down this thread and its
+            // agents/MCP clients. It leaves other threads on the shared process
+            // alone. Restore the archive in the replacement process immediately.
+            if let (Some(connection), Some(thread_id)) = (&old_connection, &snapshot.thread_id) {
+                let archive = connection.request_logged(app, session_id, "thread/archive",
+                    json!({ "threadId": thread_id }), REQUEST_TIMEOUT);
+                if old_state.runtime.is_none() { archive.as_ref().map_err(|err| bridge_error(err.clone()))?; }
+                archived = archive.is_ok();
+            }
+            if old_state.runtime.is_some() { old_state.terminate_runtime(); }
+            if archived {
+                snapshot.thread_has_started_turn = true;
+                if let Some(session) = self.inner.sessions.lock().expect("codex sessions lock").get_mut(session_id) {
+                    session.thread_has_started_turn = true;
+                }
+            }
+            // Retain an unfinished unarchive across failures so Retry can restore
+            // the same conversation, even if initialize failed after shutdown.
+            let pending_unarchive = if archived { snapshot.thread_id.clone() } else {
+                old_state.runtime.as_ref().and_then(|runtime| runtime.pending_unarchive.lock().ok()?.clone())
+            };
+            let runtime = Arc::new(CodexRuntime::default());
+            *runtime.pending_unarchive.lock().expect("codex unarchive lock") = pending_unarchive;
+            self.inner.session_runtimes.lock().expect("codex runtime map lock")
+                .insert(session_id.to_string(), runtime.clone());
+            let replacement = Self { inner: self.inner.clone(), runtime: Some(runtime.clone()) };
+            let connection = replacement.ensure_connection(app).map_err(bridge_error)?;
+            let unarchive = runtime.pending_unarchive.lock().expect("codex unarchive lock").clone();
+            if let Some(thread_id) = unarchive {
+                connection.request_logged(app, session_id, "thread/unarchive",
+                    json!({ "threadId": thread_id }), REQUEST_TIMEOUT).map_err(bridge_error)?;
+                *runtime.pending_unarchive.lock().expect("codex unarchive lock") = None;
+            }
+            reload_codex_runtime(&snapshot, |method, params| {
+                connection.request_logged(app, session_id, method, params, REQUEST_TIMEOUT).map_err(bridge_error)
+            })
+        })();
+        let meta = {
+            let mut sessions = self.inner.sessions.lock().expect("codex sessions lock");
+            let session = sessions.get_mut(session_id)
+                .ok_or_else(|| bridge_error("Codex session changed during reload"))?;
+            cleanup_session_temp_images(session);
+            clear_runtime_status(session);
+            if let Ok(thread_id) = &result {
+                session.thread_id = Some(thread_id.clone());
+                session.is_resting = false;
+            }
+            session.metadata()
+        };
+        if let Ok(thread_id) = &result {
+            if let Some(old_thread_id) = snapshot.thread_id.as_deref() {
+                if old_thread_id != thread_id { self.remove_thread_owner_if_session(old_thread_id, session_id); }
+            }
+            self.take_thread_ownership(app, thread_id, session_id);
+        }
+        emit(app, "claude:status", session_id, "meta", meta.clone());
+        emit(app, "claude:resume-loading", session_id, "loading", json!(false));
+        let thread_id = result?;
+        log_codex(app, session_id, "reload_session complete; agent process restarted");
+        Ok(json!({ "ok": true, "sessionId": session_id, "sdkSessionId": thread_id,
+            "deferred": false, "meta": meta }))
     }
 
     pub fn rest_session(&self, app: &HostContext, session_id: &str) -> Option<Value> {
@@ -6374,7 +6662,7 @@ impl CodexAppServerState {
                 session.metadata(),
             )
         };
-        let connection = self.ensure_connection(app).map_err(bridge_error)?;
+        let connection = self.ensure_session_connection(app, &session_id).map_err(bridge_error)?;
         connection
             .request_logged(
                 app,
@@ -6700,7 +6988,21 @@ fn handle_server_message(
         .and_then(Value::as_str)
         .map(str::to_string)
     {
+        let _notifications = state.inner.notification_lock.lock().expect("codex notification lock");
         let params = message.get("params").cloned().unwrap_or(Value::Null);
+        let source_pid = connection.upgrade().map(|connection| connection.pid);
+        let current_pid = state.connection_slot().lock().ok()
+            .and_then(|connection| connection.as_ref().map(|connection| connection.pid));
+        if source_pid != current_pid { return; }
+        if let Some(session_id) = state.session_id_for_notification(&params)
+            .filter(|_| !method.starts_with("account/") && !method.starts_with("config/")) {
+            if !state.accepts_session_events(&session_id) {
+                if let (Some(id), Some(connection)) = (message.get("id"), connection.upgrade()) {
+                    let _ = connection.send_error_response(id.clone(), -32000, "Agent is restarting or has been replaced");
+                }
+                return;
+            }
+        }
         match message.get("id") {
             Some(id) if !id.is_null() => {
                 handle_server_request(app, state, connection, id.clone(), &method, params);
@@ -6902,7 +7204,7 @@ fn handle_notification(
                 let interrupt_session_id = session_id.clone();
                 std::thread::spawn(move || {
                     match interrupt_state
-                        .ensure_connection(&interrupt_app)
+                        .ensure_session_connection(&interrupt_app, &interrupt_session_id)
                         .and_then(|connection| {
                             connection.request_logged(
                                 &interrupt_app,
@@ -9407,6 +9709,145 @@ invalid json
         assert_eq!(found, exact_match);
 
         fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn session_reload_preserves_identity_and_initializes_without_inference() {
+        let mut session = test_codex_session();
+        // A running turn is a valid reload target.
+        session.check_reload_available().unwrap();
+        session.messages = vec![json!({ "id": "kept", "content": "conversation" })];
+        session.cwd = "C:/worktrees/project".into();
+        session.model = "gpt-6.1-sol:272k".into();
+        session.fast_mode = true;
+        let before = session.metadata();
+        let mut requests = Vec::new();
+        let id = reload_codex_runtime(&session, |method, params| {
+            requests.push((method.to_string(), params));
+            Ok(json!({ "thread": { "id": "thread-1" } }))
+        }).unwrap();
+        assert_eq!(id, "thread-1");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].0, "thread/resume");
+        assert_eq!(requests[0].1["threadId"], "thread-1");
+        assert_eq!(requests[0].1["cwd"], session.cwd);
+        assert_eq!(requests[0].1["model"], "gpt-6.1-sol");
+        assert_eq!(requests[0].1["config"]["model_context_window"], 272_000);
+        assert_eq!(requests[0].1["approvalPolicy"], session.approval_policy);
+        assert_eq!(session.metadata(), before);
+        assert_eq!(session.messages[0]["id"], "kept");
+        assert!(session.fast_mode, "restart retains explicit Fast opt-in");
+    }
+
+    #[test]
+    fn session_reload_interrupts_tools_and_preserves_partial_transcript_and_settings() {
+        let mut session = test_codex_session();
+        let id = session.thread_id.clone();
+        let old_turn = session.active_turn_id.clone().unwrap();
+        session.fast_mode = true;
+        session.assistant_text = "Partial answer".into();
+        session.thinking_text = "Partial reasoning".into();
+        session.messages.push(json!({ "id": "tool", "toolName": "Bash", "status": "running" }));
+        let old_model = session.model.clone();
+        let old_usage = (session.input_tokens, session.output_tokens, session.num_turns);
+        let (partial, tools, had_work) = session.prepare_reload();
+        assert!(had_work);
+        assert!(!session.is_running);
+        assert!(session.active_turn_id.is_none());
+        assert!(session.ignored_turn_ids.contains(&old_turn));
+        assert_eq!(session.thread_id, id);
+        assert_eq!(session.model, old_model);
+        assert_eq!((session.input_tokens, session.output_tokens, session.num_turns), old_usage);
+        assert!(session.fast_mode);
+        assert_eq!(session.runtime_status.as_deref(), Some("reloading"));
+        assert_eq!(partial.unwrap()["content"], "Partial answer");
+        assert_eq!(session.messages.last().unwrap()["thinking"], "Partial reasoning");
+        assert_eq!(session.messages[0]["status"], "error");
+        assert_eq!(tools[0]["id"], "tool");
+        assert!(session.assistant_text.is_empty() && session.thinking_text.is_empty());
+    }
+
+    #[test]
+    fn session_reload_never_replaces_a_failed_persisted_conversation() {
+        let mut session = test_codex_session();
+        session.runtime_status = Some("reloading".into());
+        assert!(session.check_reload_available().is_err());
+        session.runtime_status = None;
+        let original = session.thread_id.clone();
+        let mut methods = Vec::new();
+        assert!(reload_codex_runtime(&session, |method, _| {
+            methods.push(method.to_string());
+            Err(bridge_error("resume failed"))
+        }).is_err());
+        assert_eq!(methods, vec!["thread/resume"]);
+        assert_eq!(session.thread_id, original);
+        assert!(reload_codex_runtime(&session, |_, _|
+            Ok(json!({ "thread": { "id": "different-conversation" } }))).is_err());
+        // The only fresh-thread case is an empty unpersisted thread whose old
+        // process already exited before it could materialize a rollout.
+        session.thread_has_started_turn = false;
+        methods.clear();
+        assert_eq!(reload_codex_runtime(&session, |method, _| {
+            methods.push(method.to_string());
+            Ok(json!({ "thread": { "id": "empty-replacement" } }))
+        }).unwrap(), "empty-replacement");
+        assert_eq!(methods, vec!["thread/start"]);
+    }
+
+    fn reload_test_connection() -> Arc<CodexConnection> {
+        let mut command = if cfg!(windows) {
+            let mut command = Command::new("cmd");
+            command.args(["/Q", "/C", "set /p bat_reload_wait="]);
+            command
+        } else { Command::new("cat") };
+        let mut child = command.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null())
+            .spawn().expect("spawn idle test process");
+        let stdin = child.stdin.take().unwrap();
+        let pid = child.id();
+        Arc::new(CodexConnection { stdin: Mutex::new(stdin), child: Mutex::new(child), pid,
+            pending: Arc::new(PendingTable::default()), next_id: AtomicU64::new(0),
+            auth_account_id: None, binary_identity: "reload-test".into() })
+    }
+
+    #[test]
+    fn session_reload_terminates_target_process_and_rejects_stale_runtime_events() {
+        let state = CodexAppServerState::default();
+        let target = Arc::new(CodexRuntime::default());
+        let old = reload_test_connection();
+        let other = reload_test_connection();
+        assert!(old.child.lock().unwrap().try_wait().unwrap().is_none());
+        let (tx, rx) = channel();
+        old.pending.insert(1, tx);
+        *target.connection.lock().unwrap() = Some(old.clone());
+        *state.inner.connection.lock().unwrap() = Some(other.clone());
+        state.inner.session_runtimes.lock().unwrap().insert("session-1".into(), target);
+        let mut other_session = test_codex_session();
+        other_session.session_id = "other".into();
+        {
+            let mut sessions = state.inner.sessions.lock().unwrap();
+            sessions.insert("session-1".into(), test_codex_session());
+            sessions.insert("other".into(), other_session);
+        }
+        let previous = state.for_session("session-1");
+        assert!(previous.accepts_session_events("session-1"));
+        assert!(!state.accepts_session_events("session-1"));
+        state.inner.reloading_sessions.lock().unwrap().insert("session-1".into());
+        assert!(!previous.accepts_session_events("session-1"));
+        previous.terminate_runtime();
+        assert!(old.child.lock().unwrap().try_wait().unwrap().is_some(), "kill even while the caller retains an Arc");
+        assert!(rx.recv_timeout(Duration::from_secs(1)).unwrap().is_err(), "old RPC cannot hang");
+        let replacement = Arc::new(CodexRuntime::default());
+        let new = reload_test_connection();
+        *replacement.connection.lock().unwrap() = Some(new.clone());
+        state.inner.session_runtimes.lock().unwrap().insert("session-1".into(), replacement);
+        state.inner.reloading_sessions.lock().unwrap().remove("session-1");
+        assert_ne!(old.pid, new.pid);
+        assert!(!previous.accepts_session_events("session-1"));
+        assert!(state.for_session("session-1").accepts_session_events("session-1"));
+        assert!(state.accepts_session_events("other"));
+        assert!(other.child.lock().unwrap().try_wait().unwrap().is_none(), "another session keeps its process");
+        state.for_session("session-1").terminate_runtime();
+        state.terminate_runtime();
     }
 
     // claude:permission-request is announced once and never repeated, so a
