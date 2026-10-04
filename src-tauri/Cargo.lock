@@ -353,6 +353,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "bat-agent-bridge"
+version = "0.1.0"
+dependencies = [
+ "bat-host-support",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "bat-app-storage"
+version = "0.1.0"
+dependencies = [
+ "bat-host-support",
+ "keyring-core",
+ "rand 0.10.1",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "bat-filesystem"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "bat-host-support",
+ "notify",
+ "rand 0.10.1",
+ "serde",
+ "serde_json",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "bat-git"
 version = "0.1.0"
 dependencies = [
@@ -412,6 +447,9 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "bat-accounts",
+ "bat-agent-bridge",
+ "bat-app-storage",
+ "bat-filesystem",
  "bat-git",
  "bat-host-support",
  "bat-remote-protocol",
@@ -420,7 +458,6 @@ dependencies = [
  "image",
  "keyring-core",
  "libc",
- "notify",
  "portable-pty",
  "rand 0.10.1",
  "rcgen",

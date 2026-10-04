@@ -49,6 +49,9 @@ serde_json = "1"
 # incrementally; until it lands, every supported build keeps `desktop` on.
 [dependencies]
 bat-accounts = { path = "crates/bat-accounts" }
+bat-agent-bridge = { path = "crates/bat-agent-bridge" }
+bat-app-storage = { path = "crates/bat-app-storage" }
+bat-filesystem = { path = "crates/bat-filesystem" }
 bat-git = { path = "crates/bat-git" }
 bat-host-support = { path = "crates/bat-host-support" }
 bat-remote-protocol = { path = "crates/bat-remote-protocol" }
@@ -75,7 +78,6 @@ image = { version = "0.25.10", default-features = false, features = ["png"] }
 # clap, rpassword and friends -- about 200 crates we never called, only to
 # expose `use_native_store`. bat-host-support owns the platform-native stores.
 keyring-core = "1.0.0"
-notify = "8"
 # Cross-platform PTY (Unix pty + Windows ConPTY). Tauri itself doesn't ship
 # this; we keep the established renderer-facing
 # pty.* surface and let a reader thread emit pty:output / pty:exit events.
@@ -91,7 +93,7 @@ rustls = { version = "0.23.40", default-features = false, features = ["ring", "s
 # Direct WinRT toasts on Windows so a click can bring the BAT window back
 # (tauri-plugin-notification's desktop path has no activation callback).
 tauri-winrt-notification = "0.7"
-windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_System_SystemInformation", "Wdk_System_SystemServices"] }
+windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation", "Wdk_System_SystemServices"] }
 
 [dev-dependencies]
 # portable-pty exposes anyhow::Result in its public mockable traits. Keep this

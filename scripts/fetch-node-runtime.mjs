@@ -14,7 +14,7 @@
 //   darwin-x86_64/bin/node
 //   linux-x86_64/bin/node
 //
-// The Rust resolver (src-tauri/src/sidecar.rs::find_bundled_node) probes
+// The Rust resolver (src-tauri/crates/bat-agent-bridge/src/lib.rs::find_bundled_node) probes
 // these locations in order. Re-running this script is idempotent — if the
 // target binary already exists it short-circuits.
 

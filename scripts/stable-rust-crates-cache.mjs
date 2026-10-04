@@ -12,6 +12,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 export const STABLE_CRATES = Object.freeze([
   'bat-accounts',
+  'bat-agent-bridge',
+  'bat-app-storage',
+  'bat-filesystem',
   'bat-git',
   'bat-host-support',
   'bat-remote-protocol',
@@ -34,19 +37,59 @@ async function sourceFiles(directory) {
 }
 
 export async function stableCratesKey(root = repoRoot) {
-  const files = [join(root, 'runtime-catalog.json')]
+  const metadata = JSON.parse(execFileSync('cargo', [
+    'metadata', '--no-deps', '--format-version=1',
+    '--manifest-path', join(root, 'src-tauri', 'Cargo.toml'),
+  ], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }))
+  const packages = new Map(metadata.packages.map(pkg => [pkg.name, pkg]))
+  const sources = new Map()
+  const dependencies = new Map()
+  const files = []
   for (const name of STABLE_CRATES) {
-    files.push(...await sourceFiles(join(root, 'src-tauri', 'crates', name)))
+    const pkg = packages.get(name)
+    if (!pkg) throw new Error(`Stable Rust crate missing from workspace: ${name}`)
+    const inputs = await sourceFiles(dirname(pkg.manifest_path))
+    if (name === 'bat-runtime') inputs.push(join(root, 'runtime-catalog.json'))
+    inputs.sort()
+    files.push(...inputs)
+    const hash = createHash('sha256').update('bat-stable-crate-v2\n')
+    for (const file of inputs) {
+      hash.update(relative(root, file).replaceAll('\\', '/'))
+      hash.update('\0')
+      hash.update(await readFile(file))
+      hash.update('\0')
+    }
+    sources.set(name, hash.digest('hex'))
+    // Include optional, target-specific, build, and dev path dependencies.
+    // This conservative graph works for every CI platform and feature set.
+    dependencies.set(name, [...new Set(pkg.dependencies
+      .filter(dep => dep.path && STABLE_CRATES.includes(dep.name))
+      .map(dep => dep.name))].sort())
+    for (const dep of pkg.dependencies) {
+      if (dep.path && !STABLE_CRATES.includes(dep.name)) {
+        throw new Error(`Untracked path dependency of ${name}: ${dep.name}`)
+      }
+    }
   }
-  files.sort()
-  const hash = createHash('sha256').update('bat-stable-crates-v1\n')
-  for (const file of files) {
-    hash.update(relative(root, file).replaceAll('\\', '/'))
-    hash.update('\0')
-    hash.update(await readFile(file))
-    hash.update('\0')
+  const crates = {}
+  // Hash each reachable source once. Traversal also handles dev-dependency
+  // cycles without treating a legitimate Cargo workspace as an invalid DAG.
+  for (const name of STABLE_CRATES) {
+    const closure = new Set()
+    const visit = dependency => {
+      if (closure.has(dependency)) return
+      closure.add(dependency)
+      dependencies.get(dependency).forEach(visit)
+    }
+    visit(name)
+    const hash = createHash('sha256').update('bat-stable-dependency-closure-v2\n')
+    for (const dependency of [...closure].sort()) {
+      hash.update(`${dependency}:${sources.get(dependency)}\n`)
+    }
+    crates[name] = hash.digest('hex')
   }
-  return { key: hash.digest('hex'), files }
+  const key = createHash('sha256').update(JSON.stringify(crates)).digest('hex')
+  return { key, files: files.sort(), crates, targetDir: metadata.target_directory }
 }
 
 function statePath(root) {
@@ -67,32 +110,35 @@ export async function prepareStableCratesCache(root = repoRoot) {
   return key
 }
 
-export async function restoreStableCratesCache(root = repoRoot, clean = cleanStableCrates) {
-  const { key, files } = await stableCratesKey(root)
+export async function restoreStableCratesCache(root = repoRoot, clean = cleanStableCrates, options = {}) {
+  const { key, files, crates, targetDir } = await stableCratesKey(root)
   let previous
   try {
     previous = JSON.parse(await readFile(statePath(root), 'utf8'))
   } catch (error) {
     if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error
   }
-  const matched = previous?.key === key && previous?.sourceTime === SOURCE_TIME.toISOString()
-  if (!matched) clean(root)
+  const valid = previous?.version === 2 && previous?.sourceTime === SOURCE_TIME.toISOString()
+    && STABLE_CRATES.every(name => /^[a-f0-9]{64}$/.test(previous?.crates?.[name] ?? ''))
+  const invalidated = STABLE_CRATES.filter(name => !valid || previous.crates[name] !== crates[name])
+  if (invalidated.length) await clean(root, invalidated, resolve(options.targetDir ?? targetDir))
   for (const file of files) await utimes(file, SOURCE_TIME, SOURCE_TIME)
-  return { key, matched }
+  return { key, matched: invalidated.length === 0, invalidated }
 }
 
-function cleanStableCrates(root) {
+function cleanStableCrates(root, names, targetDir) {
   execFileSync('cargo', [
     'clean', '--manifest-path', join(root, 'src-tauri', 'Cargo.toml'),
-    ...STABLE_CRATES.flatMap(name => ['-p', name]),
+    '--target-dir', targetDir,
+    ...names.flatMap(name => ['-p', name]),
   ], { cwd: root, stdio: 'inherit' })
 }
 
 export async function recordStableCratesCache(root = repoRoot) {
-  const { key } = await stableCratesKey(root)
+  const { key, crates } = await stableCratesKey(root)
   const file = statePath(root)
   await mkdir(dirname(file), { recursive: true })
-  await writeFile(file, JSON.stringify({ key, sourceTime: SOURCE_TIME.toISOString() }) + '\n')
+  await writeFile(file, JSON.stringify({ version: 2, key, crates, sourceTime: SOURCE_TIME.toISOString() }) + '\n')
   return key
 }
 
@@ -102,7 +148,7 @@ async function main() {
     console.log(`Stable Rust source key: ${await prepareStableCratesCache()}`)
   } else if (command === 'restore') {
     const result = await restoreStableCratesCache()
-    console.log(`Stable Rust libraries: ${result.matched ? 'verified cache' : 'rebuild required'}`)
+    console.log(`Stable Rust libraries: ${result.matched ? 'verified cache' : `rebuild ${result.invalidated.join(', ')}`}`)
   } else if (command === 'record') {
     // Run only after a successful cargo build. On failure, retain the previous
     // key so a partial build cannot bless artifacts from an older source tree.
