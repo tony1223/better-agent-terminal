@@ -1,14 +1,10 @@
 [package]
-name = "bat-runtime"
+name = "bat-git"
 version = "0.1.0"
 edition = "2021"
 publish = false
 
 [dependencies]
 bat-host-support = { path = "../bat-host-support", default-features = false }
-base64 = "0.22"
-flate2 = "1"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"

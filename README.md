@@ -344,7 +344,7 @@ This script will detect your OS and install the application to the standard loca
 
 ### macOS Build Notes
 
-Native dependencies (`node-pty`, `better-sqlite3`) require Xcode Command Line Tools:
+Building Tauri and native dependencies such as `node-pty` requires Xcode Command Line Tools:
 
 ```bash
 xcode-select --install
@@ -393,7 +393,7 @@ better-agent-terminal/
 - **Framework:** Tauri 2, with Rust as the host/runtime layer
 - **AI:** `@anthropic-ai/claude-agent-sdk` + bundled `@anthropic-ai/claude-code` binary (Claude); Rust-managed app-server from the bundled `@openai/codex` runtime (Codex Agent)
 - **Build:** Vite + Tauri
-- **Storage:** better-sqlite3 (snippets, session data)
+- **Storage:** Rust-managed JSON files for app state and snippets; agent runtime transcript files for sessions
 - **Remote:** Rust WebSocket server/client + QR code connection flow
 - **Syntax Highlighting:** highlight.js
 

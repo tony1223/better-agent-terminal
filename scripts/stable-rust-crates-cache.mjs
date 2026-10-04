@@ -11,6 +11,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 export const STABLE_CRATES = Object.freeze([
+  'bat-accounts',
+  'bat-git',
   'bat-host-support',
   'bat-remote-protocol',
   'bat-runtime',

@@ -4,25 +4,39 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+[features]
+default = ["native-keyring", "secret-storage", "network"]
+native-keyring = [
+    "dep:keyring-core",
+    "dep:windows-native-keyring-store",
+    "dep:apple-native-keyring-store",
+    "dep:linux-keyutils-keyring-store",
+]
+secret-storage = [
+    "dep:aes", "dep:aes-gcm", "dep:base64", "dep:cbc", "dep:pbkdf2",
+    "dep:rand", "dep:serde", "dep:serde_json", "dep:sha1", "dep:windows-sys",
+]
+network = ["dep:get_if_addrs", "dep:serde"]
+
 [dependencies]
-aes = "0.8"
-aes-gcm = "0.10"
-base64 = "0.22"
-cbc = "0.1"
-get_if_addrs = "0.5"
-keyring-core = "1.0.0"
-pbkdf2 = "0.12"
-rand = "0.10.1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sha1 = "0.10"
+aes = { version = "0.8", optional = true }
+aes-gcm = { version = "0.10", optional = true }
+base64 = { version = "0.22", optional = true }
+cbc = { version = "0.1", optional = true }
+get_if_addrs = { version = "0.5", optional = true }
+keyring-core = { version = "1.0.0", optional = true }
+pbkdf2 = { version = "0.12", optional = true }
+rand = { version = "0.10.1", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+sha1 = { version = "0.10", optional = true }
 
 [target.'cfg(windows)'.dependencies]
-windows-native-keyring-store = "1.0.0"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_Memory"] }
+windows-native-keyring-store = { version = "1.0.0", optional = true }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_Memory"], optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-apple-native-keyring-store = { version = "1.0.0", features = ["keychain"] }
+apple-native-keyring-store = { version = "1.0.0", features = ["keychain"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-linux-keyutils-keyring-store = "1.0.0"
+linux-keyutils-keyring-store = { version = "1.0.0", optional = true }

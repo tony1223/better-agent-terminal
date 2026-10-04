@@ -2,6 +2,7 @@
   "name": "@better-agent-terminal/node-sidecar",
   "version": "0.0.0",
   "private": true,
+  "packageManager": "pnpm@10.33.2",
   "description": "Node sidecar for the Tauri build of better-agent-terminal. Hosts the JSON-RPC server that bridges Rust (Tauri) to the Anthropic SDK + filesystem-backed handlers.",
   "type": "module",
   "main": "src/server.mjs",
@@ -12,8 +13,6 @@
     "@anthropic-ai/claude-agent-sdk": "0.3.285",
     "@anthropic-ai/sdk": "^0.123.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
-    "selfsigned": "^5.5.0",
-    "ws": "^8.21.3",
     "zod": "^4.4.3"
   }
 }

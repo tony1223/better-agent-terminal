@@ -1,0 +1,13 @@
+[package]
+name = "bat-accounts"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+bat-host-support = { path = "../bat-host-support", default-features = false, features = ["native-keyring"] }
+base64 = "0.22"
+keyring-core = "1.0.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"

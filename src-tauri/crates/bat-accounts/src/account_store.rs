@@ -1,4 +1,4 @@
-use crate::native_keyring::use_native_store;
+use bat_host_support::native_keyring::use_native_store;
 use keyring_core::Entry;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

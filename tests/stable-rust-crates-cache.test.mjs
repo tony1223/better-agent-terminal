@@ -62,17 +62,17 @@ ${name === 'bat-runtime' ? '[dependencies]\nbat-host-support = { path = "../bat-
 
   const initialKey = await prepareStableCratesCache(root)
   assert.equal((await restoreStableCratesCache(root)).matched, false)
-  assert.equal((await build()).filter(crate => !crate.fresh).length, 3)
+  assert.equal((await build()).filter(crate => !crate.fresh).length, STABLE_CRATES.length)
   assert.equal(await result(), '111')
   await recordStableCratesCache(root)
 
   // A clean checkout touches every source. A shell-only edit must leave all
-  // three independent libraries Fresh, including the runtime's catalog input.
+  // independent libraries Fresh, including the runtime's catalog input.
   for (const file of (await stableCratesKey(root)).files) await utimes(file, new Date(), new Date())
   await writeFile(join(cargoRoot, 'src/main.rs'), 'fn main() { println!("{}", bat_runtime::value() + bat_remote_protocol::value()); } // shell-only edit\n')
   assert.equal(await prepareStableCratesCache(root), initialKey)
   assert.equal((await restoreStableCratesCache(root)).matched, true)
-  assert.equal((await build()).filter(crate => crate.fresh).length, 3)
+  assert.equal((await build()).filter(crate => crate.fresh).length, STABLE_CRATES.length)
   assert.equal(await result(), '111')
 
   // Even backdated edits must invalidate the cache. Cargo's timestamp check
@@ -82,7 +82,7 @@ ${name === 'bat-runtime' ? '[dependencies]\nbat-host-support = { path = "../bat-
   await utimes(hostSource, new Date(0), new Date(0))
   assert.notEqual(await prepareStableCratesCache(root), initialKey)
   assert.equal((await restoreStableCratesCache(root)).matched, false)
-  assert.equal((await build()).filter(crate => !crate.fresh).length, 3)
+  assert.equal((await build()).filter(crate => !crate.fresh).length, STABLE_CRATES.length)
   assert.equal(await result(), '211')
   // No record after an interrupted/failed release: the old cache key remains
   // untrusted on retry, even if partial compilation artifacts survived.
@@ -90,7 +90,7 @@ ${name === 'bat-runtime' ? '[dependencies]\nbat-host-support = { path = "../bat-
   await build()
   await recordStableCratesCache(root)
   assert.equal((await restoreStableCratesCache(root)).matched, true)
-  assert.equal((await build()).filter(crate => crate.fresh).length, 3)
+  assert.equal((await build()).filter(crate => crate.fresh).length, STABLE_CRATES.length)
 
   // include_str! inputs are part of the key, not just .rs files and manifests.
   await writeFile(join(root, 'runtime-catalog.json'), '2')

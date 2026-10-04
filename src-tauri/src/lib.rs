@@ -7,6 +7,7 @@
 
 // Keep the app-facing module paths while the stable libraries compile and cache
 // independently of the Tauri shell and agent session implementations.
+use bat_accounts::{account_store, codex_account_store};
 use bat_host_support::{
     electron_safe_storage, linux_wayland, log_file, native_keyring, network_addresses, path_guard,
     subprocess,
@@ -15,7 +16,6 @@ pub use bat_remote_protocol::remote_core;
 use bat_remote_protocol::session_replay;
 use bat_runtime::{runtime_catalog, runtime_install};
 
-mod account_store;
 mod app_data;
 #[cfg(feature = "desktop")]
 mod app_menu;
@@ -23,7 +23,6 @@ mod async_rt;
 // Not desktop-gated: the usage poller runs on the headless bat-server too, so a
 // remote client paired with a headless host still gets 5h/7d numbers.
 mod claude_usage;
-mod codex_account_store;
 mod codex_app_server;
 mod codex_auth;
 mod commands;
