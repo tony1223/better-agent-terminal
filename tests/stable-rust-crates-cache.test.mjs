@@ -36,17 +36,19 @@ function restore(clean) {
   return restoreStableCratesCache(root, clean, { targetDir: target })
 }
 
-async function build(targetDir = target) {
+async function build(targetDir = target, profile = 'dev', triple) {
   const { stdout } = await execFileAsync('cargo', [
-    'build', '--manifest-path', manifest, '--target-dir', targetDir, '--message-format=json',
+    'build', '--manifest-path', manifest, '--target-dir', targetDir,
+    '--profile', profile, '--message-format=json',
+    ...(triple ? ['--target', triple] : []),
   ], { cwd: root })
   return stdout.split('\n').filter(Boolean).map(line => JSON.parse(line))
     .filter(message => message.reason === 'compiler-artifact' && message.target.kind.includes('lib'))
     .map(message => ({ name: message.target.name, fresh: message.fresh }))
 }
 
-async function assertRebuilt(names) {
-  const artifacts = await build()
+async function assertRebuilt(names, profile = 'dev', triple) {
+  const artifacts = await build(target, profile, triple)
   assert.equal(artifacts.length, STABLE_CRATES.length)
   assert.deepEqual(artifacts.filter(crate => !crate.fresh).map(crate => crate.name).sort(),
     names.map(name => name.replaceAll('-', '_')).sort())
@@ -146,6 +148,43 @@ ${dependencies[name]?.length ? '[dependencies]\n' + dependencies[name].map(dep =
   assert.deepEqual((await restore()).invalidated, ['bat-runtime'])
   await assertRebuilt(['bat-runtime'])
   assert.equal(await result(), '212')
+  await recordStableCratesCache(root)
+
+  // Release caches must be invalidated as well as development artifacts.
+  // CI backdates sources, so leaving an old release rlib makes the next
+  // release reuse the prior implementation (or fail on a newly exported API).
+  await assertRebuilt(STABLE_CRATES, 'release')
+  const releaseBinary = join(target, 'release', `cache-probe${process.platform === 'win32' ? '.exe' : ''}`)
+  const remoteSource = join(cargoRoot, 'crates', 'bat-remote-protocol', 'src/lib.rs')
+  await writeFile(remoteSource, 'pub fn value() -> u32 { 11 }\n')
+  await utimes(remoteSource, new Date(0), new Date(0))
+  assert.deepEqual((await restore()).invalidated, ['bat-remote-protocol'])
+  await assertRebuilt(['bat-remote-protocol'], 'release')
+  assert.equal((await execFileAsync(releaseBinary, [], { cwd: root })).stdout.trim(), '213')
+  await recordStableCratesCache(root)
+  await assertRebuilt(['bat-remote-protocol'])
+  // Roll back the fixture for the existing retry and migration checks.
+  await writeFile(remoteSource, 'pub fn value() -> u32 { 10 }\n')
+  assert.deepEqual((await restore()).invalidated, ['bat-remote-protocol'])
+  await assertRebuilt(['bat-remote-protocol'])
+  await assertRebuilt(['bat-remote-protocol'], 'release')
+  await recordStableCratesCache(root)
+
+  // An explicit host target needs no extra toolchain but uses the same nested
+  // cache layout as CI's cross-compiled Linux server. It must be cleared too.
+  const { stdout: rustVersion } = await execFileAsync('rustc', ['-vV'])
+  const hostTriple = rustVersion.match(/^host: (.+)$/m)[1].trim()
+  await assertRebuilt(STABLE_CRATES, 'release', hostTriple)
+  await writeFile(remoteSource, 'pub fn value() -> u32 { 11 }\n')
+  await utimes(remoteSource, new Date(0), new Date(0))
+  assert.deepEqual((await restore()).invalidated, ['bat-remote-protocol'])
+  await assertRebuilt(['bat-remote-protocol'], 'release', hostTriple)
+  const targetedBinary = join(target, hostTriple, 'release', `cache-probe${process.platform === 'win32' ? '.exe' : ''}`)
+  assert.equal((await execFileAsync(targetedBinary, [], { cwd: root })).stdout.trim(), '213')
+  await recordStableCratesCache(root)
+  await writeFile(remoteSource, 'pub fn value() -> u32 { 10 }\n')
+  assert.deepEqual((await restore()).invalidated, ['bat-remote-protocol'])
+  await assertRebuilt(['bat-remote-protocol'])
   await recordStableCratesCache(root)
 
   // A rollback to an older source must never reuse the newer artifact.

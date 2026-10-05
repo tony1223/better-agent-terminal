@@ -162,11 +162,28 @@ async function cleanStableCrates(root, names, targetDir) {
     }
     await writeFile(tagPath, `${CACHE_TAG_SIGNATURE}\n# Cargo build cache restored by BetterAgentTerminal CI.\n`, { flag: 'wx' })
   }
-  execFileSync('cargo', [
-    'clean', '--manifest-path', join(root, 'src-tauri', 'Cargo.toml'),
-    '--target-dir', targetDir,
-    ...names.flatMap(name => ['-p', name]),
-  ], { cwd: root, stdio: 'inherit' })
+  // Package-scoped clean defaults to the development profile. CI caches
+  // release artifacts too, including explicit-target builds such as musl.
+  // Clear every cached layout before backdating the changed sources.
+  const directories = (await readdir(targetDir, { withFileTypes: true }))
+    .filter(entry => entry.isDirectory() && entry.name.includes('-'))
+    .map(entry => entry.name)
+  const supportedTargets = directories.length
+    ? new Set(execFileSync('rustc', ['--print', 'target-list'], {
+      cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim().split(/\r?\n/))
+    : new Set()
+  const targets = directories.filter(name => supportedTargets.has(name))
+  for (const target of [null, ...targets]) {
+    for (const profile of ['dev', 'release']) {
+      execFileSync('cargo', [
+        'clean', '--manifest-path', join(root, 'src-tauri', 'Cargo.toml'),
+        '--target-dir', targetDir, '--profile', profile,
+        ...(target ? ['--target', target] : []),
+        ...names.flatMap(name => ['-p', name]),
+      ], { cwd: root, stdio: 'inherit' })
+    }
+  }
 }
 
 export async function recordStableCratesCache(root = repoRoot) {
