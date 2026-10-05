@@ -333,6 +333,14 @@ impl ProfileContext {
             params["profileId"] = json!(self.target_profile);
             params.as_object_mut().unwrap().remove("windowId");
         }
+        if matches!(channel, "claude:start-session" | "claude:resume-session" | "claude:client-resume") {
+            if !params.get("options").is_some_and(Value::is_object) {
+                params["options"] = json!({});
+            }
+            // This profile comes from the authenticated context, not client
+            // workspace caches. Carry it to the host's session owner registry.
+            params["options"]["profileId"] = json!(self.target_profile);
+        }
         let mut interests = self
             .interests
             .lock()

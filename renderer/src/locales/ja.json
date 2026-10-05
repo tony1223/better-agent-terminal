@@ -8,6 +8,8 @@
     "close": "閉じる",
     "delete": "削除",
     "copy": "コピー",
+    "copyLink": "リンクをコピー",
+    "copyLinkFailed": "リンクをコピーできませんでした",
     "ok": "OK",
     "apply": "適用",
     "import": "インポート",

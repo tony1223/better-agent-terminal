@@ -8,6 +8,8 @@
     "close": "Close",
     "delete": "Delete",
     "copy": "Copy",
+    "copyLink": "Copy link",
+    "copyLinkFailed": "Unable to copy the link",
     "ok": "OK",
     "apply": "Apply",
     "import": "Import",

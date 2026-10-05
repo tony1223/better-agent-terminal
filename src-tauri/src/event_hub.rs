@@ -107,6 +107,8 @@ impl RuntimeEventHubState {
         }
         notification::update_agent_activity_from_event(app, topic, &payload);
         notification::update_agent_session_meta_from_event(app, topic, &payload);
+        #[cfg(feature = "desktop")]
+        crate::window_registry::persist_agent_runtime_meta(app.app(), topic, &payload);
         notification::update_agent_session_worktree_from_event(app, topic, &payload);
         notification::add_agent_completion_from_event(app, topic, &payload);
         #[cfg(feature = "desktop")]

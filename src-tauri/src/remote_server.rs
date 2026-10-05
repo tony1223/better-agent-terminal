@@ -66,13 +66,6 @@ const MAX_REMOTE_CONNECTIONS: usize = 64;
 const MAX_REMOTE_INVOKES: usize = 128;
 const REMOTE_OUTBOUND_QUEUE_CAPACITY: usize = 256;
 const REMOTE_OUTBOUND_BURST: usize = 64;
-/// Owner label for sessions a remote client established. Remote clients are not
-/// host windows, so they have no registry id of their own. One shared, stable
-/// label keeps a reconnecting client from tripping the cross-window ownership
-/// guard — that guard exists to stop two local profiles sharing a runtime, and
-/// a client that reconnects is still the same owner.
-const REMOTE_AGENT_SESSION_WINDOW: &str = "remote-client";
-
 struct ClaudeRemoteLoginClaim {
     touched: Instant,
     login_id: Option<String>,
@@ -2052,23 +2045,19 @@ fn remote_debug_enabled() -> bool {
 /// session), cannot raise a completion notification when the turn ends, and
 /// answers every read-only probe with "no such session".
 ///
-/// Failures are logged, not propagated: registration is bookkeeping, and a
-/// remote client that cannot start a session because of it would be strictly
-/// worse off than before.
-fn register_remote_agent_session(ctx: &HostContext, channel: &str, params: &Value) {
+/// Ownership failures stop routing so a client cannot replace another
+/// profile's live session before the desktop has a chance to attach.
+fn register_remote_agent_session(ctx: &HostContext, channel: &str, params: &Value) -> Result<(), String> {
     if !matches!(
         channel,
         "claude:start-session" | "claude:resume-session" | "claude:client-resume"
     ) {
-        return;
+        return Ok(());
     }
-    let Ok(session_id) = string_param(params, "sessionId", channel) else {
-        return;
-    };
+    let session_id = string_param(params, "sessionId", channel)?;
     let options = params.get("options").cloned().unwrap_or(Value::Null);
-    if let Err(err) = notification_cmd::register_agent_session_from_options(
+    if let Err(err) = notification_cmd::register_remote_agent_session_from_options(
         ctx,
-        REMOTE_AGENT_SESSION_WINDOW,
         &session_id,
         Some(&options),
     ) {
@@ -2076,7 +2065,9 @@ fn register_remote_agent_session(ctx: &HostContext, channel: &str, params: &Valu
             ctx,
             format!("{channel}: register agent session failed: {err}"),
         );
+        return Err(err);
     }
+    Ok(())
 }
 
 fn remote_debug_log(app: &HostContext, message: impl AsRef<str>) {
@@ -2390,7 +2381,7 @@ fn invoke_sidecar_for_remote(
     // Ahead of the dispatch below so it covers both runtimes: Codex is served
     // natively by invoke_rust_for_remote, Claude is forwarded to the sidecar,
     // and locally both are registered by the same claude_start_session call.
-    register_remote_agent_session(ctx, channel, &params);
+    register_remote_agent_session(ctx, channel, &params)?;
     if let Some(result) = invoke_rust_for_remote(ctx, channel, &params) {
         return result;
     }
@@ -2757,8 +2748,8 @@ fn invoke_rust_for_remote(
             })
         }
         // Same rule as the local router's client_resume (commands/claude.rs):
-        // codex history is owned by the app-server runtime, so a client-resume
-        // for a codex session is a regular resume there. Without this arm the
+        // Codex client-resume reads the host-owned thread without restarting
+        // it or applying stale client settings. Without this arm the
         // request fell through to the node sidecar, whose codex support is
         // gone — it created a session record, emitted "Codex session started",
         // then failed on createCodexInstance, and every send into that phantom
@@ -2780,7 +2771,7 @@ fn invoke_rust_for_remote(
             }
             string_param(params, "sdkSessionId", channel).and_then(|sdk_session_id| {
                 codex
-                    .resume_session(&ctx, session_id, sdk_session_id, maybe_options)
+                    .client_resume(&ctx, session_id, sdk_session_id, maybe_options)
                     .map_err(bridge_error_message)
             })
         }
@@ -3339,6 +3330,13 @@ fn invoke_rust_for_remote(
                 let saved =
                     profile_cmd::profile_save_workspace_for_remote(&ctx, &profile_id, &data);
                 if saved {
+                    // Snapshot saving overlays host-owned identity/settings.
+                    // Broadcast what was stored, rather than the stale input.
+                    #[cfg(feature = "desktop")]
+                    let data = window_id.as_deref()
+                        .and_then(|id| window_registry::workspace_json(app, id))
+                        .or_else(|| profile_cmd::profile_workspace_json_for_remote(&ctx, &profile_id))
+                        .unwrap_or(data);
                     let payload = if let Some(window_id) = window_id.as_deref() {
                         let payload =
                             json!({ "profileId": profile_id, "windowId": window_id, "data": data });

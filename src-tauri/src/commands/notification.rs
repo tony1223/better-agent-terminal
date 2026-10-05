@@ -465,13 +465,97 @@ pub fn register_agent_session_from_options(
     if session_id.trim().is_empty() {
         return Ok(());
     }
-    let cwd = effective_notification_cwd(options).unwrap_or_default();
     // The window->profile map is GUI-only; headless sessions carry no local
     // window, so the profile id is supplied by the remote session context.
     #[cfg(feature = "desktop")]
     let profile_id = Some(window_registry::get_entry(app.app(), window_id).profile_id);
     #[cfg(not(feature = "desktop"))]
     let profile_id: Option<String> = None;
+    register_agent_session_for_owner(
+        app,
+        session_id,
+        options,
+        AgentSessionOwner {
+            window_id: Some(window_id.to_string()),
+            profile_id,
+        },
+    )
+}
+
+/// Remote attachment shares the real profile/window owner. A synthetic remote
+/// window must not claim the default profile or reset live session metadata.
+pub fn register_remote_agent_session_from_options(
+    app: &HostContext,
+    session_id: &str,
+    options: Option<&Value>,
+) -> Result<(), String> {
+    let requested_profile = options.and_then(|value| string_option(value, "profileId"));
+    let state = app.state::<AgentNotificationState>();
+    let existing = state.lock_owners().get(session_id).cloned();
+    if let Some(existing) = &existing {
+        if existing.window_id.as_deref() != Some("remote-client") {
+            if requested_profile
+                .as_ref()
+                .is_some_and(|id| existing.profile_id.as_ref() != Some(id))
+            {
+                return Err(format!(
+                    "{AGENT_SESSION_COLLISION_PREFIX}: session belongs to another profile"
+                ));
+            }
+            if state.lock().contains_key(session_id) {
+                return Ok(());
+            }
+            return register_agent_session_for_owner(app, session_id, options, existing.clone());
+        }
+    }
+    #[cfg(feature = "desktop")]
+    let saved_owner = window_registry::session_window_owner(app.app(), session_id);
+    #[cfg(not(feature = "desktop"))]
+    let saved_owner: Option<(String, String)> = None;
+    let profile_id = requested_profile
+        .or_else(|| saved_owner.as_ref().map(|(_, id)| id.clone()))
+        .or_else(|| existing.as_ref().and_then(|owner| owner.profile_id.clone()))
+        .unwrap_or_else(|| "default".into());
+    if !crate::commands::profile::profile_entry_for_context(app, &profile_id)
+        .is_some_and(|profile| profile.kind == "local")
+    {
+        return Err("Profile not found".into());
+    }
+    if saved_owner
+        .as_ref()
+        .is_some_and(|(_, id)| id != &profile_id)
+    {
+        return Err(format!(
+            "{AGENT_SESSION_COLLISION_PREFIX}: session belongs to another profile"
+        ));
+    }
+    let owner = AgentSessionOwner {
+        window_id: saved_owner.map(|(window, _)| window),
+        profile_id: Some(profile_id),
+    };
+    // Migrate the old synthetic owner without altering its live metadata.
+    if existing.is_some() {
+        state.lock_owners().insert(session_id.into(), owner.clone());
+        let mut sessions = state.lock();
+        if let Some(session) = sessions.get_mut(session_id) {
+            session.window_id = owner.window_id;
+            session.profile_id = owner.profile_id;
+            return Ok(());
+        }
+    }
+    register_agent_session_for_owner(app, session_id, options, owner)
+}
+
+fn register_agent_session_for_owner(
+    app: &HostContext,
+    session_id: &str,
+    options: Option<&Value>,
+    owner: AgentSessionOwner,
+) -> Result<(), String> {
+    if session_id.trim().is_empty() {
+        return Ok(());
+    }
+    let cwd = effective_notification_cwd(options).unwrap_or_default();
     let workspace_id = options.and_then(|value| string_option(value, "workspaceId"));
     let workspace_name = options.and_then(|value| string_option(value, "workspaceName"));
     let agent_kind = options.and_then(agent_kind_from_options);
@@ -503,8 +587,8 @@ pub fn register_agent_session_from_options(
         .then(|| options.and_then(|value| string_option(value, "worktreeBranch")))
         .flatten();
     let next = AgentNotificationSession {
-        window_id: Some(window_id.to_string()),
-        profile_id,
+        window_id: owner.window_id,
+        profile_id: owner.profile_id,
         workspace_id,
         workspace_name,
         cwd,
@@ -768,6 +852,15 @@ pub fn add_remote_client_notification(app: &HostContext, label: &str) {
 }
 
 pub fn update_agent_session_meta_from_event(app: &HostContext, topic: &str, payload: &Value) {
+    if topic == "claude:session-reset" {
+        if let (Some(state), Some(id)) = (app.try_state::<AgentNotificationState>(), payload.get("sessionId").and_then(Value::as_str)) {
+            if let Some(session) = state.lock().get_mut(id) {
+                session.sdk_session_id = None;
+                session.latest_meta = None;
+            }
+        }
+        return;
+    }
     if topic != "claude:status" {
         return;
     }
@@ -1234,6 +1327,81 @@ pub fn normalize_workspace_key(cwd: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(not(feature = "desktop"))]
+    fn phone_first_owner_allows_late_desktop_attachment_and_preserves_live_meta() {
+        let root = std::env::temp_dir().join(format!(
+            "bat-phone-owner-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let profiles = root.join("profiles");
+        std::fs::create_dir_all(&profiles).unwrap();
+        let mut profile = crate::commands::profile::default_entry();
+        profile.id = "phone-profile".into();
+        std::fs::write(
+            profiles.join("index.json"),
+            json!({ "profiles": [profile], "activeProfileIds": ["phone-profile"] }).to_string(),
+        )
+        .unwrap();
+        let state = AgentNotificationState::default();
+        let mut host =
+            crate::host_context::HeadlessHost::new(Some(root.clone()), Arc::new(|_, _| {}));
+        host.manage(state.clone());
+        let app = HostContext::from_headless(Arc::new(host));
+        let options = json!({ "profileId": "phone-profile", "cwd": "/phone", "agentPreset": "codex-agent", "codexSandboxMode": "workspace-write" });
+        register_remote_agent_session_from_options(&app, "phone-panel", Some(&options)).unwrap();
+        let owner = state.lock_owners().get("phone-panel").unwrap().clone();
+        assert_eq!(owner.window_id, None);
+        assert_eq!(owner.profile_id.as_deref(), Some("phone-profile"));
+        let desktop = AgentSessionOwner {
+            window_id: Some("main".into()),
+            profile_id: Some("phone-profile".into()),
+        };
+        assert!(agent_session_collision_message(&owner, &desktop, "phone-panel", false).is_none());
+        update_agent_session_meta_from_event(
+            &app,
+            "claude:status",
+            &json!({ "sessionId": "phone-panel", "meta": { "sdkSessionId": "phone-thread", "codexSandboxMode": "read-only", "codexApprovalPolicy": "untrusted" } }),
+        );
+        let live = get_agent_session_snapshot(&app, "phone-panel").unwrap();
+        // Reopening the phone with stale defaults must not wipe its host record.
+        register_remote_agent_session_from_options(&app, "phone-panel", Some(&options)).unwrap();
+        assert_eq!(
+            get_agent_session_snapshot(&app, "phone-panel").unwrap(),
+            live
+        );
+        assert!(register_remote_agent_session_from_options(
+            &app,
+            "phone-panel",
+            Some(&json!({ "profileId": "other", "cwd": "/other" }))
+        )
+        .is_err());
+        // Older hosts recorded this session under a synthetic default window.
+        state.lock_owners().insert(
+            "phone-panel".into(),
+            AgentSessionOwner {
+                window_id: Some("remote-client".into()),
+                profile_id: Some("default".into()),
+            },
+        );
+        register_remote_agent_session_from_options(&app, "phone-panel", Some(&options)).unwrap();
+        let migrated = get_agent_session_snapshot(&app, "phone-panel").unwrap();
+        assert_eq!(migrated.profile_id.as_deref(), Some("phone-profile"));
+        assert_eq!(migrated.sdk_session_id.as_deref(), Some("phone-thread"));
+        assert_eq!(migrated.codex_sandbox_mode.as_deref(), Some("read-only"));
+        assert_eq!(migrated.codex_approval_policy.as_deref(), Some("untrusted"));
+        update_agent_session_meta_from_event(&app, "claude:session-reset", &json!({ "sessionId": "phone-panel" }));
+        let reset = get_agent_session_snapshot(&app, "phone-panel").unwrap();
+        assert_eq!(reset.sdk_session_id, None);
+        assert_eq!(reset.latest_meta, None);
+        assert_eq!(reset.codex_sandbox_mode.as_deref(), Some("read-only"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     fn sample_entry(id: &str, cwd: &str, read: bool) -> NotificationEntry {
         NotificationEntry {

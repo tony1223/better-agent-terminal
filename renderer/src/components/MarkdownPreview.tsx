@@ -1,8 +1,9 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import hljs from 'highlight.js/lib/core'
 import { openChatMarkdownLink } from '../utils/chat-markdown'
+import { LinkContextMenu, type LinkMenuTarget } from './LinkContextMenu'
 import { prepareMarkdownHeadingIds, resolveMarkdownPreviewHref, scrollToMarkdownFragment } from '../utils/markdown-preview-links'
 
 marked.setOptions({
@@ -89,6 +90,7 @@ async function renderMermaidBlocks(container: HTMLElement) {
 
 export function MarkdownPreview({ content, filePath, fragment }: { content: string; filePath: string; fragment?: string }) {
   const containerRef = useRef<HTMLDivElement>(null)
+  const [linkMenu, setLinkMenu] = useState<LinkMenuTarget | null>(null)
   const html = renderMarkdown(content)
 
   useEffect(() => {
@@ -100,24 +102,36 @@ export function MarkdownPreview({ content, filePath, fragment }: { content: stri
   }, [html, filePath, fragment])
 
   return (
-    <div
-      ref={containerRef}
-      className="file-preview-markdown"
-      dangerouslySetInnerHTML={{ __html: html }}
-      onClick={(e) => {
-        const target = e.target as HTMLElement
-        const link = target.closest('a[href]') as HTMLAnchorElement | null
-        if (link) {
-          e.preventDefault()
+    <>
+      <div
+        ref={containerRef}
+        className="file-preview-markdown"
+        dangerouslySetInnerHTML={{ __html: html }}
+        onContextMenu={event => {
+          const link = (event.target as HTMLElement).closest('a[href]') as HTMLAnchorElement | null
+          if (!link) return
           const href = resolveMarkdownPreviewHref(link.getAttribute('href') || '', filePath)
-          if (!href) return
-          if (href.startsWith('#')) {
-            if (containerRef.current) scrollToMarkdownFragment(containerRef.current, href)
-          } else {
-            openChatMarkdownLink(href)
+          if (!href || href.startsWith('#')) return
+          event.preventDefault()
+          event.stopPropagation()
+          setLinkMenu({ x: event.clientX, y: event.clientY, href })
+        }}
+        onClick={(e) => {
+          const target = e.target as HTMLElement
+          const link = target.closest('a[href]') as HTMLAnchorElement | null
+          if (link) {
+            e.preventDefault()
+            const href = resolveMarkdownPreviewHref(link.getAttribute('href') || '', filePath)
+            if (!href) return
+            if (href.startsWith('#')) {
+              if (containerRef.current) scrollToMarkdownFragment(containerRef.current, href)
+            } else {
+              openChatMarkdownLink(href)
+            }
           }
-        }
-      }}
-    />
+        }}
+      />
+      {linkMenu && <LinkContextMenu target={linkMenu} onClose={() => setLinkMenu(null)} />}
+    </>
   )
 }

@@ -1744,6 +1744,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
           setIsStreaming(true)
         }
         setSessionMeta(m)
+        workspaceStore.applyTerminalSessionMeta(sessionId, m)
         // Track cache efficiency history (only push when values change)
         if (m.cacheReadTokens !== undefined && (m.inputTokens > 0 || m.cacheReadTokens > 0)) {
           const hist = cacheHistoryRef.current
@@ -2247,6 +2248,8 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
         const meta = await host.claude.getSessionMeta(sessionId).catch(() => null)
         if (cancelled || !meta) return
         setSessionMeta(meta as unknown as SessionMeta)
+        workspaceStore.applyTerminalSessionMeta(sessionId, meta as unknown as SessionMeta)
+        if ((meta as unknown as SessionMeta).sdkSessionId) setHasSdkSession(true)
         const mountHostModel = (meta as unknown as SessionMeta).model
         if (mountHostModel) {
           const normalizedMountModel = claudeSelectionForModelAndWindow(mountHostModel, (meta as unknown as SessionMeta).autoCompactWindow) || mountHostModel
@@ -2285,6 +2288,8 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
       if (meta) {
         const nextMeta = meta as unknown as SessionMeta
         setSessionMeta(previous => JSON.stringify(previous) === JSON.stringify(nextMeta) ? previous : nextMeta)
+        workspaceStore.applyTerminalSessionMeta(sessionId, nextMeta)
+        if (nextMeta.sdkSessionId) setHasSdkSession(true)
         const hostModel = nextMeta.model
         if (hostModel) {
           const normalizedHostModel = claudeSelectionForModelAndWindow(hostModel, nextMeta.autoCompactWindow) || hostModel

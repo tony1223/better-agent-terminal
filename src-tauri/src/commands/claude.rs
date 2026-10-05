@@ -2985,8 +2985,7 @@ impl ClaudeRuntimeRouter {
 
     // Non-destructive resume for a (re)connecting client: re-emit history
     // without disturbing a live host session when it already exists, else fall
-    // back to a normal resume. Codex history is owned by the app-server runtime,
-    // so codex sessions defer to the regular resume.
+    // back to a normal resume. Codex follows the same host-owned attach rule.
     async fn client_resume(
         &self,
         session_id: String,
@@ -2994,9 +2993,15 @@ impl ClaudeRuntimeRouter {
         options: Option<Value>,
     ) -> Result<Value, BridgeError> {
         if should_handle_codex(&options) || self.codex.is_owned(&session_id) {
-            return self
-                .resume_session(session_id, sdk_session_id, options)
-                .await;
+            let codex = self.codex.clone();
+            let app = self.app.clone();
+            return crate::async_rt::spawn_blocking(move || {
+                codex.client_resume(&app, session_id, sdk_session_id, options)
+            })
+            .await
+            .map_err(|err| BridgeError {
+                message: format!("codex app-server client resume worker failed: {err}"),
+            })?;
         }
         self.sidecar_call(
             "claude.clientResume",

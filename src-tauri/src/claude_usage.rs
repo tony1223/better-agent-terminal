@@ -453,8 +453,23 @@ fn normalize_codex_window(
 /// Pure; unit-tested. Accepts either the read response or the updated
 /// notification params — both wrap the snapshot under `rateLimits`.
 pub fn normalize_codex_rate_limits(raw: &Value) -> Option<Value> {
-    let snapshot = raw.get("rateLimits").unwrap_or(raw);
+    // Reads can contain several independent quota buckets. The status line
+    // represents the general Codex quota, never a model-specific reserve.
+    // Notifications also carry limitId: without filtering it, a 0% reserve
+    // update overwrites a non-zero Codex weekly quota in the shared cache.
+    let snapshot = raw
+        .get("rateLimitsByLimitId")
+        .and_then(|limits| limits.get("codex"))
+        .or_else(|| raw.get("rateLimits"))
+        .unwrap_or(raw);
     let obj = snapshot.as_object()?;
+    if let Some(limit_id) = obj.get("limitId").or_else(|| obj.get("limit_id")) {
+        // Missing/null IDs are supported for older app-servers. Explicit
+        // IDs must match; zero itself is valid after a real quota reset.
+        if !limit_id.is_null() && limit_id.as_str() != Some("codex") {
+            return None;
+        }
+    }
     if !obj.contains_key("primary") && !obj.contains_key("secondary") {
         return None;
     }
@@ -666,6 +681,65 @@ mod tests {
         );
         assert_eq!(out["sevenDay"]["utilization"].as_f64(), Some(0.08));
         assert_eq!(out["planType"].as_str(), Some("plus"));
+    }
+
+    #[test]
+    fn reserve_updates_do_not_overwrite_codex_weekly_quota() {
+        let mut cached = normalize_codex_rate_limits(&json!({
+            "rateLimits": {
+                "limitId": "codex",
+                "primary": { "usedPercent": 29.0, "windowDurationMins": 10080 },
+                "secondary": null
+            }
+        }))
+        .unwrap();
+        for id_key in ["limitId", "limit_id"] {
+            for id in ["base_model_inference", "codex_other_model"] {
+                let mut limits = json!({
+                    "primary": { "usedPercent": 0.0, "windowDurationMins": 10080 },
+                    "secondary": null
+                });
+                limits[id_key] = json!(id);
+                let update = normalize_codex_rate_limits(&json!({ "rateLimits": limits }));
+                assert!(update.is_none(), "must ignore quota bucket {id}");
+                if let Some(update) = update {
+                    cached = merge_codex_usage_snapshot(Some(&cached), &update);
+                }
+                assert_eq!(cached["sevenDay"]["utilization"].as_f64(), Some(0.29));
+            }
+        }
+        // Do not 'fix' this by rejecting all zeroes: genuine resets must work.
+        let reset = normalize_codex_rate_limits(&json!({
+            "rateLimits": {
+                "limitId": "codex",
+                "primary": { "usedPercent": 0.0, "windowDurationMins": 10080 }
+            }
+        }))
+        .unwrap();
+        cached = merge_codex_usage_snapshot(Some(&cached), &reset);
+        assert_eq!(cached["sevenDay"]["utilization"].as_f64(), Some(0.0));
+    }
+
+    #[test]
+    fn codex_read_prefers_general_bucket_from_limit_map() {
+        let out = normalize_codex_rate_limits(&json!({
+            "rateLimits": {
+                "limitId": "base_model_inference",
+                "primary": { "usedPercent": 0.0, "windowDurationMins": 10080 }
+            },
+            "rateLimitsByLimitId": {
+                "base_model_inference": {
+                    "limitId": "base_model_inference",
+                    "primary": { "usedPercent": 0.0, "windowDurationMins": 10080 }
+                },
+                "codex": {
+                    "limitId": "codex",
+                    "primary": { "usedPercent": 29.0, "windowDurationMins": 10080 }
+                }
+            }
+        }))
+        .unwrap();
+        assert_eq!(out["sevenDay"]["utilization"].as_f64(), Some(0.29));
     }
 
     #[test]

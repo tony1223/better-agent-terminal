@@ -5152,6 +5152,12 @@ impl CodexAppServerState {
         session_id: String,
         options: Option<Value>,
     ) -> Result<Value, BridgeError> {
+        let operation_lock = self.turn_operation_lock(&session_id);
+        let guard = operation_lock.lock()
+            .map_err(|_| bridge_error("Codex turn operation lock poisoned"))?;
+        if let Some(existing) = self.attach_existing_session(app, &session_id) {
+            return Ok(existing);
+        }
         let options = options.unwrap_or(Value::Null);
         let cwd = effective_cwd(&options, "startSession")?;
         let model = options
@@ -5284,6 +5290,8 @@ impl CodexAppServerState {
             }
         }
         self.take_thread_ownership(app, &thread_id, &session_id);
+        // send_message takes the same operation lock.
+        drop(guard);
 
         if let Some(prompt) = options.get("prompt").and_then(Value::as_str) {
             if !prompt.trim().is_empty() {
@@ -5291,6 +5299,36 @@ impl CodexAppServerState {
             }
         }
         Ok(json!({ "ok": true, "sessionId": session_id, "sdkSessionId": thread_id }))
+    }
+
+    fn attach_existing_session(&self, app: &HostContext, session_id: &str) -> Option<Value> {
+        let (thread_id, meta, messages) = {
+            let sessions = self.inner.sessions.lock().expect("codex sessions lock");
+            let session = sessions.get(session_id)?;
+            (session.thread_id.clone(), session.metadata(), session.messages.clone())
+        };
+        emit(app, "claude:history", session_id, "items", json!(messages));
+        emit(app, "claude:status", session_id, "meta", meta);
+        Some(json!({ "ok": true, "sessionId": session_id,
+            "sdkSessionId": thread_id, "alreadyLive": true }))
+    }
+
+    /// Reopening a client view reads the host-owned thread and its settings.
+    /// A stale client must never select a different thread for a live session.
+    pub fn client_resume(
+        &self,
+        app: &HostContext,
+        session_id: String,
+        sdk_session_id: String,
+        options: Option<Value>,
+    ) -> Result<Value, BridgeError> {
+        let operation_lock = self.turn_operation_lock(&session_id);
+        let _guard = operation_lock.lock()
+            .map_err(|_| bridge_error("Codex turn operation lock poisoned"))?;
+        if let Some(existing) = self.attach_existing_session(app, &session_id) {
+            return Ok(existing);
+        }
+        self.resume_session_locked(app, session_id, sdk_session_id, options)
     }
 
     pub fn inject_context(
@@ -5362,6 +5400,19 @@ impl CodexAppServerState {
     }
 
     pub fn resume_session(
+        &self,
+        app: &HostContext,
+        session_id: String,
+        sdk_session_id: String,
+        options: Option<Value>,
+    ) -> Result<Value, BridgeError> {
+        let operation_lock = self.turn_operation_lock(&session_id);
+        let _guard = operation_lock.lock()
+            .map_err(|_| bridge_error("Codex turn operation lock poisoned"))?;
+        self.resume_session_locked(app, session_id, sdk_session_id, options)
+    }
+
+    fn resume_session_locked(
         &self,
         app: &HostContext,
         session_id: String,
@@ -6475,6 +6526,7 @@ impl CodexAppServerState {
             .map(|session| {
                 json!({
                     "sessionId": session.session_id,
+                    "meta": session.metadata(),
                     "messages": session.messages,
                     "isStreaming": session.is_running,
                     "streamingText": session.assistant_text,
@@ -8351,6 +8403,73 @@ mod tests {
             warned_stale_turn_ids: Vec::new(),
             stale_turn_event_counts: HashMap::new(),
         }
+    }
+
+    #[cfg(not(feature = "desktop"))]
+    fn session_sync_test_host() -> (HostContext, Arc<Mutex<Vec<(String, Value)>>>) {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = events.clone();
+        let mut host = crate::host_context::HeadlessHost::new(None, Arc::new(move |topic, payload| {
+            captured.lock().unwrap().push((topic.into(), payload.clone()));
+        }));
+        host.manage(crate::event_hub::RuntimeEventHubState::default());
+        host.manage(crate::commands::notification::AgentNotificationState::default());
+        (HostContext::from_headless(Arc::new(host)), events)
+    }
+
+    #[test]
+    #[cfg(not(feature = "desktop"))]
+    fn late_client_attach_and_repeated_start_keep_phone_thread_and_running_turn() {
+        let (app, events) = session_sync_test_host();
+        let state = CodexAppServerState::default();
+        let mut session = test_codex_session();
+        session.sandbox_mode = "read-only".into();
+        session.approval_policy = "untrusted".into();
+        session.messages = vec![json!({ "id": "phone-message", "content": "Phone conversation" })];
+        session.assistant_text = "Partial answer".into();
+        let before = session.metadata();
+        state.inner.sessions.lock().unwrap().insert("session-1".into(), session);
+        let options = Some(json!({ "cwd": "/stale", "model": "stale", "codexSandboxMode": "danger-full-access", "codexApprovalPolicy": "never" }));
+        let attached = state.client_resume(&app, "session-1".into(), "stale-thread".into(), options).unwrap();
+        assert_eq!(attached["sdkSessionId"], "thread-1");
+        assert_eq!(attached["alreadyLive"], true);
+        // A second client racing to start the same BAT panel cannot create a
+        // replacement thread or resend a prompt into the ongoing turn.
+        let started = state.start_session(&app, "session-1".into(), Some(json!({ "prompt": "do not resend" }))).unwrap();
+        assert_eq!(started["sdkSessionId"], "thread-1");
+        let snapshot = state.get_session_state("session-1").unwrap();
+        let mut after_meta = snapshot["meta"].clone();
+        let mut before_meta = before;
+        after_meta.as_object_mut().unwrap().remove("durationMs");
+        before_meta.as_object_mut().unwrap().remove("durationMs");
+        assert_eq!(after_meta, before_meta);
+        assert_eq!(snapshot["messages"][0]["id"], "phone-message");
+        assert_eq!(snapshot["streamingText"], "Partial answer");
+        let sessions = state.inner.sessions.lock().unwrap();
+        let session = sessions.get("session-1").unwrap();
+        assert_eq!(session.active_turn_id.as_deref(), Some("turn-1"));
+        assert!(!session.abort_requested);
+        assert_eq!(session.sandbox_mode, "read-only");
+        assert_eq!(session.approval_policy, "untrusted");
+        assert_eq!(events.lock().unwrap().iter().filter(|(topic, _)| topic == "claude:history").count(), 2);
+    }
+
+    #[test]
+    #[cfg(not(feature = "desktop"))]
+    fn late_attachment_reads_phone_permission_changes_without_changing_identity() {
+        let (app, events) = session_sync_test_host();
+        let state = CodexAppServerState::default();
+        state.inner.sessions.lock().unwrap().insert("session-1".into(), test_codex_session());
+        assert_eq!(state.set_sandbox_mode(&app, "session-1", "read-only".into()), Some(json!(true)));
+        assert_eq!(state.set_approval_policy(&app, "session-1", "untrusted".into()), Some(json!(true)));
+        state.client_resume(&app, "session-1".into(), "stale-thread".into(), None).unwrap();
+        let captured = events.lock().unwrap();
+        let statuses: Vec<_> = captured.iter().filter(|(topic, _)| topic == "claude:status").collect();
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].1["meta"]["codexSandboxMode"], "read-only");
+        assert_eq!(statuses[0].1["meta"]["codexApprovalPolicy"], "untrusted");
+        assert_eq!(statuses[0].1["meta"]["sdkSessionId"], "thread-1");
+        assert_eq!(statuses[0].1["meta"]["isStreaming"], true);
     }
 
     #[test]

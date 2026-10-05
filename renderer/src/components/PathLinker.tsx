@@ -2,6 +2,7 @@ import { host } from '../host-api'
 import { memo, useMemo, useState, useEffect, useCallback, useRef, Fragment } from 'react'
 import { useTranslation } from 'react-i18next'
 import { RevealPathMenu, type RevealPathTarget } from './RevealPathMenu'
+import { LinkContextMenu, type LinkMenuTarget } from './LinkContextMenu'
 import { MarkdownPreview } from './MarkdownPreview'
 import { CsvPreview } from './CsvPreview'
 import { HtmlPreview } from './HtmlPreview'
@@ -474,7 +475,7 @@ export const LinkedText = memo(function LinkedText({ text }: LinkedTextProps) {
   const [previewPath, setPreviewPath] = useState<string | null>(null)
   // One menu for the whole block rather than one per link: a long agent reply can
   // cite hundreds of paths.
-  const [menu, setMenu] = useState<RevealPathTarget | null>(null)
+  const [menu, setMenu] = useState<RevealPathTarget | LinkMenuTarget | null>(null)
 
   const handleClick = useCallback((path: string) => {
     if (path.endsWith('.md')) {
@@ -490,6 +491,12 @@ export const LinkedText = memo(function LinkedText({ text }: LinkedTextProps) {
     e.preventDefault()
     e.stopPropagation()
     setMenu({ x: e.clientX, y: e.clientY, path })
+  }, [])
+
+  const handleUrlContextMenu = useCallback((e: React.MouseEvent, href: string) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setMenu({ x: e.clientX, y: e.clientY, href })
   }, [])
 
   const handleUrl = useCallback((url: string, e: React.MouseEvent) => {
@@ -520,21 +527,23 @@ export const LinkedText = memo(function LinkedText({ text }: LinkedTextProps) {
         }
         if (token.type === 'url') {
           return (
-            <a key={i} className="path-link url-link" href={token.href} onClick={(e) => handleUrl(token.href!, e)} title={token.href}>
+            <a key={i} className="path-link url-link" href={token.href} onClick={(e) => handleUrl(token.href!, e)} onContextMenu={(e) => handleUrlContextMenu(e, token.href!)} title={token.href}>
               {token.text}
             </a>
           )
         }
         if (token.type === 'mdlink') {
           return (
-            <a key={i} className="path-link url-link" href={token.href} onClick={(e) => handleUrl(token.href!, e)} title={token.href}>
+            <a key={i} className="path-link url-link" href={token.href} onClick={(e) => handleUrl(token.href!, e)} onContextMenu={(e) => handleUrlContextMenu(e, token.href!)} title={token.href}>
               {token.text}
             </a>
           )
         }
         return <Fragment key={i}>{token.text}</Fragment>
       })}
-      {menu && <RevealPathMenu target={menu} onClose={() => setMenu(null)} />}
+      {menu && ('href' in menu
+        ? <LinkContextMenu target={menu} onClose={() => setMenu(null)} />
+        : <RevealPathMenu target={menu} onClose={() => setMenu(null)} />)}
       {previewPath && (
         <FilePreviewModal
           filePath={previewPath}

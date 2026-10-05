@@ -182,19 +182,26 @@ pub fn profile_save_workspace_for_remote(app: &HostContext, profile_id: &str, da
     let Ok(workspace) = serde_json::from_str::<Value>(data) else {
         return false;
     };
-    let wrote = update_index_at(&dir, |index| {
-        let profile = index
-            .profiles
-            .iter()
-            .find(|profile| profile.id == profile_id && profile.kind == "local")
-            .cloned()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "profile not found"))?;
-        let snapshot = snapshot_from_workspace(&profile, workspace);
-        write_snapshot_at(&dir, profile_id, &snapshot)?;
-        let _ = activate_profile_in_index(index, profile_id);
-        Ok(())
-    })
-    .is_ok();
+    let write = |workspace| {
+        update_index_at(&dir, |index| {
+            let profile = index
+                .profiles
+                .iter()
+                .find(|profile| profile.id == profile_id && profile.kind == "local")
+                .cloned()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "profile not found"))?;
+            let snapshot = snapshot_from_workspace(&profile, workspace);
+            write_snapshot_at(&dir, profile_id, &snapshot)?;
+            let _ = activate_profile_in_index(index, profile_id);
+            Ok(())
+        })
+        .is_ok()
+    };
+    #[cfg(feature = "desktop")]
+    let wrote =
+        window_registry::with_runtime_workspace_meta(app.app(), profile_id, workspace, write);
+    #[cfg(not(feature = "desktop"))]
+    let wrote = write(workspace);
     if wrote {
         emit_profile_changed(app);
     }

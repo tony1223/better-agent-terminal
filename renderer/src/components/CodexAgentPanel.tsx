@@ -460,6 +460,18 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
     if (typeof globalDefault === 'string' && CODEX_EFFORT_LEVELS.includes(globalDefault as CodexEffortLevel)) return globalDefault
     return 'high'
   })
+  const adoptHostSessionMeta = useCallback((meta: SessionMeta) => {
+    workspaceStore.applyTerminalSessionMeta(sessionId, meta)
+    if (Object.prototype.hasOwnProperty.call(meta, 'sdkSessionId')) setHasSdkSession(!!meta.sdkSessionId)
+    const sandbox = meta.codexSandboxMode
+    if (sandbox === 'read-only' || sandbox === 'workspace-write' || sandbox === 'danger-full-access') {
+      setCodexSandboxMode(sandbox)
+    }
+    const approval = meta.codexApprovalPolicy
+    if (approval === 'untrusted' || approval === 'on-request' || approval === 'never') {
+      setCodexApprovalPolicy(approval)
+    }
+  }, [sessionId])
   const [claudeUsage, setClaudeUsage] = useState(workspaceStore.claudeUsage)
   const [usageAccount, setUsageAccount] = useState(workspaceStore.usageAccount)
   const [rateLimits, setRateLimits] = useState<Record<string, { resetsAt: number; utilization: number | null; isUsingOverage: boolean }>>({})
@@ -1677,6 +1689,7 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
           setIsStreaming(true)
         }
         setSessionMeta(m)
+        adoptHostSessionMeta(m)
         // Track cache efficiency history (only push when values change)
         if (m.inputTokens > 0 && m.cacheReadTokens !== undefined) {
           const hist = cacheHistoryRef.current
@@ -1990,7 +2003,7 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
       try {
         await ensureSessionStarted()
         if (cancelled) return
-        const existingState = await host.claude.getSessionState(sessionId).catch(() => null)
+        const existingState = await host.claude.getSessionState(sessionId)
         if (cancelled || !existingState) return
         const existingMessages = normalizeMessageItems(existingState.messages)
         historyLoadedRef.current = true
@@ -2041,6 +2054,7 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
         const meta = await host.claude.getSessionMeta(sessionId).catch(() => null)
         if (cancelled || !meta) return
         setSessionMeta(meta as unknown as SessionMeta)
+        adoptHostSessionMeta(meta as unknown as SessionMeta)
         if ((meta as unknown as SessionMeta).model) {
           const nextModel = (meta as unknown as SessionMeta).model!
           setCurrentModel(prev => isCodexSession ? nextModel : (prev || nextModel))
@@ -2080,6 +2094,7 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
       if (meta) {
         const nextMeta = meta as unknown as SessionMeta
         setSessionMeta(previous => JSON.stringify(previous) === JSON.stringify(nextMeta) ? previous : nextMeta)
+        adoptHostSessionMeta(nextMeta)
         if (nextMeta.model) {
           const nextModel = nextMeta.model
           setCurrentModel(prev => isCodexSession ? nextModel : (prev || nextModel))
@@ -2120,7 +2135,7 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
         : (effortLevelForClaudeMode(effectiveEffortMode) || 'high')
       const effectiveUltracode = !isCodexSession && isUltracodeEffortMode(effectiveEffortMode)
 
-      const existingState = await host.claude.getSessionState(sessionId).catch(() => null)
+      const existingState = await host.claude.getSessionState(sessionId)
       if (existingState) {
         dlog(`${stag} ensureSessionStarted: existing session`)
         return

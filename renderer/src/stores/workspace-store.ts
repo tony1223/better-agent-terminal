@@ -327,6 +327,8 @@ class WorkspaceStore {
   }
 
   setTerminalSdkSessionId(terminalId: string, sdkSessionId: string | undefined): void {
+    const terminal = this.state.terminals.find(t => t.id === terminalId)
+    if (!terminal || terminal.sdkSessionId === sdkSessionId) return
     this.state = {
       ...this.state,
       terminals: this.state.terminals.map(t =>
@@ -335,6 +337,39 @@ class WorkspaceStore {
     }
     this.notify()
     this.save()
+  }
+
+  /** Adopt host identity and Codex permissions together, including on late attachment. */
+  applyTerminalSessionMeta(terminalId: string, meta: {
+    sdkSessionId?: string | null
+    codexSandboxMode?: string
+    codexApprovalPolicy?: string
+  }): void {
+    const terminal = this.state.terminals.find(t => t.id === terminalId)
+    if (!terminal) return
+    const params: Record<string, string> = {}
+    if (meta.codexSandboxMode && ['read-only', 'workspace-write', 'danger-full-access'].includes(meta.codexSandboxMode)) {
+      params.sandboxMode = meta.codexSandboxMode
+    }
+    if (meta.codexApprovalPolicy && ['untrusted', 'on-request', 'never'].includes(meta.codexApprovalPolicy)) {
+      params.approvalPolicy = meta.codexApprovalPolicy
+    }
+    const hasSdkId = Object.prototype.hasOwnProperty.call(meta, 'sdkSessionId')
+      && (meta.sdkSessionId === null || typeof meta.sdkSessionId === 'string')
+    const sdkSessionId = hasSdkId ? (meta.sdkSessionId || undefined) : terminal.sdkSessionId
+    if (terminal.sdkSessionId === sdkSessionId
+      && Object.entries(params).every(([key, value]) => terminal.agentParams?.[key] === value)) return
+    this.state = {
+      ...this.state,
+      terminals: this.state.terminals.map(t => t.id === terminalId ? {
+        ...t, sdkSessionId,
+        ...(Object.keys(params).length ? {
+          agentParams: normalizeAgentParams(t.agentPreset, { ...t.agentParams, ...params }),
+        } : {}),
+      } : t),
+    }
+    this.notify()
+    void this.save()
   }
 
   setTerminalClaudeCliSessionId(terminalId: string, claudeCliSessionId: string | undefined): void {

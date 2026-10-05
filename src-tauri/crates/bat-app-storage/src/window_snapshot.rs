@@ -38,6 +38,75 @@ pub struct WindowEntry {
     pub last_active_at: i64,
 }
 
+/// Persist only host-owned identity and Codex permissions, leaving layout and
+/// other agent parameters untouched. Partial status events must not erase them.
+pub fn terminal_runtime_meta(meta: &Value) -> Value {
+    let mut result = serde_json::Map::new();
+    if let Some(id) = meta.get("sdkSessionId") {
+        if id.is_null() || id.as_str().is_some_and(|id| !id.is_empty()) {
+            result.insert("sdkSessionId".into(), id.clone());
+        }
+    }
+    for (key, allowed) in [
+        (
+            "codexSandboxMode",
+            &["read-only", "workspace-write", "danger-full-access"][..],
+        ),
+        (
+            "codexApprovalPolicy",
+            &["untrusted", "on-request", "never"][..],
+        ),
+    ] {
+        if let Some(value) = meta.get(key).and_then(Value::as_str) {
+            if allowed.contains(&value) {
+                result.insert(key.into(), json!(value));
+            }
+        }
+    }
+    Value::Object(result)
+}
+
+pub fn apply_terminal_runtime_meta(terminals: &mut Value, session_id: &str, meta: &Value) -> bool {
+    let Some(terminals) = terminals.as_array_mut() else {
+        return false;
+    };
+    let meta = terminal_runtime_meta(meta);
+    let mut changed = false;
+    for terminal in terminals {
+        if terminal.get("id").and_then(Value::as_str) != Some(session_id) {
+            continue;
+        }
+        let Some(terminal) = terminal.as_object_mut() else {
+            continue;
+        };
+        if let Some(id) = meta.get("sdkSessionId") {
+            if id.is_null() {
+                changed |= terminal.remove("sdkSessionId").is_some();
+            } else if terminal.get("sdkSessionId") != Some(id) {
+                terminal.insert("sdkSessionId".into(), id.clone());
+                changed = true;
+            }
+        }
+        for (source, target) in [
+            ("codexSandboxMode", "sandboxMode"),
+            ("codexApprovalPolicy", "approvalPolicy"),
+        ] {
+            if let Some(value) = meta.get(source) {
+                let params = terminal.entry("agentParams").or_insert_with(|| json!({}));
+                if !params.is_object() {
+                    *params = json!({});
+                }
+                let params = params.as_object_mut().expect("agent params object");
+                if params.get(target) != Some(value) {
+                    params.insert(target.into(), value.clone());
+                    changed = true;
+                }
+            }
+        }
+    }
+    changed
+}
+
 pub fn value_array_len(value: &Value) -> usize {
     value.as_array().map_or(0, Vec::len)
 }
@@ -641,6 +710,63 @@ mod tests {
             raw[0].get("snapshot").is_none(),
             "snapshot fields remain flattened"
         );
+    }
+
+    #[test]
+    fn phone_session_identity_and_permissions_survive_snapshot_restore() {
+        let store = TempStore::new();
+        let profile_path = store.0.join("profiles/default.json");
+        let mut snapshot = snapshot_from_workspace_value(json!({
+            "workspaces": [{ "id": "ws", "name": "Project" }],
+            "activeWorkspaceId": "ws",
+            "terminals": [
+                { "id": "phone-panel", "workspaceId": "ws", "sdkSessionId": "old-thread",
+                  "agentParams": { "sandboxMode": "workspace-write", "approvalPolicy": "on-request", "effortLevel": "high" } },
+                { "id": "other-panel", "sdkSessionId": "other-thread" }
+            ]
+        }));
+        let unrelated = snapshot.terminals[1].clone();
+        let host_meta = json!({ "sdkSessionId": "phone-thread", "codexSandboxMode": "danger-full-access", "codexApprovalPolicy": "never", "inputTokens": 42 });
+        assert!(apply_terminal_runtime_meta(
+            &mut snapshot.terminals,
+            "phone-panel",
+            &host_meta
+        ));
+        assert!(!apply_terminal_runtime_meta(
+            &mut snapshot.terminals,
+            "phone-panel",
+            &host_meta
+        ));
+        write_profile_snapshot_at(&profile_path, "default", "Default", &[snapshot]);
+        let restored = read_profile_snapshot_at(&profile_path);
+        let terminal = &restored[0].terminals[0];
+        assert_eq!(terminal["id"], "phone-panel");
+        assert_eq!(terminal["sdkSessionId"], "phone-thread");
+        assert_eq!(terminal["agentParams"]["sandboxMode"], "danger-full-access");
+        assert_eq!(terminal["agentParams"]["approvalPolicy"], "never");
+        assert_eq!(terminal["agentParams"]["effortLevel"], "high");
+        assert!(terminal.get("inputTokens").is_none());
+        assert_eq!(restored[0].terminals[1], unrelated);
+        assert_eq!(restored[0].active_workspace_id.as_deref(), Some("ws"));
+    }
+
+    #[test]
+    fn partial_runtime_meta_preserves_identity_and_explicit_reset_clears_it() {
+        let mut terminals = json!([{ "id": "panel", "sdkSessionId": "thread", "agentParams": { "sandboxMode": "read-only", "approvalPolicy": "untrusted" } }]);
+        let original = terminals.clone();
+        assert!(!apply_terminal_runtime_meta(
+            &mut terminals,
+            "panel",
+            &json!({ "isStreaming": true, "codexSandboxMode": "invalid", "codexApprovalPolicy": null })
+        ));
+        assert_eq!(terminals, original);
+        assert!(apply_terminal_runtime_meta(
+            &mut terminals,
+            "panel",
+            &json!({ "sdkSessionId": null })
+        ));
+        assert!(terminals[0].get("sdkSessionId").is_none());
+        assert_eq!(terminals[0]["agentParams"], original[0]["agentParams"]);
     }
 
     #[test]

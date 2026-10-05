@@ -30,6 +30,10 @@ fn debug_registry_log(app: &AppHandle, message: impl AsRef<str>) {
 #[derive(Default)]
 pub struct WindowRegistryState {
     entries: Mutex<Vec<WindowEntry>>,
+    // Runtime status owns these values even when no renderer panel is mounted.
+    // Hold this lock through snapshot writes so a stale client save cannot
+    // overwrite a newer identity/permission broadcast.
+    runtime_meta: Mutex<HashMap<String, (Option<String>, Value)>>,
     // One-shot markers for windows created by app_new_window (Cmd+N) so the
     // renderer knows to skip profile.load() — those windows should land
     // empty instead of inheriting the bound profile's saved workspaces.
@@ -342,13 +346,142 @@ pub fn window_index(app: &AppHandle, window_id: &str) -> u32 {
     window_index_for_entries(&entries, &live_window_ids, &entry)
 }
 
+pub fn session_window_owner(app: &AppHandle, session_id: &str) -> Option<(String, String)> {
+    let state = app.state::<WindowRegistryState>();
+    let mut entries = state.entries.lock().unwrap();
+    ensure_entries_ready(app, &mut entries);
+    entries
+        .iter()
+        .find(|entry| {
+            entry
+                .snapshot
+                .terminals
+                .as_array()
+                .is_some_and(|terminals| {
+                    terminals.iter().any(|terminal| {
+                        terminal.get("id").and_then(Value::as_str) == Some(session_id)
+                    })
+                })
+        })
+        .map(|entry| (entry.id.clone(), entry.profile_id.clone()))
+}
+
 pub fn workspace_json(app: &AppHandle, window_id: &str) -> Option<String> {
     let entry = ensure_entry(app, window_id);
     serde_json::to_string_pretty(&workspace_value_from_snapshot(&entry.snapshot)).ok()
 }
 
+fn apply_runtime_workspace_meta(
+    workspace: &mut Value,
+    profile_id: &str,
+    runtime_meta: &HashMap<String, (Option<String>, Value)>,
+) {
+    let Some(terminals) = workspace.get_mut("terminals") else {
+        return;
+    };
+    for (session_id, (owner, meta)) in runtime_meta {
+        if owner.as_deref().is_none_or(|id| id == profile_id) {
+            apply_terminal_runtime_meta(terminals, session_id, meta);
+        }
+    }
+}
+
+pub fn with_runtime_workspace_meta<T>(
+    app: &AppHandle,
+    profile_id: &str,
+    mut workspace: Value,
+    write: impl FnOnce(Value) -> T,
+) -> T {
+    let state = app.state::<WindowRegistryState>();
+    let meta = state.runtime_meta.lock().unwrap();
+    apply_runtime_workspace_meta(&mut workspace, profile_id, &meta);
+    write(workspace)
+}
+
+pub fn persist_agent_runtime_meta(app: &AppHandle, topic: &str, payload: &Value) {
+    if topic != "claude:status" && topic != "claude:session-reset" {
+        return;
+    }
+    let Some(session_id) = payload.get("sessionId").and_then(Value::as_str) else {
+        return;
+    };
+    let update = if topic == "claude:session-reset" {
+        json!({ "sdkSessionId": null })
+    } else {
+        let Some(meta) = payload.get("meta") else { return; };
+        terminal_runtime_meta(meta)
+    };
+    if update.as_object().is_none_or(|meta| meta.is_empty()) {
+        return;
+    }
+    let ctx = crate::host_context::HostContext::from_app(app.clone());
+    let profile_id = crate::commands::notification::get_agent_session_snapshot(&ctx, session_id)
+        .and_then(|session| session.profile_id);
+    let Some(state) = app.try_state::<WindowRegistryState>() else {
+        return;
+    };
+    let mut runtime_meta = state.runtime_meta.lock().unwrap();
+    let previous = runtime_meta.get(session_id).cloned();
+    let mut merged = previous
+        .as_ref()
+        .map(|(_, meta)| meta.clone())
+        .unwrap_or_else(|| json!({}));
+    merged
+        .as_object_mut()
+        .unwrap()
+        .extend(update.as_object().unwrap().clone());
+    let owner = profile_id.or_else(|| previous.as_ref().and_then(|(owner, _)| owner.clone()));
+    if previous.as_ref() == Some(&(owner.clone(), merged.clone())) {
+        return;
+    }
+    runtime_meta.insert(session_id.into(), (owner.clone(), merged.clone()));
+    let mut entries = state.entries.lock().unwrap();
+    ensure_entries_ready(app, &mut entries);
+    let mut affected = HashSet::new();
+    let mut found = false;
+    for entry in entries.iter_mut() {
+        if owner.as_deref().is_some_and(|id| id != entry.profile_id) {
+            continue;
+        }
+        found |= entry
+            .snapshot
+            .terminals
+            .as_array()
+            .is_some_and(|terminals| {
+                terminals
+                    .iter()
+                    .any(|terminal| terminal.get("id").and_then(Value::as_str) == Some(session_id))
+            });
+        if apply_terminal_runtime_meta(&mut entry.snapshot.terminals, session_id, &merged) {
+            affected.insert(entry.profile_id.clone());
+            if entry.id == "main" {
+                write_global_workspace(app, &entry.snapshot);
+            }
+        }
+    }
+    if !affected.is_empty() {
+        persist_entries(app, &entries);
+        write_profile_snapshots_for_ids(app, &entries, &affected);
+    }
+    // A phone may be the only client viewing a profile. Update its existing
+    // persisted snapshot without opening or activating a desktop window.
+    if !found {
+        if let Some(profile_id) = owner {
+            let mut windows = read_profile_snapshot(app, &profile_id);
+            let mut changed = false;
+            for snapshot in &mut windows {
+                changed |=
+                    apply_terminal_runtime_meta(&mut snapshot.terminals, session_id, &merged);
+            }
+            if changed {
+                write_profile_snapshot(app, &profile_id, &windows);
+            }
+        }
+    }
+}
+
 pub fn save_workspace_json(app: &AppHandle, window_id: &str, data: &str) -> bool {
-    let Ok(value) = serde_json::from_str::<Value>(data) else {
+    let Ok(mut value) = serde_json::from_str::<Value>(data) else {
         debug_registry_log(
             app,
             format!(
@@ -359,6 +492,7 @@ pub fn save_workspace_json(app: &AppHandle, window_id: &str, data: &str) -> bool
         return false;
     };
     let state = app.state::<WindowRegistryState>();
+    let runtime_meta = state.runtime_meta.lock().unwrap();
     let mut entries = state.entries.lock().unwrap();
     ensure_entries_ready(app, &mut entries);
     // Ignore saves from windows that no longer have a registry entry.
@@ -377,6 +511,7 @@ pub fn save_workspace_json(app: &AppHandle, window_id: &str, data: &str) -> bool
         return false;
     };
     let mut entry = entries[slot_index].clone();
+    apply_runtime_workspace_meta(&mut value, &entry.profile_id, &runtime_meta);
     entry.snapshot = snapshot_from_workspace_value(value);
     entry.last_active_at = now_millis();
     entries[slot_index] = entry.clone();
@@ -404,9 +539,11 @@ pub fn load_profile_workspace_into_window(
     app: &AppHandle,
     window_id: &str,
     profile_id: &str,
-    workspace: Value,
+    mut workspace: Value,
 ) -> bool {
     let state = app.state::<WindowRegistryState>();
+    let runtime_meta = state.runtime_meta.lock().unwrap();
+    apply_runtime_workspace_meta(&mut workspace, profile_id, &runtime_meta);
     let mut entries = state.entries.lock().unwrap();
     ensure_entries_ready(app, &mut entries);
     let mut entry = entries
@@ -779,4 +916,30 @@ pub fn remove_profile_window_entry(app: &AppHandle, window_id: &str) -> Option<S
     let windows = profile_windows(&entries, &profile_id);
     write_profile_snapshot(app, &profile_id, &windows);
     Some(profile_id)
+}
+
+#[cfg(test)]
+mod runtime_meta_tests {
+    use super::*;
+
+    #[test]
+    fn stale_workspace_save_retains_the_host_thread_and_scopes_for_its_profile() {
+        let mut workspace = json!({ "terminals": [{ "id": "panel", "sdkSessionId": "stale", "agentParams": { "sandboxMode": "workspace-write", "approvalPolicy": "on-request", "effortLevel": "high" } }] });
+        let runtime_meta = HashMap::from([(
+            "panel".into(),
+            (
+                Some("phone-profile".into()),
+                json!({ "sdkSessionId": "live", "codexSandboxMode": "read-only", "codexApprovalPolicy": "untrusted" }),
+            ),
+        )]);
+        let original = workspace.clone();
+        apply_runtime_workspace_meta(&mut workspace, "other-profile", &runtime_meta);
+        assert_eq!(workspace, original);
+        apply_runtime_workspace_meta(&mut workspace, "phone-profile", &runtime_meta);
+        assert_eq!(workspace["terminals"][0]["sdkSessionId"], "live");
+        assert_eq!(
+            workspace["terminals"][0]["agentParams"],
+            json!({ "sandboxMode": "read-only", "approvalPolicy": "untrusted", "effortLevel": "high" })
+        );
+    }
 }

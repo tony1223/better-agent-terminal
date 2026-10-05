@@ -8,6 +8,8 @@
     "close": "關閉",
     "delete": "刪除",
     "copy": "複製",
+    "copyLink": "複製連結",
+    "copyLinkFailed": "無法複製連結",
     "ok": "確定",
     "apply": "套用",
     "import": "匯入",

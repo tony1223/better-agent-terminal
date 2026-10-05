@@ -67,6 +67,23 @@ async function main() {
     'non-SDK runtime families should not participate in sdk session ownership',
   )
 
+  workspaceStore.applyTerminalSessionMeta('codex-1', {
+    sdkSessionId: 'phone-thread', codexSandboxMode: 'read-only', codexApprovalPolicy: 'untrusted',
+  })
+  const adoptedState = workspaceStore.getState()
+  const adopted = adoptedState.terminals.find(t => t.id === 'codex-1')!
+  assert.equal(adopted.sdkSessionId, 'phone-thread')
+  assert.equal(adopted.agentParams?.sandboxMode, 'read-only')
+  assert.equal(adopted.agentParams?.approvalPolicy, 'untrusted')
+  workspaceStore.applyTerminalSessionMeta('codex-1', {
+    sdkSessionId: 'phone-thread', codexSandboxMode: 'read-only', codexApprovalPolicy: 'untrusted',
+  })
+  assert.equal(workspaceStore.getState(), adoptedState, 'duplicate host status must not resave the workspace')
+  workspaceStore.applyTerminalSessionMeta('codex-1', {})
+  assert.equal(workspaceStore.getState(), adoptedState, 'partial status must preserve identity and permissions')
+  workspaceStore.applyTerminalSessionMeta('codex-1', { sdkSessionId: null })
+  assert.equal(workspaceStore.getState().terminals.find(t => t.id === 'codex-1')?.sdkSessionId, undefined)
+
   const replacementId = workspaceStore.repairTerminalIdentityCollision('claude-2')
   assert.ok(replacementId && replacementId !== 'claude-2')
   const repairedState = workspaceStore.getState()
