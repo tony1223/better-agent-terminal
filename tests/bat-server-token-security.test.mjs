@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { readFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { redactConnectionCredentials } from '../node-sidecar/src/lib/connection-redaction.mjs'
 import { installScript } from '../scripts/build-bat-server-bundle.mjs'
 
 const [rustCli, readme] = await Promise.all([
@@ -37,5 +40,44 @@ assert.match(readme, /--token-file=PATH/)
 assert.match(readme, /\/etc\/bat-server\/credentials\/token/)
 assert.match(readme, /LoadCredential=/)
 assert.match(readme, /backward compatibility/i)
+
+assert.match(rustCli, /--print-connect-link/)
+assert.match(rustCli, /args\.print_connect_link && !std::io::stdout\(\)\.is_terminal\(\)/)
+// Both runtime variants call the same credential-safe banner.
+assert.equal((rustCli.match(/print_headless_server_banner\(&data_dir, &result, args\.print_connect_link\)/g) ?? []).length, 2)
+assert.doesNotMatch(rustCli, /println!\([^\n]*\{token\}/)
+
+const diagnosticCases = [
+  ['failure wss://example.invalid?token=fixture-secret&fp=AA', 'failure wss://example.invalid?token=[REDACTED]&fp=AA'],
+  ['--TOKEN=fixture-secret', '--TOKEN=[REDACTED]'],
+  ['{"token":"fixture-secret","remoteToken":"second-secret"}', '{"token":"[REDACTED]","remoteToken":"[REDACTED]"}'],
+  ['{"token":"fixture\\\"secret"}', '{"token":"[REDACTED]"}'],
+]
+for (const [input, expected] of diagnosticCases) {
+  assert.equal(redactConnectionCredentials(input), expected)
+  assert.equal(redactConnectionCredentials(expected), expected)
+}
+
+const scratch = await mkdtemp(join(tmpdir(), 'bat-connection-log-test-'))
+try {
+  const logPath = join(scratch, 'sidecar.log')
+  const loggerUrl = new URL('../node-sidecar/src/lib/logger.mjs', import.meta.url).href
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
+    import * as logger from ${JSON.stringify(loggerUrl)};
+    logger.__setLogPathOverrideForTests(${JSON.stringify(logPath)});
+    logger.initLogger();
+    logger.error(new Error('upgrade failed wss://example.invalid?token=fixture-secret&fp=AA'));
+    logger.info({token: 'fixture-secret', remoteToken: 'second-secret'});
+  `], { encoding: 'utf8' })
+  assert.equal(child.status, 0, 'logger subprocess must succeed')
+  const diskLog = await readFile(logPath, 'utf8')
+  for (const text of [child.stdout, child.stderr, diskLog]) {
+    assert.ok(!text.includes('fixture-secret') && !text.includes('second-secret'))
+  }
+  assert.match(diskLog, /\?token=\[REDACTED\]&fp=AA/)
+  assert.match(child.stderr, /\?token=\[REDACTED\]&fp=AA/)
+} finally {
+  await rm(scratch, { recursive: true, force: true })
+}
 
 console.log('bat-server token security contract: passed')

@@ -26,6 +26,7 @@ mod claude_usage;
 mod codex_app_server;
 mod codex_auth;
 mod commands;
+mod connection_diagnostics;
 mod event_hub;
 mod rate_limit_resume;
 mod host_context;
@@ -84,6 +85,7 @@ struct HeadlessServerArgs {
     data_dir: Option<PathBuf>,
     token: Option<String>,
     token_source: Option<HeadlessTokenSource>,
+    print_connect_link: bool,
 }
 
 #[derive(Debug)]
@@ -121,19 +123,24 @@ where
             0
         }
         Ok(HeadlessCliAction::Run(args)) => {
+            use std::io::IsTerminal;
+            if args.print_connect_link && !std::io::stdout().is_terminal() {
+                eprintln!("bat-server: --print-connect-link requires stdout to be a terminal");
+                return 1;
+            }
             if let Some(warning) = legacy_headless_token_warning(args.token_source) {
                 eprintln!("[bat-server] warning: {warning}");
             }
             match run_server(args) {
                 Ok(()) => 0,
                 Err(err) => {
-                    eprintln!("bat-server failed: {err}");
+                    eprintln!("bat-server failed: {}", connection_diagnostics::redact(&err));
                     1
                 }
             }
         }
         Err(err) => {
-            eprintln!("bat-server: {err}");
+            eprintln!("bat-server: {}", connection_diagnostics::redact(&err));
             eprintln!("Try `bat-server --help` for usage.");
             1
         }
@@ -545,7 +552,7 @@ fn run_headless_server(args: HeadlessServerArgs) -> Result<(), String> {
     }
 
     let result = remote_state.start(ctx, sidecar_state, Some(options))?;
-    print_headless_server_banner_headless(&data_dir, &result)?;
+    print_headless_server_banner(&data_dir, &result, args.print_connect_link)?;
 
     // Self-provision the codex runtime so remote clients can start codex
     // sessions against this host. Runs off-thread: the ~100MB download must not
@@ -577,42 +584,6 @@ fn ensure_codex_runtime_async(runtimes_dir: std::path::PathBuf) {
             Err(err) => eprintln!("[bat-server] codex runtime install failed: {err}"),
         }
     });
-}
-
-#[cfg(not(feature = "desktop"))]
-fn print_headless_server_banner_headless(
-    data_dir: &std::path::Path,
-    result: &Value,
-) -> Result<(), String> {
-    let field = |key: &str| -> Result<String, String> {
-        result
-            .get(key)
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .ok_or_else(|| format!("remote server result missing {key}"))
-    };
-    let port = result
-        .get("port")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| "remote server result missing port".to_string())?;
-    let bound_host = field("boundHost")?;
-    let bind_interface = field("bindInterface")?;
-    let token = field("token")?;
-    let fingerprint = field("fingerprint")?;
-
-    println!();
-    println!("bat-server ready");
-    println!("  url:         wss://{bound_host}:{port}");
-    println!("  bind:        {bind_interface}");
-    println!("  token:       {token}");
-    println!("  fingerprint: {fingerprint}");
-    println!("  data-dir:    {}", data_dir.display());
-    println!(
-        "  connect:     wss://{bound_host}:{port}?token={}&fp={}",
-        encode_query_component(&token),
-        encode_query_component(&fingerprint)
-    );
-    Ok(())
 }
 
 #[cfg(feature = "desktop")]
@@ -658,61 +629,25 @@ fn start_headless_remote_server(
         sidecar_state,
         Some(options),
     )?;
-    print_headless_server_banner(app, &result)?;
-    Ok(())
-}
-
-#[cfg(feature = "desktop")]
-fn print_headless_server_banner(app: &tauri::AppHandle, result: &Value) -> Result<(), String> {
-    let port = result
-        .get("port")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| "remote server result missing port".to_string())?;
-    let bound_host = result
-        .get("boundHost")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "remote server result missing boundHost".to_string())?;
-    let bind_interface = result
-        .get("bindInterface")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "remote server result missing bindInterface".to_string())?;
-    let token = result
-        .get("token")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "remote server result missing token".to_string())?;
-    let fingerprint = result
-        .get("fingerprint")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "remote server result missing fingerprint".to_string())?;
     let data_dir = app_data::app_data_dir(app)?;
-    let connect_url = format!(
-        "wss://{bound_host}:{port}?token={}&fp={}",
-        encode_query_component(token),
-        encode_query_component(fingerprint)
-    );
-
-    println!();
-    println!("bat-server ready");
-    println!("  url:         wss://{bound_host}:{port}");
-    println!("  bind:        {bind_interface}");
-    println!("  token:       {token}");
-    println!("  fingerprint: {fingerprint}");
-    println!("  data-dir:    {}", data_dir.display());
-    println!("  connect:     {connect_url}");
-    println!();
+    print_headless_server_banner(&data_dir, &result, args.print_connect_link)?;
     Ok(())
 }
 
-fn encode_query_component(value: &str) -> String {
-    value
-        .bytes()
-        .flat_map(|byte| match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                vec![byte as char]
-            }
-            _ => format!("%{byte:02X}").chars().collect(),
-        })
-        .collect()
+fn print_headless_server_banner(
+    data_dir: &std::path::Path,
+    result: &Value,
+    print_connect_link: bool,
+) -> Result<(), String> {
+    use std::io::IsTerminal;
+    let stdout = std::io::stdout();
+    connection_diagnostics::write_banner(
+        &mut stdout.lock(),
+        stdout.is_terminal(),
+        data_dir,
+        result,
+        print_connect_link,
+    )
 }
 
 fn parse_headless_server_args<I>(args: I) -> Result<HeadlessCliAction, String>
@@ -726,6 +661,7 @@ where
         .map(PathBuf::from)
         .or_else(default_headless_data_dir);
     let mut token_input = default_headless_token_input();
+    let mut print_connect_link = false;
     let mut iter = args.into_iter().peekable();
 
     while let Some(arg) = iter.next() {
@@ -734,6 +670,10 @@ where
         }
         if arg == "--help" || arg == "-h" {
             return Ok(HeadlessCliAction::Help);
+        }
+        if arg == "--print-connect-link" {
+            print_connect_link = true;
+            continue;
         }
         if arg == "--debug" {
             std::env::set_var("BAT_DEBUG", "1");
@@ -807,9 +747,9 @@ where
             continue;
         }
         if arg.starts_with('-') {
-            return Err(format!("unknown flag: {arg}"));
+            return Err("unknown flag (see --help)".to_string());
         }
-        return Err(format!("unexpected argument: {arg}"));
+        return Err("unexpected argument (see --help)".to_string());
     }
 
     let bind_interface = normalize_headless_bind(&bind_interface)?;
@@ -826,6 +766,7 @@ where
         data_dir,
         token,
         token_source,
+        print_connect_link,
     }))
 }
 
@@ -956,6 +897,7 @@ Options:\n  --port=N            TCP port to listen on (default: 9876)\n  \
 --data-dir=PATH     persistent state directory\n  \
 --token-file=PATH   read a token from an owner-restricted file (recommended)\n  \
 --token=HEX         pin a known token (compatibility; emits a warning)\n  \
+--print-connect-link print the full connection link (terminal stdout only)\n  \
 --debug             write debug logs inside the app data dir\n  \
 -h, --help          show this help\n\n\
 Environment variables: BAT_DATA_DIR BAT_TAURI_DATA_DIR BAT_PORT BAT_BIND BAT_TOKEN_FILE BAT_TOKEN BAT_DEBUG\n\n\
@@ -975,11 +917,13 @@ mod headless_tests {
             "--bind=tailscale".to_string(),
             "--data-dir=/tmp/bat".to_string(),
             "--token=abc123".to_string(),
+            "--print-connect-link".to_string(),
         ])
         .unwrap();
         let HeadlessCliAction::Run(args) = parsed else {
             panic!("expected run action");
         };
+        assert!(args.print_connect_link);
         assert_eq!(args.port, 12345);
         assert_eq!(args.bind_interface, "tailscale");
         assert_eq!(args.data_dir, Some(PathBuf::from("/tmp/bat")));
@@ -1041,6 +985,7 @@ mod headless_tests {
         let HeadlessCliAction::Run(args) = parsed else {
             panic!("expected run action");
         };
+        assert!(!args.print_connect_link);
         let dir = args.data_dir.expect("default data dir");
         assert_eq!(
             dir.file_name().and_then(|name| name.to_str()),
@@ -1056,6 +1001,9 @@ mod headless_tests {
 
     #[test]
     fn encode_query_component_percent_encodes_fingerprint_colons() {
-        assert_eq!(encode_query_component("AA:BB cc"), "AA%3ABB%20cc");
+        assert_eq!(
+            connection_diagnostics::encode_query_component("AA:BB cc"),
+            "AA%3ABB%20cc"
+        );
     }
 }

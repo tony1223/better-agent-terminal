@@ -500,6 +500,7 @@ Options:
 | `--data-dir=PATH` | Override the persistent state directory |
 | `--token-file=PATH` | Read a fixed connection token from an owner-restricted file (recommended) |
 | `--token=HEX` | Backward-compatible fixed token override; emits a warning recommending `--token-file` |
+| `--print-connect-link` | Explicitly show the full connection link; refused unless stdout is a terminal |
 | `--debug` | Enable debug logging |
 
 Environment variables mirror the flags: `BAT_DATA_DIR`, `BAT_TAURI_DATA_DIR`, `BAT_PORT`, `BAT_BIND`, `BAT_TOKEN_FILE`, `BAT_TOKEN`, and `BAT_DEBUG`. `BAT_TOKEN` remains supported for existing automation and emits the same compatibility warning.
@@ -515,7 +516,7 @@ bat-server --bind=localhost --port=9876 \
 
 If neither a token flag nor token environment variable is supplied, BAT continues to use its persisted/random token behavior for backward compatibility.
 
-On startup, the server prints the `wss://` URL, token, certificate fingerprint, data directory, and a one-shot `connect` URL that can be pasted into a Remote Profile.
+On startup, the server prints the `wss://` URL, certificate fingerprint, data directory, and a redacted `connect` URL. The token stays hidden and is persisted in `<data-dir>/server-token.enc.json`; existing token files, Remote Profiles, QR codes, and Connector token references continue to work. To copy a full link manually, launch with `--print-connect-link` in a trusted terminal. This opt-in is refused when stdout is redirected or piped (including a normal systemd journal), even with `--debug`. Default startup output never includes the token. Existing journal entries still contain previously printed credentials; rotate the server token and update saved clients after upgrading.
 
 #### Self-contained Linux bundle (no display, no manual setup)
 

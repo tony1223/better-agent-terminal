@@ -147,6 +147,7 @@ pub(crate) fn renderer_url(path: &str) -> WebviewUrl {
 }
 
 pub(crate) fn log_tauri(app: &HostContext, message: &str) {
+    let message = crate::connection_diagnostics::redact(message);
     eprintln!("[tauri] {message}");
     let Some(path) = app
         .data_dir_opt()
@@ -154,7 +155,7 @@ pub(crate) fn log_tauri(app: &HostContext, message: &str) {
     else {
         return;
     };
-    let line = tauri_log_line(message);
+    let line = tauri_log_line(&message);
     // Synchronous single-line append (like the pty debug loggers): a fire-and-
     // forget tokio spawn_blocking would panic on the headless server's plain
     // OS threads, which run outside any tokio runtime.
@@ -974,6 +975,41 @@ mod tests {
     fn tauri_log_line_has_tauri_prefix() {
         let line = tauri_log_line("hello");
         assert!(line.contains(" [tauri] hello\n"));
+    }
+
+    #[cfg(not(feature = "desktop"))]
+    #[test]
+    fn diagnostic_file_redacts_connection_credentials() {
+        use crate::host_context::HeadlessHost;
+        use std::sync::Arc;
+        let dir =
+            std::env::temp_dir().join(format!("bat-log-redaction-{:032x}", rand::random::<u128>()));
+        let ctx = HostContext::from_headless(Arc::new(HeadlessHost::new(
+            Some(dir.clone()),
+            Arc::new(|_, _| {}),
+        )));
+        log_tauri(
+            &ctx,
+            "upgrade failed wss://example.invalid?token=fixture-secret&fp=AA",
+        );
+        log_tauri(
+            &ctx,
+            r#"auth {"token":"fixture-secret","remoteToken":"second-secret"}"#,
+        );
+        // The shared log writer batches asynchronously; wait for both queued
+        // lines before checking the durable file or removing its directory.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let text = loop {
+            let text = std::fs::read_to_string(dir.join("logs/debug.log")).unwrap_or_default();
+            if text.lines().count() >= 2 || std::time::Instant::now() >= deadline {
+                break text;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        std::fs::remove_dir_all(dir).unwrap();
+        assert!(!text.contains("fixture-secret") && !text.contains("second-secret"));
+        assert!(text.contains("?token=[REDACTED]&fp=AA"));
+        assert!(text.contains(r#""remoteToken":"[REDACTED]""#));
     }
 
     #[cfg(feature = "desktop")]
