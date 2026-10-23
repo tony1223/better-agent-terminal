@@ -224,13 +224,14 @@ async function resumeClaudeSession(params, opts = {}) {
   const history = await loadSessionHistory(sessionId, sdkSessionIdToResume, historyCwd, {
     allowGlobalFallback: opts.allowGlobalHistoryFallback === true,
   })
+  if (!history.ok) throw new Error(history.error || 'History replay failed')
   if (!history.found) {
     logWarn(`claude.resumeSession: stale sdkSessionId=${sdkSessionIdToResume} for cwd=${historyCwd}; starting fresh session`)
     return { ok: true, sessionId, stale: true, requestedSdkSessionId: sdkSessionIdToResume }
   }
   s.sdkSessionId = sdkSessionIdToResume
   saveSessionConfig(sessionId, s)
-  return { ok: true, sessionId, sdkSessionId: sdkSessionIdToResume }
+  return { ...history, ok: true, sessionId, sdkSessionId: sdkSessionIdToResume }
 }
 
 registerHandler('claude.resumeSession', resumeClaudeSession)
@@ -277,9 +278,12 @@ registerHandler('claude.clientResume', async (params) => {
       // ~/.claude/projects recovers moved worktrees/stale cwd without guessing.
       allowGlobalFallback: true,
       preserveLiveMessages: live,
+      before: params?.options?.historyBefore,
     })
-    return { ok: true, sessionId, sdkSessionId, existed: true, alreadyLive: !!live, found: history.found }
+    if (!history.ok) throw new Error(history.error || 'History replay failed')
+    return { ...history, sessionId, sdkSessionId, existed: true, alreadyLive: !!live }
   }
+  if (params?.options?.historyBefore !== undefined) throw new Error('Resume the session before loading older history')
   // The sidecar may have restarted while the host/client retained the session
   // metadata. Permit exact-id global lookup on this read/reattach path; normal
   // resumeSession keeps its stricter cwd validation.

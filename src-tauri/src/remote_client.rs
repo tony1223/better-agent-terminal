@@ -1715,6 +1715,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn resume_timeout_expires_only_its_pending_request() {
+        let (failed_tx, failed_rx) = mpsc::channel();
+        let (other_tx, other_rx) = mpsc::channel();
+        let mut pending = HashMap::new();
+        pending.insert("session-a".to_string(), PendingInvoke {
+            channel: "claude:client-resume".to_string(),
+            deadline: Instant::now() - Duration::from_secs(1), reply: failed_tx,
+        });
+        pending.insert("session-b".to_string(), PendingInvoke {
+            channel: "claude:client-resume".to_string(),
+            deadline: Instant::now() + Duration::from_secs(60), reply: other_tx,
+        });
+        expire_pending(&mut pending);
+        assert!(failed_rx.try_recv().unwrap().unwrap_err().contains("timeout"));
+        assert_eq!(pending.len(), 1);
+        assert!(other_rx.try_recv().is_err());
+        pending.remove("session-b").unwrap().reply.send(Ok(json!({"ok": true}))).unwrap();
+        assert_eq!(other_rx.try_recv().unwrap().unwrap()["ok"], true);
+    }
+
+    #[test]
     fn dialling_this_hosts_own_server_is_refused() {
         let own = "AA:BB:CC";
         assert!(is_dialling_self(Some(own), own));

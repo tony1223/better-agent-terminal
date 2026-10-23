@@ -1,3 +1,4 @@
+import { createBackoff, formatError } from './utils/resume-recovery'
 import { host, isTauri } from './host-api'
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -50,8 +51,6 @@ const MAX_SNIPPET_WIDTH = 500
 
 // Auto-reconnect backoff bounds (ms). Connected remote windows poll slowly;
 // disconnected windows retry more quickly behind an exponential dial gate.
-const RECONNECT_BACKOFF_MIN = 3000
-const RECONNECT_BACKOFF_MAX = 30000
 const REMOTE_CONNECTED_POLL_MS = 10000
 const REMOTE_DISCONNECTED_POLL_MS = 3000
 const EMPTY_TERMINALS: TerminalInstance[] = []
@@ -200,7 +199,7 @@ export default function App() {
   const remoteConnParamsRef = useRef<{ host: string; port: number; token: string; fingerprint: string; tunnelProfileId?: string } | null>(null)
   // Auto-reconnect backoff state. `inFlight` prevents overlapping dials;
   // `nextAt` gates retries (epoch ms); `backoff` grows on failure.
-  const reconnectRef = useRef<{ inFlight: boolean; backoff: number; nextAt: number }>({ inFlight: false, backoff: RECONNECT_BACKOFF_MIN, nextAt: 0 })
+  const reconnectRef = useRef<{ inFlight: boolean; retry: ReturnType<typeof createBackoff>; nextAt: number }>({ inFlight: false, retry: createBackoff(), nextAt: 0 })
 
   useEffect(() => { activeProfileIdRef.current = activeProfileId }, [activeProfileId])
   useEffect(() => { activeRemoteProfileIdRef.current = activeRemoteProfileId }, [activeRemoteProfileId])
@@ -693,7 +692,7 @@ export default function App() {
             // blank (the reason was previously swallowed on the restore path,
             // leaving only an unrelated "not connected" unhandledrejection in
             // the log). Logged for every path, including the local fallback.
-            dlog(`[init] remote.connect failed host=${dialOrigin} error=${String((connectResult as { error?: unknown }).error)}`)
+            dlog(`[init] remote.connect failed host=${dialOrigin} error=${formatError((connectResult as { error?: unknown }).error, { host: dialOrigin })}`)
             // Keep the reason visible. Closing this window automatically after
             // two seconds made a failed dial indistinguishable from a routing bug.
             setProfileStartup({
@@ -715,7 +714,7 @@ export default function App() {
             // attach the host would serve its own empty snapshot of the alias.
             const attach = await host.remote.attachProfile(remoteProfileId)
             if (attach?.error) {
-              dlog(`[init] remote.attachProfile failed host=${dialOrigin} profile=${remoteProfileId} error=${attach.error}`)
+              dlog(`[init] remote.attachProfile failed host=${dialOrigin} profile=${remoteProfileId} error=${formatError(attach.error, { host: dialOrigin })}`)
               setProfileStartup({
                 phase: 'error',
                 target: remoteStartupTarget,
@@ -747,7 +746,7 @@ export default function App() {
             if (cr.clientVersion && cr.serverVersion && cr.clientVersion !== cr.serverVersion) {
               setAppNotification(t('app.remoteVersionMismatch', { clientVersion: cr.clientVersion, serverVersion: cr.serverVersion }))
             }
-            reconnectRef.current = { inFlight: false, backoff: RECONNECT_BACKOFF_MIN, nextAt: 0 }
+            reconnectRef.current = { inFlight: false, retry: createBackoff(), nextAt: 0 }
           }
         } else if (active?.type === 'remote') {
           // Fail closed instead of silently degrading to a local profile. Keep
@@ -868,7 +867,7 @@ export default function App() {
     const unsubSystemResume = host.system.onResume(() => {
       if (!activeProfileIsRemoteRef.current) return
       reconnectRef.current.nextAt = 0
-      reconnectRef.current.backoff = RECONNECT_BACKOFF_MIN
+      reconnectRef.current.retry.reset()
       host.remote.clientStatus().then(s => setRemoteClientConnected(s.connected))
     })
 
@@ -918,6 +917,7 @@ export default function App() {
     if (!activeProfileIsRemote) return
     let timer: ReturnType<typeof setTimeout> | null = null
     let disposed = false
+    const backoff = reconnectRef.current.retry
 
     const attemptReconnect = async () => {
       // Only drive reconnection for a remote profile that is still wanted.
@@ -929,6 +929,8 @@ export default function App() {
       if (state.inFlight) return
       if (Date.now() < state.nextAt) return
       state.inFlight = true
+      const retryDelay = backoff.next()
+      state.nextAt = Date.now() + retryDelay
       try {
         if (params.tunnelProfileId) {
           // The forward may have died with the connection; bring it back
@@ -942,11 +944,10 @@ export default function App() {
         const result = await host.remote.connect(params.host, params.port, params.token, params.fingerprint)
         const failed = !result || (typeof result === 'object' && 'error' in (result as Record<string, unknown>))
         if (failed) {
-          state.backoff = Math.min(state.backoff * 2, RECONNECT_BACKOFF_MAX)
-          state.nextAt = Date.now() + state.backoff
+          host.debug.log('[remote] reconnect failed', formatError((result as { error?: unknown })?.error, { host: params.host }))
+          state.nextAt = Date.now() + retryDelay
         } else {
-          state.backoff = RECONNECT_BACKOFF_MIN
-          state.nextAt = 0
+          backoff.connected()
           // The profile may have been torn down (deleted / made unavailable)
           // while this dial was in flight — don't resurrect a zombie session.
           if (!disposed && !remoteUnavailableRef.current && activeProfileIsRemoteRef.current) {
@@ -954,7 +955,7 @@ export default function App() {
             // a failure here resurfaces on the next invoke, which retries it.
             const attach = await host.remote.attachProfile(activeRemoteProfileIdRef.current || 'default').catch(() => null)
             if (attach?.error) {
-              void host.debug.log(`[remote] reconnect attachProfile failed profile=${activeRemoteProfileIdRef.current || 'default'} error=${attach.error}`)
+              void host.debug.log(`[remote] reconnect attachProfile failed profile=${activeRemoteProfileIdRef.current || 'default'} error=${formatError(attach.error, { host: params.host })}`)
             }
             setRemoteClientConnected(true)
             // Re-attach: pull canonical host-owned workspace/session state back,
@@ -965,9 +966,9 @@ export default function App() {
             await host.remote.disconnect().catch(() => {})
           }
         }
-      } catch {
-        state.backoff = Math.min(state.backoff * 2, RECONNECT_BACKOFF_MAX)
-        state.nextAt = Date.now() + state.backoff
+      } catch (err) {
+        host.debug.log('[remote] reconnect failed', formatError(err, { host: params.host }))
+        state.nextAt = Date.now() + retryDelay
       } finally {
         state.inFlight = false
       }
@@ -988,6 +989,9 @@ export default function App() {
         if (!status.connected) {
           nextDelay = REMOTE_DISCONNECTED_POLL_MS
           await attemptReconnect()
+          if (reconnectRef.current.nextAt > Date.now()) {
+            nextDelay = Math.max(1, reconnectRef.current.nextAt - Date.now())
+          }
         }
       } catch {
         nextDelay = REMOTE_DISCONNECTED_POLL_MS

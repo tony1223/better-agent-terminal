@@ -3,6 +3,7 @@
 // loadArchived, clearArchive.
 
 import { readFile, appendFile, mkdir, readdir, unlink } from 'node:fs/promises'
+import { readHistoryPage, historyGap, boundHistoryItems, HISTORY_PAGE_MAX_BYTES } from '../lib/history-page.mjs'
 import { createReadStream } from 'node:fs'
 import { createInterface } from 'node:readline'
 import { join } from 'node:path'
@@ -32,8 +33,9 @@ async function readHistoryFile(sdkSessionId, cwd, opts = {}) {
   const allowFallback = opts.allowGlobalFallback !== false
   for (const dir of historyProjectDirCandidates(cwd)) {
     try {
-      return await readFile(join(dir, `${sdkSessionId}.jsonl`), 'utf-8')
-    } catch {
+      return opts.paged ? await readHistoryPage(join(dir, `${sdkSessionId}.jsonl`), opts) : await readFile(join(dir, `${sdkSessionId}.jsonl`), 'utf-8')
+    } catch (err) {
+      if (err.code !== 'ENOENT' && err.code !== 'ENOTDIR') throw err
       // Try the next project-dir casing candidate.
     }
   }
@@ -41,7 +43,7 @@ async function readHistoryFile(sdkSessionId, cwd, opts = {}) {
   const fallback = await findHistoryFileBySessionId(sdkSessionId)
   if (fallback) {
     logWarn(`claude.readHistoryFile: cwd lookup missed ${sdkSessionId}; using ${fallback}`)
-    return await readFile(fallback, 'utf-8')
+    return opts.paged ? await readHistoryPage(fallback, opts) : await readFile(fallback, 'utf-8')
   }
   return null
 }
@@ -95,13 +97,19 @@ function textFromContent(content) {
     .trim()
 }
 
-function historyItemsFromJsonl(raw, sessionId) {
+function historyItemsFromJsonl(raw, sessionId, start = 0) {
+  let lineOffset = start
   const items = []
   const toolIndexMap = new Map()
   for (const line of String(raw || '').split('\n')) {
+    const recordId = `hist-byte-${lineOffset}`
+    lineOffset += Buffer.byteLength(line) + 1
     if (!line.trim()) continue
     let obj
-    try { obj = JSON.parse(line) } catch { continue }
+    try { obj = JSON.parse(line) } catch {
+      items.push(historyGap(recordId, Buffer.byteLength(line), sessionId))
+      continue
+    }
     const ts = obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now()
     if (obj.type === 'user' && obj.message?.role === 'user') {
       const content = obj.message.content
@@ -121,7 +129,7 @@ function historyItemsFromJsonl(raw, sessionId) {
       }
       if (!isHarnessNoiseUserText(text)) {
         items.push({
-          id: obj.uuid || `hist-user-${items.length}`,
+          id: obj.uuid || recordId,
           sessionId,
           role: 'user',
           content: text,
@@ -148,7 +156,7 @@ function historyItemsFromJsonl(raw, sessionId) {
         .trim()
       if ((text || thinking) && text !== 'No response requested.') {
         items.push({
-          id: `${obj.uuid || 'hist'}-text-${items.length}`,
+          id: `${obj.uuid || recordId}-text`,
           sessionId,
           role: 'assistant',
           content: text || '',
@@ -178,7 +186,7 @@ function historyItemsFromJsonl(raw, sessionId) {
       const text = textFromContent(obj.message?.content)
       if (text && !text.startsWith('{') && text.length > 5) {
         items.push({
-          id: obj.uuid || `hist-sys-${items.length}`,
+          id: obj.uuid || recordId,
           sessionId,
           role: 'system',
           content: text,
@@ -206,7 +214,8 @@ function rememberedTranscript(sessionId) {
 export async function loadSessionHistory(sessionId, sdkSessionId, cwd, opts = {}) {
   sendEvent('claude:resume-loading', { sessionId, loading: true })
   try {
-    const raw = await readHistoryFile(sdkSessionId, cwd, opts)
+    let page = await readHistoryFile(sdkSessionId, cwd, { ...opts, paged: true })
+    const raw = page?.raw ?? null
     const session = sessions.get(sessionId)
     // A transcript we could not find is not a transcript we know to be empty.
     // The file lives at a path derived from the cwd, so a moved worktree, a
@@ -216,28 +225,45 @@ export async function loadSessionHistory(sessionId, sdkSessionId, cwd, opts = {}
     // too, and the phone got [] with only a `found: false` it had no reason to
     // inspect (GH #125).
     if (raw === null) {
-      const remembered = rememberedTranscript(sessionId)
+      if (opts.before !== undefined) throw new Error('History transcript is no longer available')
+      let remembered = boundHistoryItems(rememberedTranscript(sessionId), sessionId)
+      while (Buffer.byteLength(JSON.stringify({ sessionId, items: remembered })) >= HISTORY_PAGE_MAX_BYTES) {
+        const omitted = remembered.splice(0, Math.max(1, Math.floor(remembered.length / 2)))
+        remembered.unshift(historyGap('hist-memory-gap', Buffer.byteLength(JSON.stringify(omitted)), sessionId))
+      }
       logWarn(`claude.loadSessionHistory(${sessionId}): no transcript on disk for ${sdkSessionId}; replaying ${remembered.length} in-memory message(s)`)
       sendEvent('claude:history', { sessionId, items: remembered })
       return { ok: true, found: false, itemCount: remembered.length }
     }
-    const items = historyItemsFromJsonl(raw, sessionId)
+    let items
+    let maxEntries = opts.maxEntries ?? 500
+    while (true) {
+      items = boundHistoryItems(historyItemsFromJsonl(page.raw, sessionId, page.start), sessionId)
+      if (page.gap) items.unshift(historyGap(page.gap.id, page.gap.sizeBytes, sessionId))
+      const response = { ok: true, found: true, itemCount: items.length, sessionId, items, before: page.before, hasMore: page.hasMore }
+      if (Buffer.byteLength(JSON.stringify(response)) < HISTORY_PAGE_MAX_BYTES) break
+      if (maxEntries === 1) {
+        items = [historyGap(`hist-byte-${page.start}`, Buffer.byteLength(page.raw), sessionId)]
+        break
+      }
+      maxEntries = Math.max(1, Math.floor(maxEntries / 2))
+      page = await readHistoryFile(sdkSessionId, cwd, { ...opts, paged: true, maxEntries })
+    }
     // `preserveLiveMessages` is set by claude.clientResume when a remote
     // client re-opens a session whose turn is still streaming here: re-emit
     // the persisted history to that client WITHOUT clobbering the running
     // session's in-memory transcript (which would drop live-streamed turns).
-    if (session && !opts.preserveLiveMessages) {
+    if (session && !opts.preserveLiveMessages && opts.before === undefined) {
       resetSessionTranscript(session)
       session.messages = items.slice(-300)
     }
-    sendEvent('claude:history', { sessionId, items })
-    return { ok: true, found: true, itemCount: items.length }
+    if (opts.before === undefined) sendEvent('claude:history', { sessionId, items, before: page.before, hasMore: page.hasMore })
+    return { ok: true, found: true, itemCount: items.length, items, before: page.before, hasMore: page.hasMore }
   } catch (err) {
     // Same reasoning as the not-found path: a read that blew up says nothing
     // about whether the conversation happened.
     const remembered = rememberedTranscript(sessionId)
     logWarn(`claude.loadSessionHistory: ${err instanceof Error ? err.message : String(err)}`)
-    sendEvent('claude:history', { sessionId, items: remembered })
     return { ok: false, found: false, itemCount: remembered.length, error: err instanceof Error ? err.message : String(err) }
   } finally {
     sendEvent('claude:resume-loading', { sessionId, loading: false })
@@ -549,6 +575,12 @@ registerHandler('claude.fetchSubagentMessages', async (params) => {
 // guarantee survives a renderer that loses its own bookkeeping across remounts.
 // First write wins — a re-archived row is by definition already stored.
 const archivedIdsBySession = new Map()
+const archiveWrites = new Map()
+const MAX_SEEN_IDS = 10_000
+function rememberId(seen, id) {
+  seen.add(id)
+  if (seen.size > MAX_SEEN_IDS) seen.delete(seen.values().next().value)
+}
 
 // Seeded once per session from the file, then maintained in memory. Returns a
 // promise (not a Set) so concurrent flushes share one read instead of racing to
@@ -562,7 +594,7 @@ function archivedIds(sessionId) {
         if (!line.trim()) continue
         try {
           const id = JSON.parse(line)?.id
-          if (typeof id === 'string') ids.add(id)
+          if (typeof id === 'string') rememberId(ids, id)
         } catch { /* malformed line — nothing to dedupe against */ }
       }
       return ids
@@ -573,7 +605,7 @@ function archivedIds(sessionId) {
   return pending
 }
 
-registerHandler('claude.archiveMessages', async (params) => {
+async function archiveMessages(params) {
   const sessionId = params?.sessionId
   const messages = params?.messages
   if (typeof sessionId !== 'string' || !sessionId) return false
@@ -585,25 +617,56 @@ registerHandler('claude.archiveMessages', async (params) => {
     // Ids staged separately and only committed once the write lands. Marking
     // them seen up front would make a failed append permanent: the retry would
     // filter out the very rows that never reached disk.
+    // Once the bounded cache fills, check candidate IDs against disk as well.
+    // Eviction must never allow an older replay to be appended again.
+    const diskMatches = new Set()
+    if (seen.size >= MAX_SEEN_IDS) {
+      const candidates = new Set(messages.map(m => m?.id).filter(id => typeof id === 'string'))
+      const input = createReadStream(archiveFilePath(sessionId), { encoding: 'utf8' })
+      const reader = createInterface({ input, crlfDelay: Infinity })
+      try {
+        for await (const line of reader) {
+          try {
+            const id = JSON.parse(line)?.id
+            if (candidates.has(id)) diskMatches.add(id)
+          } catch { /* malformed rows have no usable id */ }
+        }
+      } finally {
+        reader.close()
+        input.destroy()
+      }
+    }
     const staged = new Set()
     // A row with no id cannot be deduped, so it is written through rather than
     // dropped: losing history is worse than storing it twice.
     const fresh = messages.filter(m => {
       const id = m?.id
       if (typeof id !== 'string') return true
-      if (seen.has(id) || staged.has(id)) return false
+      if (seen.has(id) || diskMatches.has(id) || staged.has(id)) return false
       staged.add(id)
       return true
     })
     if (fresh.length === 0) return true
     const lines = fresh.map(m => JSON.stringify(m)).join('\n') + '\n'
     await appendFile(archiveFilePath(sessionId), lines, 'utf-8')
-    for (const id of staged) seen.add(id)
+    for (const id of staged) rememberId(seen, id)
     return true
   } catch (err) {
     logWarn(`claude.archiveMessages: ${err instanceof Error ? err.message : String(err)}`)
     return false
   }
+}
+
+// Serialize per session: two clients may replay/flush the same window together.
+registerHandler('claude.archiveMessages', (params) => {
+  const sessionId = params?.sessionId
+  const previous = archiveWrites.get(sessionId) || Promise.resolve()
+  const pending = previous.catch(() => {}).then(() => archiveMessages(params))
+  archiveWrites.set(sessionId, pending)
+  void pending.finally(() => {
+    if (archiveWrites.get(sessionId) === pending) archiveWrites.delete(sessionId)
+  }).catch(() => {})
+  return pending
 })
 
 registerHandler('claude.loadArchived', async (params) => {
@@ -646,12 +709,17 @@ registerHandler('claude.loadArchived', async (params) => {
   // Mirror Electron's tail-paging: load N items ending at (total - offset).
   // Caller uses offset to skip already-loaded entries from the bottom.
   const end = total - offset
-  const start = Math.max(0, end - limit)
+  let start = Math.max(0, end - limit)
   if (end <= 0) return { messages: [], total, hasMore: false }
   const slice = lines.slice(start, end)
-  const messages = []
+  let messages = []
   for (const line of slice) {
     try { messages.push(JSON.parse(line)) } catch { /* drop malformed */ }
+  }
+  messages = boundHistoryItems(messages, sessionId)
+  while (Buffer.byteLength(JSON.stringify({ messages, total, hasMore: start > 0 })) >= HISTORY_PAGE_MAX_BYTES) {
+    messages.shift()
+    start++
   }
   return { messages, total, hasMore: start > 0 }
 })

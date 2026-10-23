@@ -20,7 +20,8 @@ use crate::network_addresses;
 use crate::profile_context::{ConnectionContextGuard, ContextSink, ProfileContexts};
 use crate::remote_core::{
     canonical_remote_channel, decode_remote_binary_frame, decode_remote_text_frame,
-    encode_remote_frame, event_params_to_legacy_v1_args, legacy_v1_args_to_params,
+    encode_remote_frame, event_params_to_legacy_v1_args, guard_remote_history_event,
+    guard_remote_invoke_response, legacy_v1_args_to_params,
     negotiate_remote_compression, negotiate_remote_protocol, remote_agent_channel,
     remote_event_params_for_clients, strip_profile_secrets, RemoteCompression, RemoteFramePayload,
     RemoteProtocol, REMOTE_PROTOCOL_LEGACY_V1, REMOTE_PROTOCOL_V2,
@@ -830,6 +831,7 @@ fn try_queue_remote_frame(
     close: &Arc<AtomicBool>,
     frame: Value,
 ) -> bool {
+    let frame = guard_remote_history_event(frame);
     match tx.try_send(frame) {
         Ok(()) => true,
         Err(mpsc::TrySendError::Full(_)) | Err(mpsc::TrySendError::Disconnected(_)) => {
@@ -1583,7 +1585,11 @@ fn handle_client(
                             json!({ "type": "invoke-error", "id": id, "error": err })
                         }
                     };
-                    let _ = try_queue_remote_frame(&invoke_tx, &invoke_close, response);
+                    let _ = try_queue_remote_frame(
+                        &invoke_tx,
+                        &invoke_close,
+                        guard_remote_invoke_response(response),
+                    );
                 })
             {
                 crate::commands::app::log_tauri(

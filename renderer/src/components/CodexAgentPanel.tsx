@@ -1,3 +1,4 @@
+import { createBackoff, formatError } from '../utils/resume-recovery'
 import { persistTranscriptArchive, readArchivePage, releaseArchivedSnapshots, resolveTranscriptPrompt, transcriptArchivePrefix, type ArchivePage } from '../utils/transcript-window'
 import { host, isTauri } from '../host-api'
 import { getClaudeModelPricing, type ClaudeModelPricing } from '../utils/claude-model-pricing'
@@ -8,7 +9,7 @@ import { useTranslation } from 'react-i18next'
 import type { TFunction } from 'i18next'
 import type { ClaudeMessage, ClaudeSessionState, ClaudeToolCall } from '../types/claude-agent'
 import { isToolCall, normalizeMessageItem, normalizeMessageItems } from '../types/claude-agent'
-import { dedupeMessagesById } from '../utils/message-dedupe'
+import { BoundedSeenIds, dedupeMessagesById } from '../utils/message-dedupe'
 import type { CodexApprovalPolicy, CodexEffortLevel, CodexSandboxMode } from '../types'
 import { CLAUDE_EFFORT_MODES, CODEX_APPROVAL_POLICIES, CODEX_EFFORT_LEVELS, CODEX_SANDBOX_MODES, effortLevelForClaudeMode, isUltracodeEffortMode } from '../types'
 import { normalizeAgentParams } from '../types/agent-profiles'
@@ -678,6 +679,7 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
   // cleared; the host dedupes too, so the worst case for a stale entry here is
   // a redundant append, never a lost row.
   const archivedIdsRef = useRef<Set<string>>(new Set())
+  const seenMessageIds = useMemo(() => new BoundedSeenIds(), [sessionId])
   const archivingRef = useRef(false)
   const archiveRevisionRef = useRef(0)
   const archiveRequestRef = useRef<symbol | null>(null)
@@ -1317,6 +1319,8 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
         if (host.debug.isDebugMode === true) host.debug.log(`${tag} onMessage`, (msg as ClaudeMessage).id)
         workspaceStore.updateTerminalActivity(sessionId)
         const message = msg as ClaudeMessage
+        const alreadySeen = seenMessageIds.has(message.id)
+        seenMessageIds.add(message.id)
         if (message.role !== 'user' && message.kind !== 'stale-turn-warning') {
           setSessionMeta(prev => clearRuntimeStatusMeta(prev))
         }
@@ -1332,6 +1336,7 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
             archivedCountRef.current = 0
             loadedFromArchiveRef.current = 0
             archivedIdsRef.current = new Set()
+            seenMessageIds.clear()
             setHasMoreArchived(false)
             serializeArchiveWrite(() => host.claude.clearArchive(sessionId)).catch(() => {})
           }
@@ -1440,6 +1445,7 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
               return [...nextPrev.slice(0, -1), merged]
             }
           }
+          if (alreadySeen) return nextPrev
           return [...nextPrev, finalMsg]
         })
         streamingThinkingStore.reset('')
@@ -1777,6 +1783,7 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
         archivedCountRef.current = 0
         loadedFromArchiveRef.current = 0
         archivedIdsRef.current = new Set()
+        seenMessageIds.clear()
         setHasMoreArchived(false)
         setStreamingText('')
         setStreamingThinking('')
@@ -1834,7 +1841,7 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
             break
           }
         }
-        const historyItems = mainItems
+        const historyItems = dedupeMessagesById(mainItems)
         const archiveHistoryItems = transcriptArchivePrefix(historyItems)
         const liveHistoryItems = historyItems.slice(archiveHistoryItems.length)
         if (historyItems.length > 0 || loadedFromArchiveRef.current === 0) {
@@ -1845,6 +1852,7 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
           loadedFromArchiveRef.current = 0
           setHasMoreArchived(false)
           archivedIdsRef.current = new Set()
+          seenMessageIds.clear()
           archivingRef.current = true
           serializeArchiveWrite(async () => {
             if (!await host.claude.clearArchive(sessionId)) return false
@@ -1873,6 +1881,7 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
               host.debug.log('[CodexAgentPanel] history archive failed:', String(err))
             })
         }
+        for (const item of historyItems) seenMessageIds.add(item.id)
         setStreamingText('')
         setStreamingThinking('')
 
@@ -1985,12 +1994,16 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
     const stag = `[Codex:${sessionId.slice(0, 8)}]`
     const dlog = (...args: unknown[]) => host.debug.log(...args)
     let cancelled = false
+    let retryTimer: ReturnType<typeof setTimeout> | undefined
+    const retryBackoff = createBackoff()
     cancelStartedSessionCleanup(sessionId)
     dlog(`${stag} mount effect: inSet=${startedSessions.has(sessionId)} promise=${startedSessionPromises.has(sessionId)}`)
-    ;(async () => {
+    const initialize = async () => {
       try {
         await ensureSessionStarted()
+        retryBackoff.reset()
         if (cancelled) return
+        setMessages(prev => prev.filter(m => m.id !== `sys-resume-failed-${sessionId}`))
         const existingState = await host.claude.getSessionState(sessionId)
         if (cancelled || !existingState) return
         const existingMessages = normalizeMessageItems(existingState.messages)
@@ -2016,7 +2029,8 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
           setIsStreaming(true)
           void sendClaudeMessage(prompt, images)
         } else if (existingMessages.length > 0) {
-          setMessages(existingMessages)
+          for (const item of existingMessages) seenMessageIds.add(item.id)
+          setMessages(dedupeMessagesById(existingMessages))
         } else if (
           messageCountRef.current === 0 &&
           !historyItemsReceivedRef.current &&
@@ -2066,11 +2080,18 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
             dlog(`${stag} repaired duplicate profile session identity replacement=${replacementId?.slice(0, 8) || 'failed'} detail=${message}`)
             return
           }
-          dlog(`${stag} mount effect init failed: ${message}`)
+          dlog(`${stag} mount effect init failed: ${formatError(err, { sessionId })}`)
+          setMessages(prev => [...prev.filter(m => m.id !== `sys-resume-failed-${sessionId}`), {
+            id: `sys-resume-failed-${sessionId}`, sessionId, role: 'system' as const,
+            content: `Session resume failed; retrying: ${message}`, timestamp: Date.now(),
+          }])
+          retryTimer = setTimeout(() => { void initialize() }, retryBackoff.next())
         }
       }
-    })()
+    }
+    void initialize()
     return () => {
+      clearTimeout(retryTimer)
       cancelled = true
       scheduleStartedSessionCleanup(sessionId)
     }
@@ -2477,6 +2498,7 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
     archivedCountRef.current = 0
     loadedFromArchiveRef.current = 0
     archivedIdsRef.current = new Set()
+    seenMessageIds.clear()
     setHasMoreArchived(false)
     setStreamingText('')
     setStreamingThinking('')
@@ -2825,6 +2847,7 @@ const CodexAgentPanelContent = memo(function CodexAgentPanelContent({ sessionId,
       archivedCountRef.current = 0
       loadedFromArchiveRef.current = 0
       archivedIdsRef.current = new Set()
+      seenMessageIds.clear()
       setHasMoreArchived(false)
       setStreamingText('')
       setStreamingThinking('')

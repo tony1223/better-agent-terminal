@@ -49,6 +49,22 @@ async function check(name, fn) {
 }
 
 try {
+  await check('concurrent resume windows are serialized before appending', async () => {
+    const sid = 'archive-concurrent'
+    const messages = [msg('a', 'first'), msg('b', 'second')]
+    const results = await Promise.all(Array.from({ length: 4 }, () => send('claude.archiveMessages', { sessionId: sid, messages })))
+    assert.ok(results.every(result => result.result === true))
+    assert.deepEqual(archivedRows(sid).map(row => row.id), ['a', 'b'])
+  })
+
+  await check('bounded cache eviction still checks older archived IDs on disk', async () => {
+    const sid = 'archive-bounded'
+    const messages = Array.from({ length: 10005 }, (_, i) => msg(`row-${i}`, 'text'))
+    await send('claude.archiveMessages', { sessionId: sid, messages })
+    await send('claude.archiveMessages', { sessionId: sid, messages: [messages[0], messages[10004], msg('new', 'new')] })
+    assert.equal(archivedRows(sid).length, 10006)
+  })
+
   await check('re-archiving the same window does not append a second copy', async () => {
     const sid = 'archive-dup'
     const window = [msg('a', 'first'), msg('b', 'second'), msg('c', 'third')]

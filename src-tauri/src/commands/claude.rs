@@ -5578,6 +5578,7 @@ pub async fn claude_client_resume(
             option_field(&options, "ultracode"),
             option_field(&options, "workspaceId"),
             option_field(&options, "workspaceName"),
+            option_field(&options, "historyBefore"),
         ],
         SESSION_TIMEOUT,
     )

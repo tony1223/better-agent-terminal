@@ -11,6 +11,65 @@ const REMOTE_GZIP_FRAME_MAGIC: &[u8] = b"BATGZIP1\0";
 // Match tungstenite's default message limit, including after decompression.
 const MAX_REMOTE_FRAME_BYTES: usize = 64 * 1024 * 1024;
 
+// Serialized, uncompressed size, including the invoke envelope.
+pub const REMOTE_RESPONSE_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+fn serialized_response_size(value: &Value) -> usize {
+    struct Counter(usize);
+    impl Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(bytes.len());
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter(0);
+    match serde_json::to_writer(&mut counter, value) {
+        Ok(()) => counter.0,
+        Err(_) => usize::MAX,
+    }
+}
+
+pub fn guard_remote_invoke_response(response: Value) -> Value {
+    let size = serialized_response_size(&response);
+    if size < REMOTE_RESPONSE_MAX_BYTES {
+        return response;
+    }
+    json!({
+        "type": "invoke-error",
+        "id": response.get("id"),
+        "error": "Remote response exceeds the serialized size budget; request a smaller page",
+        "code": "REMOTE_RESPONSE_TOO_LARGE",
+        "details": { "sizeBytes": size, "maxBytes": REMOTE_RESPONSE_MAX_BYTES }
+    })
+}
+
+// Safety net for histories from other runtimes and relayed hosts. Ordinary
+// Claude pages are budgeted by their producer, with cursors, before this point.
+pub fn guard_remote_history_event(mut frame: Value) -> Value {
+    let channel = frame.get("channel").and_then(Value::as_str).unwrap_or("");
+    if frame.get("type").and_then(Value::as_str) != Some("event")
+        || canonical_remote_channel(channel) != "claude:history"
+    {
+        return frame;
+    }
+    let size = serialized_response_size(&frame);
+    if size < REMOTE_RESPONSE_MAX_BYTES {
+        return frame;
+    }
+    let channel = channel.to_owned();
+    let session_id = frame["params"]["sessionId"].clone();
+    frame["params"]["items"] = json!([{
+        "id": "hist-remote-gap", "sessionId": session_id, "role": "system", "timestamp": 0,
+        "content": format!("[History gap: oversized remote history omitted ({size} bytes; hist-remote-gap)]"),
+        "historyGap": { "id": "hist-remote-gap", "sizeBytes": size }
+    }]);
+    frame["args"] = json!(event_params_to_legacy_v1_args(&channel, &frame["params"]));
+    frame
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RemoteProtocol {
     LegacyV1,
@@ -505,6 +564,7 @@ pub fn legacy_v1_args_to_params(channel: &str, args: &[Value]) -> Value {
                 "sessionId": args.first().cloned().unwrap_or(Value::Null),
                 "sdkSessionId": args.get(1).cloned().unwrap_or(Value::Null),
                 "options": strip_null_fields(json!({
+                    "historyBefore": if channel == "claude:client-resume" { args.get(16).cloned().unwrap_or(Value::Null) } else { Value::Null },
                     "cwd": args.get(2).cloned().unwrap_or(Value::Null),
                     "model": args.get(3).cloned().unwrap_or(Value::Null),
                     "apiVersion": args.get(4).cloned().unwrap_or(Value::Null),
@@ -1700,5 +1760,43 @@ mod tests {
         );
         assert!(is_proxied_remote_event("claude:stream"));
         assert!(!is_proxied_remote_event("settings:load"));
+    }
+    #[test]
+    fn client_resume_history_cursor_is_additive() {
+        let mut args = vec![Value::Null; 17];
+        args[0] = json!("session-a");
+        args[1] = json!("sdk-a");
+        args[16] = json!(123456);
+        let params = legacy_v1_args_to_params("claude:client-resume", &args);
+        assert_eq!(params["options"]["historyBefore"], json!(123456));
+        assert_eq!(params["sessionId"], json!("session-a"));
+        assert!(legacy_v1_args_to_params("claude:client-resume", &args[..16])["options"].get("historyBefore").is_none());
+    }
+
+}
+
+#[cfg(test)]
+mod response_budget_tests {
+    use super::*;
+
+    #[test]
+    fn oversized_invoke_response_is_request_scoped() {
+        let small = json!({"type": "invoke-result", "id": "other", "result": "ok"});
+        assert_eq!(guard_remote_invoke_response(small.clone()), small);
+        let oversized = json!({"type": "invoke-result", "id": "large-session-request", "result": "x".repeat(REMOTE_RESPONSE_MAX_BYTES)});
+        let guarded = guard_remote_invoke_response(oversized);
+        assert_eq!(guarded["type"], "invoke-error");
+        assert_eq!(guarded["id"], "large-session-request");
+        assert_eq!(guarded["code"], "REMOTE_RESPONSE_TOO_LARGE");
+        assert!(guarded["details"]["sizeBytes"].as_u64().unwrap() > REMOTE_RESPONSE_MAX_BYTES as u64);
+        assert!(serde_json::to_vec(&guarded).unwrap().len() < REMOTE_RESPONSE_MAX_BYTES);
+        assert_eq!(guard_remote_invoke_response(small.clone()), small);
+        let event = json!({"type": "event", "channel": "agent:history", "params": {
+            "sessionId": "large-session", "items": [{"content": "x".repeat(REMOTE_RESPONSE_MAX_BYTES)}]
+        }});
+        let bounded = guard_remote_history_event(event);
+        assert_eq!(bounded["params"]["sessionId"], "large-session");
+        assert_eq!(bounded["params"]["items"][0]["historyGap"]["id"], "hist-remote-gap");
+        assert!(serde_json::to_vec(&bounded).unwrap().len() < REMOTE_RESPONSE_MAX_BYTES);
     }
 }

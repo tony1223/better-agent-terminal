@@ -1,3 +1,4 @@
+import { createBackoff, formatError } from '../utils/resume-recovery'
 import { persistTranscriptArchive, readArchivePage, releaseArchivedSnapshots, resolveTranscriptPrompt, transcriptArchivePrefix, type ArchivePage } from '../utils/transcript-window'
 import { host, isTauri } from '../host-api'
 import { getClaudeModelPricing, type ClaudeModelPricing } from '../utils/claude-model-pricing'
@@ -30,7 +31,7 @@ import { summarizeInterruptedTurn } from '../utils/interrupted-turn'
 import { decideTurnResync, mergeMissedHostMessages, shouldIgnoreStreamingStatus, TURN_RESYNC_MIN_INTERVAL_MS, TURN_RESYNC_MIN_QUIET_MS, TURN_RESYNC_POLL_MAX_MS, TURN_RESYNC_POLL_MS } from '../utils/turn-resync'
 import { filenameForPastedImage, maybeResizeImageDataUrl, readFileAsDataUrl } from '../utils/file-data-url'
 import { extractInterruptedContinuation } from '../utils/interrupted-prompt'
-import { dedupeMessagesById } from '../utils/message-dedupe'
+import { BoundedSeenIds, dedupeMessagesById } from '../utils/message-dedupe'
 import { isTauriNativeDropInside, listenTauriNativeDrop } from '../utils/tauri-native-drop'
 import { useRemoteDropUpload } from '../utils/remote-drop-upload'
 import { RemoteUploadConfirmDialog } from './RemoteUploadConfirmDialog'
@@ -550,6 +551,8 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
   }, [isWorktreeSession, terminal?.worktreePath, terminal?.worktreeBranch])
   const markdownCwd = worktreeInfo?.worktreePath || terminal?.worktreePath || cwd
   const [promptSuggestion, setPromptSuggestion] = useState<string | null>(null)
+  const [historyBefore, setHistoryBefore] = useState<number | null>(null)
+  const [isLoadingHistoryPage, setIsLoadingHistoryPage] = useState(false)
   const [isResumingHistory, setIsResumingHistory] = useState(false)
   const [isTransferringToCodex, setIsTransferringToCodex] = useState(false)
   const [activePlanFile, setActivePlanFile] = useState<string | null>(null)
@@ -671,6 +674,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
   // cleared; the host dedupes too, so the worst case for a stale entry here is
   // a redundant append, never a lost row.
   const archivedIdsRef = useRef<Set<string>>(new Set())
+  const seenMessageIds = useMemo(() => new BoundedSeenIds(), [sessionId])
   const archivingRef = useRef(false)
   const archiveRevisionRef = useRef(0)
   const archiveRequestRef = useRef<symbol | null>(null)
@@ -1377,6 +1381,8 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
         if (host.debug.isDebugMode === true) host.debug.log(`${tag} onMessage`, (msg as ClaudeMessage).id)
         workspaceStore.updateTerminalActivity(sessionId)
         const message = msg as ClaudeMessage
+        const alreadySeen = seenMessageIds.has(message.id)
+        seenMessageIds.add(message.id)
         if (message.role !== 'user' && message.kind !== 'stale-turn-warning') {
           setSessionMeta(prev => clearRuntimeStatusMeta(prev))
         }
@@ -1392,6 +1398,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
             archivedCountRef.current = 0
             loadedFromArchiveRef.current = 0
             archivedIdsRef.current = new Set()
+            seenMessageIds.clear()
             setHasMoreArchived(false)
             serializeArchiveWrite(() => host.claude.clearArchive(sessionId)).catch(() => {})
           }
@@ -1496,6 +1503,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
               return nextPrev
             }
           }
+          if (alreadySeen) return nextPrev
           return [...nextPrev, finalMsg]
         })
         streamingThinkingStore.reset('')
@@ -1857,6 +1865,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
         archivedCountRef.current = 0
         loadedFromArchiveRef.current = 0
         archivedIdsRef.current = new Set()
+        seenMessageIds.clear()
         setHasMoreArchived(false)
         setStreamingText('')
         setStreamingThinking('')
@@ -1914,7 +1923,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
             break
           }
         }
-        const historyItems = mainItems
+        const historyItems = dedupeMessagesById(mainItems)
         const archiveHistoryItems = transcriptArchivePrefix(historyItems)
         const liveHistoryItems = historyItems.slice(archiveHistoryItems.length)
         if (historyItems.length > 0 || loadedFromArchiveRef.current === 0) {
@@ -1925,6 +1934,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
           loadedFromArchiveRef.current = 0
           setHasMoreArchived(false)
           archivedIdsRef.current = new Set()
+          seenMessageIds.clear()
           archivingRef.current = true
           serializeArchiveWrite(async () => {
             if (!await host.claude.clearArchive(sessionId)) return false
@@ -1953,6 +1963,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
               host.debug.log('[ClaudeAgentPanel] history archive failed:', String(err))
             })
         }
+        for (const item of historyItems) seenMessageIds.add(item.id)
         setStreamingText('')
         setStreamingThinking('')
 
@@ -2213,12 +2224,16 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
     const stag = `[Claude:${sessionId.slice(0, 8)}]`
     const dlog = (...args: unknown[]) => host.debug.log(...args)
     let cancelled = false
+    let retryTimer: ReturnType<typeof setTimeout> | undefined
+    const retryBackoff = createBackoff()
     cancelStartedSessionCleanup(sessionId)
     dlog(`${stag} mount effect: inSet=${startedSessions.has(sessionId)} promise=${startedSessionPromises.has(sessionId)}`)
-    ;(async () => {
+    const initialize = async () => {
       try {
         await ensureSessionStarted()
+        retryBackoff.reset()
         if (cancelled) return
+        setMessages(prev => prev.filter(m => m.id !== `sys-resume-failed-${sessionId}`))
         const existingState = await host.claude.getSessionState(sessionId).catch(() => null)
         if (cancelled || !existingState) return
         const existingMessages = normalizeMessageItems(existingState.messages)
@@ -2230,7 +2245,8 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
         // land just after onHistory and erase the recovered local/remote view.
         // Fresh sessions already initialize with an empty messages array.
         if (existingMessages.length > 0) {
-          setMessages(existingMessages)
+          for (const item of existingMessages) seenMessageIds.add(item.id)
+          setMessages(prev => dedupeMessagesById([...prev, ...existingMessages]))
         } else if (host.debug.isDebugMode === true) {
           dlog(`${stag} skip empty getSessionState messages; preserving rendered history count=${messageCountRef.current} remote=${isRemoteConnected}`)
         }
@@ -2273,11 +2289,18 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
             dlog(`${stag} repaired duplicate profile session identity replacement=${replacementId?.slice(0, 8) || 'failed'} detail=${message}`)
             return
           }
-          dlog(`${stag} mount effect init failed: ${message}`)
+          dlog(`${stag} mount effect init failed: ${formatError(err, { sessionId })}`)
+          setMessages(prev => [...prev.filter(m => m.id !== `sys-resume-failed-${sessionId}`), {
+            id: `sys-resume-failed-${sessionId}`, sessionId, role: 'system' as const,
+            content: `Session resume failed; retrying: ${message}`, timestamp: Date.now(),
+          }])
+          retryTimer = setTimeout(() => { void initialize() }, retryBackoff.next())
         }
       }
-    })()
+    }
+    void initialize()
     return () => {
+      clearTimeout(retryTimer)
       cancelled = true
       scheduleStartedSessionCleanup(sessionId)
     }
@@ -2373,7 +2396,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
           : 'local remount'
         dlog(`${stag} ensureSessionStarted: ${attachKind}; clientResume for history sdkSessionId=${historySdkSessionId ? historySdkSessionId.slice(0, 8) : 'host-owned'}`)
         try {
-          await host.claude.clientResume(
+          const replay = await host.claude.clientResume(
             sessionId,
             historySdkSessionId,
             historyCwd,
@@ -2389,6 +2412,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
             effectiveEffort,
             effectiveUltracode ? true : undefined,
           )
+          setHistoryBefore((replay as { before?: number | null })?.before ?? null)
           if (isRemoteConnected) {
             remoteHistoryAttachedRef.current = true
           } else {
@@ -2399,14 +2423,14 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
           }
           return
         } catch (err: unknown) {
-          dlog(`${stag} clientResume failed: ${err instanceof Error ? err.message : String(err)}`)
+          dlog(`${stag} clientResume failed: ${formatError(err, { sessionId })}`)
           // Stop rather than "recover" into a worse state. A host record means
           // the session lives there, and a remote host may be mid-turn even
           // when it reports no record (its read-only probes answer from a map
           // that only local startSession populates). resumeSession would tear
           // that turn down, and it is redundant besides: the sidecar's
           // clientResume already falls back to a resume internally.
-          if (existingState || isRemoteConnected) return
+          if (existingState || isRemoteConnected) throw err
           // Local session with no host record — fall through to
           // resumeSession / startSession.
         }
@@ -2442,6 +2466,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
             effectiveUltracode ? true : undefined,
             getAutoCompactWindowForModel(effectiveModel || savedModel, settingsStore.getSettings().autoCompactWindow),
           ) as ResumeSessionResult | null
+          setHistoryBefore((resumeResult as { before?: number | null })?.before ?? null)
           if (!resumeResult?.stale) {
             if (isRemoteConnected) {
               remoteHistoryAttachedRef.current = true
@@ -2908,6 +2933,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
     archivedCountRef.current = 0
     loadedFromArchiveRef.current = 0
     archivedIdsRef.current = new Set()
+    seenMessageIds.clear()
     setHasMoreArchived(false)
     setStreamingText('')
     setStreamingThinking('')
@@ -3277,6 +3303,7 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
       archivedCountRef.current = 0
       loadedFromArchiveRef.current = 0
       archivedIdsRef.current = new Set()
+      seenMessageIds.clear()
       setHasMoreArchived(false)
       setStreamingText('')
       setStreamingThinking('')
@@ -5427,6 +5454,24 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
             <div className="claude-load-more">
               <button className="claude-load-more-btn" onClick={loadNewerArchived} disabled={isLoadingMore}>{t('claude.loadNewerMessages')}</button>
               <button className="claude-load-more-btn" onClick={loadLatestArchived} disabled={isLoadingMore}>{t('claude.backToLatestMessages')}</button>
+            </div>
+          )}
+          {historyBefore !== null && (
+            <div className="claude-load-more">
+              <button className="claude-load-more-btn" disabled={isLoadingHistoryPage} onClick={async () => {
+                setIsLoadingHistoryPage(true)
+                try {
+                  const page = await host.claude.clientResume(sessionId, workspaceStore.getState().terminals.find(t => t.id === sessionId)?.sdkSessionId || '', cwd,
+                    undefined, undefined, undefined, undefined, undefined, undefined,
+                    undefined, undefined, undefined, undefined, undefined, historyBefore) as {
+                      items?: unknown[]; before?: number | null
+                    }
+                  setMessages(prev => dedupeMessagesById([...normalizeMessageItems(page.items || []), ...prev]))
+                  setHistoryBefore(page.before ?? null)
+                } catch (err) {
+                  host.debug.log(`History page failed: ${formatError(err, { sessionId })}`)
+                } finally { setIsLoadingHistoryPage(false) }
+              }}>Load older history</button>
             </div>
           )}
           {isResumingHistory && (

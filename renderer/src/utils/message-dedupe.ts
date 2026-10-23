@@ -40,3 +40,18 @@ export function dedupeMessagesById<T extends { id: string }>(items: T[]): T[] {
   kept.reverse()
   return kept
 }
+
+/** Per-panel/session replay memory survives live-window archiving, with bounded retention. */
+export class BoundedSeenIds extends Set<string> {
+  private readonly limit: number
+  constructor(limit = 10_000) {
+    super()
+    this.limit = limit
+  }
+  add(id: string): this {
+    if (!id) return this
+    super.add(id)
+    if (this.size > this.limit) this.delete(this.values().next().value!)
+    return this
+  }
+}
