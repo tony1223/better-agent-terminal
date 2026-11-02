@@ -275,6 +275,23 @@
     "closeWorkspace": "Close Workspace"
   },
 
+  "projects": {
+    "title": "Projects",
+    "repoCount_one": "{{count}} repo",
+    "repoCount_other": "{{count}} repos",
+    "sessionCount_one": "{{count}} Claude session",
+    "sessionCount_other": "{{count}} Claude sessions",
+    "rescan": "Rescan",
+    "scanning": "Scanning…",
+    "empty": "No git repositories found next to your workspaces.",
+    "openFailed": "Could not open project: {{error}}",
+    "scanFailed": "Could not scan projects: {{error}}",
+    "startSession": "Start Claude session",
+    "startSessionInWorktree": "Start Claude session in worktree",
+    "detached": "(detached)",
+    "worktreeFallback": "worktree"
+  },
+
   "profiles": {
     "title": "Profiles",
     "saveCurrent": "Save Current",

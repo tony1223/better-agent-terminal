@@ -6,6 +6,7 @@ import { AgentPresetId, getAgentPreset } from '../types/agent-presets'
 import { normalizeAgentParams } from '../types/agent-profiles'
 import { clearPreviewCache } from '../components/TerminalThumbnail'
 import { settingsStore } from './settings-store'
+import { projectPathKey } from '../utils/project-path'
 
 type Listener = () => void
 
@@ -63,6 +64,8 @@ function defaultModelForNewAgent(agentPreset?: AgentPresetId): string | undefine
 }
 
 class WorkspaceStore {
+  constructor(private readonly persistChanges = true) {}
+
   private state: AppState = {
     workspaces: [],
     activeWorkspaceId: null,
@@ -121,6 +124,55 @@ class WorkspaceStore {
   }
 
   // Workspace actions
+  private focusProject(path: string, name: string): void {
+    const key = projectPathKey(path)
+    const existing = this.state.workspaces.find(w => projectPathKey(w.folderPath) === key)
+    const workspaceId = existing?.id ?? this.addWorkspace(name, path).id
+    this.setActiveWorkspace(workspaceId)
+    const agent = this.getWorkspaceTerminals(workspaceId).find(t => t.agentPreset && t.agentPreset !== 'none')
+    if (agent) this.setFocusedTerminal(agent.id)
+    else this.addTerminal(workspaceId, 'claude-code')
+  }
+
+  async openProject(path: string, name: string): Promise<void> {
+    if (this.viewedRemoteProfileId === null) {
+      this.focusProject(path, name)
+      await this.save()
+      await this._savePromise
+      return
+    }
+    const binding = JSON.stringify([this.viewedRemoteOrigin, this.viewedRemoteProfileId])
+    const checkBinding = () => {
+      if (binding !== JSON.stringify([this.viewedRemoteOrigin, this.viewedRemoteProfileId])) {
+        throw new Error('Project target changed; try again in the current profile')
+      }
+    }
+    // Reuse the established host-owned workspace save/load contract. Build
+    // a detached draft, then render only the host's confirmed snapshot.
+    const pending = this._savePromise.then(async () => {
+      checkBinding()
+      const raw = await host.workspace.load()
+      checkBinding()
+      const draft = new WorkspaceStore(false)
+      if (raw) {
+        const value = JSON.parse(raw)
+        if (!Array.isArray(value.workspaces) || !Array.isArray(value.terminals)) throw new Error('Invalid host workspace data')
+        draft.applySerializedData(raw)
+      }
+      draft.focusProject(path, name)
+      if (!await host.workspace.save(draft.serializeData())) throw new Error('Host rejected the project workspace')
+      checkBinding()
+      const confirmed = await host.workspace.load()
+      checkBinding()
+      if (!confirmed) throw new Error('Host did not return the project workspace')
+      this.applySerializedData(confirmed)
+    })
+    // A failed action remains visible to its caller without poisoning the
+    // normal save queue or modifying the rendered workspace optimistically.
+    this._savePromise = pending.catch(() => {})
+    await pending
+  }
+
   addWorkspace(name: string, folderPath: string): Workspace {
     const workspace: Workspace = {
       id: uuidv4(),
@@ -912,9 +964,17 @@ class WorkspaceStore {
   // Set by App.tsx whenever the active profile changes. Non-null marks this
   // window as a remote client viewing the given HOST profile id; it gates which
   // host workspace:reload broadcasts this window is allowed to apply.
-  setViewedRemoteProfileId(id: string | null): void { this.viewedRemoteProfileId = id }
+  setViewedRemoteProfileId(id: string | null): void {
+    if (this.viewedRemoteProfileId === id) return
+    this.viewedRemoteProfileId = id
+    this.notify()
+  }
   getViewedRemoteProfileId(): string | null { return this.viewedRemoteProfileId }
-  setViewedRemoteOrigin(origin: string | null): void { this.viewedRemoteOrigin = origin }
+  setViewedRemoteOrigin(origin: string | null): void {
+    if (this.viewedRemoteOrigin === origin) return
+    this.viewedRemoteOrigin = origin
+    this.notify()
+  }
   getViewedRemoteOrigin(): string | null { return this.viewedRemoteOrigin }
 
   listenForReload(): () => void {
@@ -1018,7 +1078,24 @@ class WorkspaceStore {
   }
 
   // Persistence — serialized to prevent concurrent writes from corrupting the file
+  private serializeData(): string {
+    const savedTerminals = this.state.terminals.map(t => ({
+      id: t.id, workspaceId: t.workspaceId, type: t.type, agentPreset: t.agentPreset,
+      title: t.title, alias: t.alias, cwd: t.cwd, sdkSessionId: t.sdkSessionId,
+      claudeCliSessionId: t.claudeCliSessionId, claudeCliRestartToken: t.claudeCliRestartToken,
+      model: t.model, permissionMode: t.permissionMode, agentParams: t.agentParams,
+      sessionMeta: t.sessionMeta, worktreePath: t.worktreePath, worktreeBranch: t.worktreeBranch,
+      worktreeMergedKind: t.worktreeMergedKind, historyKey: t.historyKey, procfilePath: t.procfilePath,
+    }))
+    const workspaces = this.state.workspaces.map(w =>
+      w.id === this.state.activeWorkspaceId && this.state.focusedTerminalId
+        ? { ...w, focusedTerminalId: this.state.focusedTerminalId } : w)
+    return JSON.stringify({ workspaces, activeWorkspaceId: this.state.activeWorkspaceId,
+      activeGroup: this.activeGroup, terminals: savedTerminals, activeTerminalId: this.state.activeTerminalId })
+  }
+
   async save(): Promise<void> {
+    if (!this.persistChanges) return
     // If a save is already queued, skip — the queued save will capture the latest state
     if (this._savePending) {
       return
@@ -1029,47 +1106,14 @@ class WorkspaceStore {
     this._savePromise = this._savePromise.then(async () => {
       this._savePending = false
       const saveStartedAt = Date.now()
-      const savedTerminals = this.state.terminals.map(t => ({
-        id: t.id,
-        workspaceId: t.workspaceId,
-        type: t.type,
-        agentPreset: t.agentPreset,
-        title: t.title,
-        alias: t.alias,
-        cwd: t.cwd,
-        sdkSessionId: t.sdkSessionId,
-        claudeCliSessionId: t.claudeCliSessionId,
-        claudeCliRestartToken: t.claudeCliRestartToken,
-        model: t.model,
-        permissionMode: t.permissionMode,
-        agentParams: t.agentParams,
-        sessionMeta: t.sessionMeta,
-        worktreePath: t.worktreePath,
-        worktreeBranch: t.worktreeBranch,
-        worktreeMergedKind: t.worktreeMergedKind,
-        historyKey: t.historyKey,
-        procfilePath: t.procfilePath,
-      }))
-      // Persist current focus into the active workspace at save time
-      const wsWithFocus = this.state.workspaces.map(w =>
-        w.id === this.state.activeWorkspaceId && this.state.focusedTerminalId
-          ? { ...w, focusedTerminalId: this.state.focusedTerminalId }
-          : w
-      )
-      const data = JSON.stringify({
-        workspaces: wsWithFocus,
-        activeWorkspaceId: this.state.activeWorkspaceId,
-        activeGroup: this.activeGroup,
-        terminals: savedTerminals,
-        activeTerminalId: this.state.activeTerminalId,
-      })
+      const data = this.serializeData()
       if (data === this._lastSavedData) {
         return
       }
       debugLog('[workspace-store] save start', {
         windowId: this.windowId,
-        workspaceCount: wsWithFocus.length,
-        terminalCount: savedTerminals.length,
+        workspaceCount: this.state.workspaces.length,
+        terminalCount: this.state.terminals.length,
         activeWorkspaceId: this.state.activeWorkspaceId,
         activeTerminalId: this.state.activeTerminalId,
         focusedTerminalId: this.state.focusedTerminalId,
@@ -1083,8 +1127,8 @@ class WorkspaceStore {
           windowId: this.windowId,
           ok,
           elapsedMs,
-          workspaceCount: wsWithFocus.length,
-          terminalCount: savedTerminals.length,
+          workspaceCount: this.state.workspaces.length,
+          terminalCount: this.state.terminals.length,
         })
       }
     }).catch(e => {
