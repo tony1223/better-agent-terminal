@@ -501,7 +501,10 @@ export const TerminalPanel = memo(function TerminalPanel({
       fontFamily: settingsStore.getFontFamilyString(),
       cursorBlink: true,
       scrollback: 10000,
-      convertEol: !isClaudeCliTerminal,
+      // PTY output already ends lines with CRLF. Fullscreen TUIs (Claude Code's
+      // tui: fullscreen) send a bare LF to move down a row in place, so turning it
+      // into CRLF shifts repainted rows to column 1 on every scroll.
+      convertEol: false,
       allowProposedApi: true,
       allowTransparency: !isClaudeCliTerminal,
       disableStdin: useDirectTerminalKeyInput,
