@@ -16,8 +16,10 @@ function normalizePlatform(value) {
 const platform = normalizePlatform(process.env.BAT_RELEASE_PLATFORM || process.platform)
 const limits = [
   { platform: 'mac', ext: '.dmg', env: 'BAT_MAX_DMG_MB', maxMb: 340 },
-  { platform: 'win', ext: '.exe', env: 'BAT_MAX_EXE_MB', maxMb: 330 },
-  { platform: 'win', ext: '.msi', env: 'BAT_MAX_MSI_MB', maxMb: 330 },
+  // Claude SDK 0.3.316 + Codex 0.166.0 + Node 24.22.2 produce a measured
+  // 361 MB Windows NSIS installer; retain headroom for the upstream binaries.
+  { platform: 'win', ext: '.exe', env: 'BAT_MAX_EXE_MB', maxMb: 400 },
+  { platform: 'win', ext: '.msi', env: 'BAT_MAX_MSI_MB', maxMb: 400 },
   { platform: 'win', ext: '.zip', env: 'BAT_MAX_WIN_ZIP_MB', maxMb: 430 },
   { platform: 'linux', ext: '.AppImage', env: 'BAT_MAX_APPIMAGE_MB', maxMb: 340 },
 ].map(limit => ({

@@ -11,15 +11,10 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { request } from 'node:http'
-import { join, resolve } from 'node:path'
-import { createTauriSmokeData } from './helpers/tauri-smoke-data'
+import { join } from 'node:path'
+import { createTauriSmokeData, tauriSmokeExecutable } from './helpers/tauri-smoke-data'
 
-const exePath = resolve(
-  'src-tauri',
-  'target',
-  process.env.TAURI_PROFILE === 'debug' ? 'debug' : 'release',
-  process.platform === 'win32' ? 'better-agent-terminal.exe' : 'better-agent-terminal',
-)
+const exePath = tauriSmokeExecutable()
 
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
 function killTree(pid: number): void {

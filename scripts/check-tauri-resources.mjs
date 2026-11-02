@@ -5,7 +5,9 @@
 //
 // The all-in-one cap (--max-mb in package.json) measures UNCOMPRESSED resources
 // and is dominated by three vendored single-file binaries, each embedding its
-// own runtime: codex.exe (~343 MB), claude.exe (~253 MB), node.exe (~88 MB).
+// own runtime: codex.exe (~355 MB), claude.exe (~320 MB), node.exe (~90 MB).
+// Claude SDK 0.3.316 + Codex 0.166.0 + Node 24.22.2 total ~891 MB on Windows
+// x64, including the Codex helper binaries; the current cap is 950 MB.
 // Those come verbatim from upstream npm platform packages, so the total tracks
 // upstream growth and must be raised when they legitimately grow — it is not a
 // budget we can trim from our own code. Size is also platform-dependent (the

@@ -3,12 +3,10 @@
 import assert from 'node:assert/strict'
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { join, resolve } from 'node:path'
-import { createTauriSmokeData } from './helpers/tauri-smoke-data'
+import { join } from 'node:path'
+import { createTauriSmokeData, tauriSmokeExecutable } from './helpers/tauri-smoke-data'
 
-const exePath = resolve('src-tauri', 'target',
-  process.env.TAURI_PROFILE === 'debug' ? 'debug' : 'release',
-  process.platform === 'win32' ? 'better-agent-terminal.exe' : 'better-agent-terminal')
+const exePath = tauriSmokeExecutable()
 const sleep = (ms: number) => new Promise<void>(done => setTimeout(done, ms))
 
 async function waitFor(label: string, predicate: () => boolean) {

@@ -857,7 +857,7 @@ jobs:
           published=0
           while IFS= read -r asset; do
             echo "uploading $(basename "$asset")"
-            gh release upload "$RELEASE_TAG" "$asset" --clobber
+            node scripts/upload-release-asset.mjs "$RELEASE_TAG" "$asset"
             published=$((published + 1))
           done < <(find src-tauri/target/release/bundle -type f \
                      \( -name '*.dmg' -o -name '*.exe' -o -name '*.AppImage' \) \

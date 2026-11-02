@@ -14,15 +14,9 @@
 
 import { spawn, spawnSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { resolve } from 'node:path'
-import { createTauriSmokeData } from './helpers/tauri-smoke-data'
+import { createTauriSmokeData, tauriSmokeExecutable } from './helpers/tauri-smoke-data'
 
-const exePath = resolve(
-  'src-tauri',
-  'target',
-  process.env.TAURI_PROFILE === 'debug' ? 'debug' : 'release',
-  process.platform === 'win32' ? 'better-agent-terminal.exe' : 'better-agent-terminal',
-)
+const exePath = tauriSmokeExecutable()
 
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
 
