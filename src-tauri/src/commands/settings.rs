@@ -27,6 +27,9 @@ pub async fn settings_save(app: tauri::AppHandle, data: String) -> Result<(), Co
     crate::async_rt::spawn_blocking(move || {
         let dir = app_data::app_data_dir(&app).map_err(SettingsError::AppDataDir)?;
         settings_save_impl(&dir, data)?;
+        // Badge visibility depends on the persisted setting. Recompute only
+        // after the write, including when the notification count is unchanged.
+        crate::commands::app::apply_dock_badge(&app);
         crate::rate_limit_resume::settings_changed(&crate::host_context::HostContext::from_app(app));
         Ok(())
     })
