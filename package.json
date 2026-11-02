@@ -67,6 +67,7 @@
     "test:host-api": "tsx tests/host-api.test.ts",
     "test:tauri-launch": "tsx tests/tauri-launch.test.ts",
     "test:tauri-dynamic-window-smoke": "tsx tests/tauri-dynamic-window-smoke.test.ts",
+    "test:tauri-window-reopen-smoke": "tsx tests/tauri-window-reopen-smoke.test.ts",
     "test:tauri-capabilities": "node tests/tauri-capabilities.test.mjs",
     "test:tauri-version-sync": "node tests/tauri-version-sync.test.mjs",
     "test:tauri-windows-installer": "node tests/tauri-windows-installer.test.mjs",

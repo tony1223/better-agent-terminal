@@ -4,6 +4,53 @@ use tauri::{AppHandle, Manager};
 
 pub const TAURI_DATA_DIR_ENV: &str = "BAT_TAURI_DATA_DIR";
 
+#[cfg(all(feature = "desktop", windows))]
+pub(crate) fn desktop_startup_guard(identifier: &str) -> std::io::Result<std::fs::File> {
+    // The native plugin publishes its mutex before its callback window. Serialize
+    // setup so simultaneous launches cannot slip through that short interval.
+    // Windows temp directories are per-user; the file lock is released by the OS
+    // even when a secondary instance exits from inside the plugin.
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(std::env::temp_dir().join(format!("bat-startup-{identifier}.lock")))?;
+    file.lock()?;
+    Ok(file)
+}
+
+#[cfg(feature = "desktop")]
+pub(crate) fn scope_desktop_instance(
+    context: &mut tauri::Context<tauri::Wry>,
+) -> std::io::Result<()> {
+    let Some(dir) = std::env::var(TAURI_DATA_DIR_ENV)
+        .ok()
+        .map(|raw| PathBuf::from(raw.trim()))
+        .filter(|dir| !dir.as_os_str().is_empty())
+    else {
+        return Ok(());
+    };
+    std::fs::create_dir_all(&dir)?;
+    let dir = std::fs::canonicalize(dir)?;
+    let identifier = scoped_instance_identifier(&context.config().identifier, &dir);
+    context.config_mut().identifier = identifier;
+    Ok(())
+}
+
+#[cfg(feature = "desktop")]
+fn scoped_instance_identifier(identifier: &str, data_dir: &std::path::Path) -> String {
+    use sha2::{Digest, Sha256};
+    let path = data_dir.to_string_lossy();
+    // Windows paths are case insensitive. Canonicalization also resolves relative
+    // paths and directory aliases before computing the native lock identity.
+    #[cfg(windows)]
+    let path = path.to_lowercase();
+    let digest = format!("{:x}", Sha256::digest(path.as_bytes()));
+    // Keep the macOS Unix socket path under its platform length limit.
+    format!("{identifier}.data{}", &digest[..32])
+}
+
 // Keep existing Electron users on the Electron build's userData directory
 // so accounts/snippets/terminal-history migrate cleanly. Fresh Tauri installs
 // use Tauri's default app_data_dir(), which follows the bundle identifier.
@@ -102,6 +149,36 @@ fn select_app_data_dir(
 mod tests {
     use super::*;
     use std::fs;
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn desktop_instance_scope_is_stable_and_separates_data_directories() {
+        let first = PathBuf::from("first-data-dir");
+        let second = PathBuf::from("second-data-dir");
+        let id = "org.tonyq.better-agent-terminal";
+        assert_eq!(
+            scoped_instance_identifier(id, &first),
+            scoped_instance_identifier(id, &first)
+        );
+        assert_ne!(
+            scoped_instance_identifier(id, &first),
+            scoped_instance_identifier(id, &second)
+        );
+        assert_ne!(
+            scoped_instance_identifier(id, &first),
+            scoped_instance_identifier("another.app", &first)
+        );
+    }
+
+    #[cfg(all(feature = "desktop", windows))]
+    #[test]
+    fn desktop_instance_scope_ignores_windows_path_case() {
+        let id = "org.tonyq.better-agent-terminal";
+        assert_eq!(
+            scoped_instance_identifier(id, std::path::Path::new(r"C:\BAT\data")),
+            scoped_instance_identifier(id, std::path::Path::new(r"c:\bat\DATA")),
+        );
+    }
 
     fn tmp_dir(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("bat-app-data-{name}-{}", std::process::id()))

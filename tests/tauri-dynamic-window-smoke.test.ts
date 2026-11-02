@@ -11,8 +11,8 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { request } from 'node:http'
-import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { createTauriSmokeData } from './helpers/tauri-smoke-data'
 
 const exePath = resolve(
   'src-tauri',
@@ -22,38 +22,6 @@ const exePath = resolve(
 )
 
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
-const electronProductName = 'BetterAgentTerminal'
-const tauriIdentifier = 'org.tonyq.better-agent-terminal'
-
-function appDataDir(): string {
-  const electronDir = electronAppDataDir()
-  return existsSync(electronDir) ? electronDir : tauriAppDataDir()
-}
-
-function electronAppDataDir(): string {
-  if (process.platform === 'win32') {
-    const appData = process.env.APPDATA
-    if (!appData) throw new Error('APPDATA is not set')
-    return join(appData, electronProductName)
-  }
-  if (process.platform === 'darwin') {
-    return join(homedir(), 'Library', 'Application Support', electronProductName)
-  }
-  return join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), electronProductName)
-}
-
-function tauriAppDataDir(): string {
-  if (process.platform === 'win32') {
-    const appData = process.env.APPDATA
-    if (!appData) throw new Error('APPDATA is not set')
-    return join(appData, tauriIdentifier)
-  }
-  if (process.platform === 'darwin') {
-    return join(homedir(), 'Library', 'Application Support', tauriIdentifier)
-  }
-  return join(process.env.XDG_DATA_HOME || join(homedir(), '.local', 'share'), tauriIdentifier)
-}
-
 function killTree(pid: number): void {
   if (process.platform === 'win32') {
     spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' })
@@ -107,12 +75,13 @@ async function run(): Promise<void> {
   }
 
   const token = `dyn-${Date.now()}-${process.pid}`
-  const logPath = join(appDataDir(), 'logs', 'debug.log')
+  const fixture = createTauriSmokeData('bat-dynamic-window-')
+  const logPath = join(fixture.dataDir, 'logs', 'debug.log')
   const proc = spawn(exePath, [], {
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
     env: {
-      ...process.env,
+      ...fixture.env,
       BAT_TAURI_DYNAMIC_WINDOW_SMOKE_TOKEN: token,
     },
   })
@@ -172,6 +141,7 @@ async function run(): Promise<void> {
   } finally {
     if (proc.pid) killTree(proc.pid)
     await sleep(500)
+    fixture.cleanup()
   }
 }
 

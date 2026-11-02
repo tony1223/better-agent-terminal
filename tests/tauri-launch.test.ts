@@ -15,6 +15,7 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { createTauriSmokeData } from './helpers/tauri-smoke-data'
 
 const exePath = resolve(
   'src-tauri',
@@ -42,7 +43,8 @@ async function run(): Promise<void> {
   // Capture stderr so we can sniff for Rust panics (`thread '...' panicked`)
   // or sidecar-bridge bring-up failures. stdout stays piped so launching
   // the WebView doesn't block on a full pipe.
-  const proc = spawn(exePath, [], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
+  const fixture = createTauriSmokeData('bat-launch-')
+  const proc = spawn(exePath, [], { env: fixture.env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
   let exitedEarly: number | null = null
   let stderr = ''
   proc.stderr?.on('data', (chunk: Buffer) => { stderr += chunk.toString() })
@@ -57,6 +59,7 @@ async function run(): Promise<void> {
   await sleep(3000)
 
   if (exitedEarly !== null) {
+    fixture.cleanup()
     throw new Error(`tauri-launch: exe exited early with code ${exitedEarly}; stderr=${stderr}`)
   }
 
@@ -64,6 +67,9 @@ async function run(): Promise<void> {
   // a fresh user data dir — those don't include "panicked" so we can
   // afford a strict substring match.
   if (/thread '[^']*' panicked/.test(stderr)) {
+    if (proc.pid) killTree(proc.pid)
+    await sleep(500)
+    fixture.cleanup()
     throw new Error(`tauri-launch: panic detected on stderr:\n${stderr}`)
   }
 
@@ -72,6 +78,7 @@ async function run(): Promise<void> {
   killTree(proc.pid!)
   // Give the OS a moment to reap the process so the test runner can exit.
   await sleep(500)
+  fixture.cleanup()
 
   console.log('tauri-launch: passed (binary loaded, no early crash, no panics)')
 }

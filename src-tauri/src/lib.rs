@@ -151,10 +151,19 @@ pub fn run_headless_server_cli(context: tauri::Context<tauri::Wry>) -> i32 {
 }
 
 #[cfg(feature = "desktop")]
-pub fn run(context: tauri::Context<tauri::Wry>) {
+pub fn run(mut context: tauri::Context<tauri::Wry>) {
+    // Explicit data directories (dev and smoke tests) are independent hosts.
+    // Give their native instance locks a separate identity from the installed app.
+    app_data::scope_desktop_instance(&mut context)
+        .expect("could not scope the desktop instance to its data directory");
+    #[cfg(windows)]
+    let startup_guard = app_data::desktop_startup_guard(&context.config().identifier)
+        .expect("could not acquire the desktop startup lock");
     let app = app_builder(false)
         .build(context)
         .expect("error while building better-agent-terminal");
+    #[cfg(windows)]
+    drop(startup_guard);
     app.run(|app_handle, event| {
         if let tauri::RunEvent::ExitRequested { .. } = event {
             // Capture refreshed Codex tokens / memory back to the active
@@ -176,7 +185,15 @@ pub fn run(context: tauri::Context<tauri::Wry>) {
 
 #[cfg(feature = "desktop")]
 fn app_builder(headless: bool) -> tauri::Builder<tauri::Wry> {
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+    // Detect a second desktop launch before any other plugin or setup can
+    // restore windows, start runtimes, or bind the remote server port.
+    if !headless {
+        builder = builder.plugin(tauri_plugin_single_instance::init(
+            app_cmd::handle_second_instance,
+        ));
+    }
+    builder
         .menu(app_menu::build)
         .on_menu_event(app_menu::handle_event)
         .plugin(tauri_plugin_opener::init())
@@ -198,6 +215,7 @@ fn app_builder(headless: bool) -> tauri::Builder<tauri::Wry> {
         .manage(remote_server::RustRemoteServerState::default())
         .manage(codex_app_server::CodexAppServerState::default())
         .manage(window_registry::WindowRegistryState::default())
+        .manage(app_cmd::WindowOpenState::default())
         .manage(sidecar::SidecarState::new())
         .setup(move |app| {
             if let Some(data_dir) = app_data::app_data_dir_opt(app.handle()) {
