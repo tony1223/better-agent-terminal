@@ -72,7 +72,7 @@ fn format_args(args: Vec<Value>) -> String {
             other => other.to_string(),
         })
         .collect();
-    parts.join(" ")
+    crate::connection_diagnostics::redact(&parts.join(" "))
 }
 
 fn debug_log_line(message: &str) -> String {
@@ -110,6 +110,19 @@ mod tests {
     fn log_line_has_renderer_prefix() {
         let line = debug_log_line("hello");
         assert!(line.contains(" [renderer] hello\n"));
+    }
+
+    #[test]
+    fn renderer_diagnostics_redact_connection_credentials() {
+        let message = format_args(vec![
+            json!("failed wss://example.invalid?token=fixture-secret&fp=AA"),
+            json!({"remoteToken": "second-secret"}),
+            json!("{\"token\" : \"third-secret\"}"),
+        ]);
+        assert!(!message.contains("fixture-secret"));
+        assert!(!message.contains("second-secret"));
+        assert!(!message.contains("third-secret"));
+        assert!(message.contains("?token=[REDACTED]&fp=AA"));
     }
 
     #[test]

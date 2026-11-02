@@ -23,6 +23,7 @@ import { mkdirSync, appendFileSync, statSync, openSync, closeSync, writeFileSync
 import { dirname, join } from 'node:path'
 
 import { resolveDataDir } from './data-paths.mjs'
+import { redactConnectionCredentials } from './connection-redaction.mjs'
 
 const MAX_LOG_BYTES = 5 * 1024 * 1024 // 5 MB
 let _logPath = null
@@ -84,7 +85,7 @@ function formatLine(level, args) {
     if (typeof a === 'string') return a
     try { return JSON.stringify(a) } catch { return String(a) }
   })
-  return `${ts} ${level} ${parts.join(' ')}\n`
+  return `${ts} ${level} ${redactConnectionCredentials(parts.join(' '))}\n`
 }
 
 function emit(level, args) {
