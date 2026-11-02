@@ -55,6 +55,26 @@ async function main() {
   seen.push(...page.items.map(item => item.id))
   assert.deepEqual(seen, rows.map(item => item.id))
 
+  const cappedRows = Array.from({ length: 14 }, (_, i) => row(i))
+  const cappedLoad = async (offset: number, limit: number) => {
+    const end = cappedRows.length - offset
+    const start = Math.max(0, end - Math.min(limit, 3))
+    return { messages: cappedRows.slice(start, end), total: cappedRows.length, start, end, hasMore: start > 0 }
+  }
+  let capped = await readArchivePage(cappedLoad, normalize, { total: 14, limit: 10 })
+  const cappedSeen = [...capped.items.map(item => item.id)]
+  while (capped.start > 0) {
+    capped = await readArchivePage(cappedLoad, normalize, { total: 14, end: capped.start, limit: 10 })
+    cappedSeen.unshift(...capped.items.map(item => item.id))
+  }
+  assert.deepEqual(cappedSeen, cappedRows.map(item => item.id), 'honor host byte-reduced ranges when paging backwards')
+  const cappedForward = [...capped.items.map(item => item.id)]
+  while (capped.end < cappedRows.length) {
+    capped = await readArchivePage(cappedLoad, normalize, { total: 14, start: capped.end, limit: 10 })
+    cappedForward.push(...capped.items.map(item => item.id))
+  }
+  assert.deepEqual(cappedForward, cappedRows.map(item => item.id), 'retry a narrower forward page instead of skipping its prefix')
+
   const anchor = await readArchivePage(load, normalize, { total: rows.length, end: 80, limit: 20 })
   rows.push(row(500), row(501))
   const older = await readArchivePage(load, normalize, { total: anchor.total, end: anchor.start, limit: 20 })

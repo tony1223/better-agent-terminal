@@ -1135,6 +1135,26 @@ async function run() {
     })
   }
 
+  // A failed resume stays an ordinary failed invoke; the next session can
+  // resume on the same adapter without disconnecting or reloading workspaces.
+  {
+    const calls: { cmd: string; args?: Record<string, unknown> }[] = []
+    const invoke: TauriInvoke = async <T>(cmd: string, args?: Record<string, unknown>) => {
+      calls.push({ cmd, args })
+      if (cmd === 'claude_client_resume' && args?.sessionId === 'failed-session') throw new Error('history unavailable')
+      return { ok: true, before: 100, items: [] } as T
+    }
+    setWindow({ __TAURI_INTERNALS__: { invoke } })
+    const mod = await loadFreshAdapter()
+    await assert.rejects(mod.host.claude.clientResume('failed-session', 'sdk-a', '/repo'), /history unavailable/)
+    const page = await mod.host.claude.clientResume('other-session', 'sdk-b', '/repo',
+      undefined, undefined, undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined, undefined, undefined, 100)
+    assert.equal((page as { before: number }).before, 100)
+    assert.equal((calls.find(c => c.args?.sessionId === 'other-session')?.args?.options as Record<string, unknown>).historyBefore, 100)
+    assert.equal(calls.some(c => c.cmd === 'remote_disconnect' || c.cmd === 'remote_connect' || c.cmd === 'workspace_load'), false)
+  }
+
   console.log('host-api: passed')
 }
 

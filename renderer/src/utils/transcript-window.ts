@@ -50,7 +50,7 @@ export function transcriptArchivePrefix<T extends { status?: string }>(items: re
   return items.slice(0, excess)
 }
 
-export interface ArchiveResult { messages: unknown[]; total: number; hasMore: boolean; promptIds?: string[] }
+export interface ArchiveResult { messages: unknown[]; total: number; hasMore: boolean; promptIds?: string[]; start?: number; end?: number }
 export interface ArchivePage<T> { items: T[]; start: number; end: number; total: number }
 type ArchiveLoader = (offset: number, limit: number) => Promise<ArchiveResult>
 
@@ -69,7 +69,14 @@ export async function readArchivePage<T>(load: ArchiveLoader, normalize: (items:
     if (wantedEnd !== undefined && nextTotal !== total) { total = nextTotal; continue }
     total = nextTotal
     const end = Math.max(0, total - offset)
-    const start = Math.max(0, end - limit)
+    // A newer host can reduce the row count to meet its serialized byte cap.
+    // Use its actual range so the next page does not skip the omitted rows.
+    const start = Number.isSafeInteger(result.start) && result.start! >= 0 && result.start! <= end
+      ? result.start! : Math.max(0, end - limit)
+    if (request.start !== undefined && start > request.start) {
+      limit = Math.max(1, end - start)
+      continue
+    }
     const items = normalize(result.messages || [])
     const fitting = fittingTranscriptCount(items, request.start !== undefined)
     if (fitting < items.length) { limit = Math.max(1, fitting); continue }

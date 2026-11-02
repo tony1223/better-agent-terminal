@@ -516,7 +516,9 @@ async function main() {
     )
     assert.match(
       panelSource,
-      /dedupeMessagesById\(\[\.\.\.loadedArchive, \.\.\.messages\]\)/,
+      panel === 'ClaudeAgentPanel'
+        ? /mergeHistoryMessages\(\[\.\.\.historyPageItems, \.\.\.loadedArchive, \.\.\.messages\]\)/
+        : /dedupeMessagesById\(\[\.\.\.loadedArchive, \.\.\.messages\]\)/,
       `${panel} should dedupe the archived+live merge`,
     )
     // The dep is what resyncs streaming state and metadata after a reconnect.

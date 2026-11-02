@@ -38,6 +38,8 @@ export interface ClaudeToolCall {
   timestamp: number
   // Set by the renderer when the terminal result lands; drives the elapsed chip.
   completedAt?: number
+  // A paged transcript can deliver a result before its request metadata.
+  historyToolResult?: boolean
 }
 
 export interface ClaudeSessionState {
@@ -54,6 +56,7 @@ export interface ClaudeSessionState {
   // the time can find out it owes the agent an answer.
   pendingAskUser?: unknown
   pendingPermission?: unknown
+  historyBefore?: number | null
 }
 
 // Discriminator helper

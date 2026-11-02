@@ -31,12 +31,12 @@ use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 #[cfg(feature = "desktop")]
 use tauri::{AppHandle, Manager, State, WebviewWindow};
@@ -2372,15 +2372,99 @@ pub(crate) fn archive_messages_in_dir(
     if items.is_empty() {
         return Ok(true);
     }
-    let archive_dir = data_dir.join("message-archives");
-    fs::create_dir_all(&archive_dir)?;
     let path = archive_file_path(data_dir, session_id);
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    let _lock = lock_archive(&path)?;
+    let cache = archive_id_cache(&path);
+    let mut cache = cache.lock().unwrap_or_else(|err| err.into_inner());
+    let stamp = archive_stamp(&path);
+    if cache.stamp != stamp {
+        *cache = ArchiveIdCache::default();
+        if let Ok(file) = fs::File::open(&path) {
+            for line in BufReader::new(file).lines() {
+                if let Some(id) = archived_row_id(&line?) { cache.remember(id); }
+            }
+        }
+        cache.stamp = stamp;
+    }
+    let mut candidates = items.iter().filter_map(|item| item.get("id").and_then(Value::as_str))
+        .filter(|id| !cache.ids.contains(*id)).map(str::to_owned).collect::<HashSet<_>>();
+    // The small recent-ID cache handles ordinary flushes. Check evicted IDs
+    // against disk as well so old replays remain idempotent after 10,000 rows.
+    if cache.ids.len() >= ARCHIVE_SEEN_LIMIT && !candidates.is_empty() {
+        for line in BufReader::new(fs::File::open(&path)?).lines() {
+            if let Some(id) = archived_row_id(&line?) { candidates.remove(&id); }
+        }
+    }
+    let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
     for item in items {
+        let id = item.get("id").and_then(Value::as_str);
+        if let Some(id) = id {
+            if !candidates.remove(id) { continue; }
+        }
         serde_json::to_writer(&mut file, item)?;
         writeln!(file)?;
+        if let Some(id) = id { cache.remember(id.to_owned()); }
     }
+    cache.stamp = archive_stamp(&path);
     Ok(true)
+}
+
+const ARCHIVE_SEEN_LIMIT: usize = 10_000;
+const ARCHIVE_PAGE_MAX_BYTES: usize = crate::remote_core::REMOTE_RESPONSE_MAX_BYTES / 2 - 64 * 1024;
+
+#[derive(Default)]
+struct ArchiveIdCache {
+    stamp: Option<(u64, Option<SystemTime>)>,
+    ids: HashSet<String>,
+    order: VecDeque<String>,
+}
+
+impl ArchiveIdCache {
+    fn remember(&mut self, id: String) {
+        if !self.ids.insert(id.clone()) { return; }
+        self.order.push_back(id);
+        if self.order.len() > ARCHIVE_SEEN_LIMIT {
+            if let Some(oldest) = self.order.pop_front() { self.ids.remove(&oldest); }
+        }
+    }
+}
+
+fn archive_stamp(path: &Path) -> Option<(u64, Option<SystemTime>)> {
+    fs::metadata(path).ok().map(|metadata| (metadata.len(), metadata.modified().ok()))
+}
+
+fn archived_row_id(line: &str) -> Option<String> {
+    #[derive(Deserialize)]
+    struct Id { id: Option<String> }
+    serde_json::from_str::<Id>(line).ok()?.id
+}
+
+fn lock_archive(path: &Path) -> std::io::Result<fs::File> {
+    if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
+    // A separate lock survives clearing/replacing the JSONL on Windows too.
+    let lock = OpenOptions::new().create(true).read(true).write(true).truncate(false)
+        .open(path.with_extension("lock"))?;
+    lock.lock()?;
+    Ok(lock)
+}
+
+fn archive_id_cache(path: &Path) -> Arc<Mutex<ArchiveIdCache>> {
+    static CACHES: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<ArchiveIdCache>>>>> = OnceLock::new();
+    let mut caches = CACHES.get_or_init(Mutex::default).lock().unwrap_or_else(|err| err.into_inner());
+    if caches.len() >= 128 {
+        caches.retain(|_, cache| Arc::strong_count(cache) > 1);
+    }
+    Arc::clone(caches.entry(path.to_owned()).or_default())
+}
+
+fn bound_archived_row(item: Value, session_id: &str) -> Value {
+    let size = serde_json::to_vec(&item).map_or(usize::MAX, |bytes| bytes.len());
+    if size < ARCHIVE_PAGE_MAX_BYTES / 2 { return item; }
+    let id = item.get("id").and_then(Value::as_str).unwrap_or("hist-archive-gap")
+        .chars().take(256).collect::<String>();
+    json!({ "id": id, "sessionId": session_id, "role": "system", "timestamp": 0,
+        "content": format!("[History gap: oversized archived record omitted ({size} bytes; {id})]"),
+        "historyGap": { "id": id, "sizeBytes": size } })
 }
 
 pub(crate) fn load_archived_from_dir(
@@ -2442,20 +2526,31 @@ pub(crate) fn load_archived_from_dir(
     if end == 0 {
         return json!({ "messages": [], "total": total, "hasMore": false });
     }
-    let start = end.saturating_sub(limit);
-    let messages = lines[start..end]
+    let mut start = end.saturating_sub(limit);
+    let mut messages = lines[start..end]
         .iter()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .map(|item| bound_archived_row(item, session_id))
         .collect::<Vec<_>>();
-    json!({ "messages": messages, "total": total, "hasMore": start > 0 })
+    while serde_json::to_vec(&messages).map_or(usize::MAX, |bytes| bytes.len()) >= ARCHIVE_PAGE_MAX_BYTES {
+        messages.remove(0);
+        start += 1;
+    }
+    json!({ "messages": messages, "total": total, "hasMore": start > 0, "start": start, "end": end })
 }
 
 pub(crate) fn clear_archive_in_dir(data_dir: &Path, session_id: &str) -> bool {
     if session_id.is_empty() {
         return false;
     }
-    let _ = fs::remove_file(archive_file_path(data_dir, session_id));
-    true
+    let path = archive_file_path(data_dir, session_id);
+    let Ok(_lock) = lock_archive(&path) else { return false; };
+    let cache = archive_id_cache(&path);
+    *cache.lock().unwrap_or_else(|err| err.into_inner()) = ArchiveIdCache::default();
+    match fs::remove_file(path) {
+        Ok(()) => true,
+        Err(err) => err.kind() == std::io::ErrorKind::NotFound,
+    }
 }
 
 fn login_success(value: &Value) -> bool {
@@ -5578,6 +5673,7 @@ pub async fn claude_client_resume(
             option_field(&options, "ultracode"),
             option_field(&options, "workspaceId"),
             option_field(&options, "workspaceName"),
+            option_field(&options, "historyBefore"),
         ],
         SESSION_TIMEOUT,
     )
@@ -6662,6 +6758,65 @@ mod tests {
         assert_eq!(metadata["total"], 5);
         assert_eq!(load_archived_from_dir(&data_dir, "missing", 0, 0)["promptIds"], json!([]));
         fs::remove_dir_all(data_dir).ok();
+    }
+
+    #[test]
+    fn native_archive_serializes_replays_and_invalidates_external_writes() {
+        let dir = temp_data_dir("archive-concurrent");
+        let rows = json!([{ "id": "a" }, { "id": "a" }, { "id": "b" }]);
+        std::thread::scope(|scope| {
+            for _ in 0..6 {
+                let dir = &dir;
+                let rows = &rows;
+                scope.spawn(move || archive_messages_in_dir(dir, "s", rows).unwrap());
+            }
+        });
+        assert_eq!(load_archived_from_dir(&dir, "s", 0, 20)["total"], 2);
+        let path = archive_file_path(&dir, "s");
+        let mut file = OpenOptions::new().append(true).open(path).unwrap();
+        writeln!(file, "{{\"id\":\"external\"}}").unwrap();
+        drop(file);
+        archive_messages_in_dir(&dir, "s", &json!([{ "id": "external" }, { "id": "c" }])).unwrap();
+        assert_eq!(load_archived_from_dir(&dir, "s", 0, 20)["total"], 4);
+        assert!(clear_archive_in_dir(&dir, "s"));
+        archive_messages_in_dir(&dir, "s", &rows).unwrap();
+        assert_eq!(load_archived_from_dir(&dir, "s", 0, 20)["total"], 2);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn native_archive_dedupes_ids_evicted_from_its_cache() {
+        let dir = temp_data_dir("archive-evicted");
+        let rows = (0..ARCHIVE_SEEN_LIMIT + 5).map(|i| json!({ "id": format!("row-{i}") })).collect::<Vec<_>>();
+        archive_messages_in_dir(&dir, "s", &json!(rows)).unwrap();
+        archive_messages_in_dir(&dir, "s", &json!([rows[0], rows[rows.len() - 1], { "id": "new" }])).unwrap();
+        assert_eq!(load_archived_from_dir(&dir, "s", 0, 1)["total"], rows.len() + 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn native_archive_pages_stay_bounded_without_skipping_rows() {
+        let dir = temp_data_dir("archive-budget");
+        let mut rows = (0..12).map(|i| json!({ "id": format!("row-{i}"), "content": "x".repeat(600_000) })).collect::<Vec<_>>();
+        rows.push(json!({ "id": "oversized", "content": "z".repeat(4 * 1024 * 1024) }));
+        archive_messages_in_dir(&dir, "s", &json!(rows)).unwrap();
+        let mut offset = 0;
+        let mut ids = HashSet::new();
+        loop {
+            let page = load_archived_from_dir(&dir, "s", offset, 100);
+            assert!(serde_json::to_vec(&page).unwrap().len() < ARCHIVE_PAGE_MAX_BYTES + 1024);
+            for item in page["messages"].as_array().unwrap() {
+                assert!(ids.insert(item["id"].as_str().unwrap().to_owned()));
+                if item["id"] == "oversized" { assert!(item.get("historyGap").is_some()); }
+            }
+            let start = page["start"].as_u64().unwrap() as u32;
+            if start == 0 { break; }
+            let next = rows.len() as u32 - start;
+            assert!(next > offset);
+            offset = next;
+        }
+        assert_eq!(ids.len(), rows.len());
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
