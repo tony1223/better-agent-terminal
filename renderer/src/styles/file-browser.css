@@ -877,9 +877,13 @@
 }
 
 .file-preview-markdown .mermaid svg {
+  display: block;
   max-width: 100%;
   height: auto;
+  margin: 0 auto;
 }
+
+.file-preview-markdown .mermaid-rendered { white-space: normal; }
 
 .file-preview-markdown .mermaid-error {
   border: 1px dashed #e74c3c;

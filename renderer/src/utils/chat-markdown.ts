@@ -1,7 +1,12 @@
 import { host } from '../host-api'
-import { marked } from 'marked'
+import { Marked } from 'marked'
 import DOMPurify from 'dompurify'
 import { WeightedLruCache } from './weighted-lru-cache'
+import { renderMermaidCodeBlock } from './markdown-mermaid'
+
+// File preview has its own renderer. Never depend on import order changing the
+// global marked singleton underneath the chat renderer and its HTML cache.
+const chatMarkdown = new Marked({ renderer: { code: renderMermaidCodeBlock } })
 
 const markdownCache = new WeightedLruCache<string, string>(
   500,
@@ -130,7 +135,7 @@ export function renderChatMarkdown(text: string, cwd: string, options: { cache?:
       return `[${fileUrl}](${fileUrl})`
     }
   )
-  const parsedHtml = marked.parse(processed) as string
+  const parsedHtml = chatMarkdown.parse(processed) as string
   const rawHtml = cwd
     ? parsedHtml.replace(
         /<a\s+([^>]*?)href="([^"#][^"]*)"/gi,

@@ -1,5 +1,5 @@
 import { host } from '../host-api'
-import { memo, useEffect, useMemo, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import {
   cleanPathLinkCandidate,
   extractPathLinkCandidates,
@@ -11,6 +11,7 @@ import {
 import { RevealPathMenu, type RevealPathTarget } from './RevealPathMenu'
 import { LinkContextMenu, type LinkMenuTarget } from './LinkContextMenu'
 import { WeightedLruCache } from '../utils/weighted-lru-cache'
+import { renderMermaidBlocks } from '../utils/markdown-mermaid'
 
 interface ResolvedPathLink {
   rawPath: string
@@ -96,6 +97,7 @@ function applyResolvedPathLinks(html: string, links: Map<string, ResolvedPathLin
 }
 
 function ChatMarkdownComponent({ text, cwd, className = 'claude-markdown', resolvePathLinks = true, cache = true }: ChatMarkdownProps) {
+  const containerRef = useRef<HTMLDivElement>(null)
   const [resolvedLinks, setResolvedLinks] = useState<Map<string, ResolvedPathLink>>(new Map())
   const [menu, setMenu] = useState<RevealPathTarget | LinkMenuTarget | null>(null)
   const html = useMemo(() => renderChatMarkdown(text, cwd, { cache }), [text, cwd, cache])
@@ -153,9 +155,14 @@ function ChatMarkdownComponent({ text, cwd, className = 'claude-markdown', resol
     [html, resolvedLinks, resolvePathLinks],
   )
 
+  useEffect(() => {
+    if (containerRef.current) return renderMermaidBlocks(containerRef.current)
+  }, [linkedHtml])
+
   return (
     <>
       <div
+        ref={containerRef}
         className={className}
         dangerouslySetInnerHTML={{ __html: linkedHtml }}
         onClick={(e) => {
