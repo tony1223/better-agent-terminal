@@ -13,8 +13,8 @@ on:
         required: false
         type: boolean
         default: false
-      macos_arm64_only:
-        description: 'Recover only macOS ARM64 installers without rebuilding published platforms'
+      macos_only:
+        description: 'Recover only macOS installers without rebuilding published platforms'
         required: false
         type: boolean
         default: false
@@ -38,14 +38,14 @@ jobs:
     steps:
       - name: Validate recovery inputs
         env:
-          MACOS_ARM64_ONLY: ${{ inputs.macos_arm64_only }}
+          MACOS_ONLY: ${{ inputs.macos_only }}
           SOURCE_RUN_ID: ${{ inputs.reuse_updater_run_id }}
         shell: bash
         run: |
-          if [ "$MACOS_ARM64_ONLY" = "true" ]; then
+          if [ "$MACOS_ONLY" = "true" ]; then
             [[ "$SOURCE_RUN_ID" =~ ^[0-9]+$ ]] || { echo "Recovery requires a numeric source run id"; exit 1; }
           elif [ -n "$SOURCE_RUN_ID" ]; then
-            echo "A source run id is only valid for macOS ARM64 recovery"
+            echo "A source run id is only valid for macOS recovery"
             exit 1
           fi
 
@@ -367,7 +367,7 @@ jobs:
       # stable tags, so an unstable leg can never block a stable release. All other
       # legs follow the usual rule: build on stable tags, or on -pre tags when the leg
       # opts in via prerelease: true.
-      BUILD_MATRIX_ENTRY: ${{ (!inputs.macos_arm64_only || (matrix.platform == 'mac' && matrix.arch == 'arm64')) && ((matrix.pre_only && contains(inputs.release_tag, '-pre')) || (!matrix.pre_only && (!contains(inputs.release_tag, '-pre') || matrix.prerelease))) }}
+      BUILD_MATRIX_ENTRY: ${{ (!inputs.macos_only || matrix.platform == 'mac') && ((matrix.pre_only && contains(inputs.release_tag, '-pre')) || (!matrix.pre_only && (!contains(inputs.release_tag, '-pre') || matrix.prerelease))) }}
 
     steps:
       - name: Skip non-prerelease target
@@ -469,6 +469,10 @@ jobs:
         shell: bash
         run: |
           RUST_BIN="${CARGO_HOME:-$HOME/.cargo}/bin"
+          # macOS 15 ARM runners install rustup and its shims through Homebrew.
+          if [ ! -x "$RUST_BIN/cargo" ]; then
+            RUST_BIN="$(dirname "$(command -v rustup)")"
+          fi
           echo "$RUST_BIN" >> "$GITHUB_PATH"
           export PATH="$RUST_BIN:$PATH"
           command -v rustup
@@ -792,7 +796,20 @@ jobs:
           # matching the pubkey in tauri.conf.json.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: node scripts/tauri-build-mode.mjs --mode ${{ matrix.bundle_mode }} --bundles ${{ matrix.bundle }}
+        shell: bash
+        run: |
+          if [ "${{ matrix.platform }}" = "mac" ]; then
+            # Finder/disk-image attachment can fail transiently on hosted macOS.
+            # Keep verbose bundler diagnostics and retry once on the same build.
+            for attempt in 1 2; do
+              if node scripts/tauri-build-mode.mjs --mode ${{ matrix.bundle_mode }} --bundles ${{ matrix.bundle }} --verbose; then
+                exit 0
+              fi
+              if [ "$attempt" = "1" ]; then sleep 10; fi
+            done
+            exit 1
+          fi
+          node scripts/tauri-build-mode.mjs --mode ${{ matrix.bundle_mode }} --bundles ${{ matrix.bundle }}
 
       - name: Record built stable Rust crates
         if: env.BUILD_MATRIX_ENTRY == 'true' && runner.environment == 'github-hosted'
@@ -934,7 +951,7 @@ jobs:
       # generate-update-manifest reads nothing but updater-meta.json plus the
       # *.tar.gz bundles staged beside it.
       - name: Wait for original run before merging updater metadata
-        if: inputs.macos_arm64_only
+        if: inputs.macos_only
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -958,7 +975,7 @@ jobs:
       # Keep every successful original leg. Download the current run second so
       # recovered metadata takes precedence without replacing other installers.
       - name: Download original updater metadata
-        if: inputs.macos_arm64_only
+        if: inputs.macos_only
         uses: actions/download-artifact@v4
         with:
           github-token: ${{ github.token }}
@@ -1102,7 +1119,7 @@ jobs:
     needs: [build, release]
     # `always()` for the same reason as `release`: a failed Linux or macOS leg
     # says nothing about whether the Windows installer is publishable.
-    if: ${{ always() && !inputs.macos_arm64_only && !contains(inputs.release_tag, '-pre') && needs.release.result == 'success' }}
+    if: ${{ always() && !inputs.macos_only && !contains(inputs.release_tag, '-pre') && needs.release.result == 'success' }}
     # Deliberately still windows-latest: this job downloads a built artifact and
     # checksums it, so it never runs node-gyp and the VS 2026 problem that pins
     # the build legs to windows-2025 cannot reach it.
@@ -1209,7 +1226,7 @@ jobs:
   # can't stop the x86_64 bundle from publishing, and vice versa.
   bat-server-build:
     needs: verify
-    if: ${{ !inputs.macos_arm64_only }}
+    if: ${{ !inputs.macos_only }}
     strategy:
       fail-fast: false
       matrix:
@@ -1363,7 +1380,7 @@ jobs:
     # bundles are independent deliverables, so they land as soon as they are
     # built rather than queueing behind the slowest desktop leg.
     needs: [create-release, bat-server-build]
-    if: ${{ always() && !inputs.macos_arm64_only && needs.create-release.result == 'success' }}
+    if: ${{ always() && !inputs.macos_only && needs.create-release.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
