@@ -695,6 +695,12 @@ fn remember_ignored_turn(session: &mut CodexSession, turn_id: String) {
     }
 }
 
+fn turn_is_stale_for_session(session: &CodexSession, method: &str, turn_id: &str) -> bool {
+    session.ignored_turn_ids.iter().any(|id| id == turn_id)
+        || (method != "turn/started"
+            && session.active_turn_id.as_deref().is_some_and(|active| active != turn_id))
+}
+
 fn remember_warned_stale_turn(session: &mut CodexSession, turn_id: &str) -> bool {
     if session.warned_stale_turn_ids.iter().any(|id| id == turn_id) {
         return false;
@@ -4563,15 +4569,8 @@ impl CodexAppServerState {
         let turn_id = turn_id_from_params(params)?;
         let sessions = self.inner.sessions.lock().expect("codex sessions lock");
         let session = sessions.get(session_id)?;
-        if session.ignored_turn_ids.iter().any(|id| id == &turn_id) {
+        if turn_is_stale_for_session(session, method, &turn_id) {
             return Some((turn_id, session.active_turn_id.clone()));
-        }
-        if method != "turn/started" {
-            if let Some(active_turn_id) = &session.active_turn_id {
-                if active_turn_id != &turn_id {
-                    return Some((turn_id, Some(active_turn_id.clone())));
-                }
-            }
         }
         None
     }
@@ -6574,7 +6573,8 @@ impl CodexAppServerState {
 
     /// The approval this session is blocked on, if any, in the same shape the
     /// one-shot `claude:permission-request` carried. Taken before the sessions
-    /// lock, never while holding it, so the two locks are never nested.
+    /// lock; release the approvals lock before acquiring the sessions lock.
+    /// Turn completion takes them in the other order to claim its cleanup.
     fn pending_approval_data(&self, session_id: &str) -> Option<Value> {
         self.inner
             .pending_approvals
@@ -6986,25 +6986,29 @@ impl CodexAppServerState {
     // Cancel any approvals still waiting on a session whose turn ended or was
     // aborted: answer codex with "cancel" and dismiss the renderer prompts.
     fn cancel_pending_approvals(&self, app: &HostContext, session_id: &str) {
-        let drained: Vec<(String, PendingApproval)> = {
-            let mut approvals = self
-                .inner
-                .pending_approvals
-                .lock()
-                .expect("codex approvals lock");
-            let keys: Vec<String> = approvals
-                .iter()
-                .filter(|(_, entry)| entry.session_id == session_id)
-                .map(|(key, _)| key.clone())
-                .collect();
-            keys.into_iter()
-                .filter_map(|key| approvals.remove(&key).map(|entry| (key, entry)))
-                .collect()
-        };
+        let drained = self.take_pending_approvals(session_id);
+        Self::cancel_approvals(app, drained);
+    }
+
+    fn take_pending_approvals(&self, session_id: &str) -> Vec<(String, PendingApproval)> {
+        // When both locks are needed, take sessions before approvals. Responses
+        // and events are dispatched only after releasing both locks.
+        let mut approvals = self.inner.pending_approvals.lock().expect("codex approvals lock");
+        let keys: Vec<String> = approvals
+            .iter()
+            .filter(|(_, entry)| entry.session_id == session_id)
+            .map(|(key, _)| key.clone())
+            .collect();
+        keys.into_iter()
+            .filter_map(|key| approvals.remove(&key).map(|entry| (key, entry)))
+            .collect()
+    }
+
+    fn cancel_approvals(app: &HostContext, drained: Vec<(String, PendingApproval)>) {
         for (tool_use_id, pending) in drained {
             log_codex(
                 app,
-                session_id,
+                &pending.session_id,
                 format!("approval {tool_use_id} cancelled (turn ended)"),
             );
             if let Some(connection) = pending.connection.upgrade() {
@@ -7014,7 +7018,7 @@ impl CodexAppServerState {
             emit(
                 app,
                 "claude:permission-resolved",
-                session_id,
+                &pending.session_id,
                 "toolUseId",
                 json!(tool_use_id),
             );
@@ -8197,12 +8201,25 @@ fn handle_turn_completed(
     params: &Value,
 ) {
     state.touch_connection_activity();
-    state.cancel_pending_approvals(app, session_id);
-    let (reason, result, meta, error_message, turn_id, thread_id) = {
+    let (reason, result, meta, error_message, turn_id, thread_id, approvals) = {
         let mut sessions = state.inner.sessions.lock().expect("codex sessions lock");
         let Some(session) = sessions.get_mut(session_id) else {
             return;
         };
+        // The early notification filter runs before logging and other work.
+        // A replacement can install its images in that gap. Recheck under the
+        // same lock that protects the state transition and file cleanup.
+        if let Some(id) = turn_id_from_params(params) {
+            if turn_is_stale_for_session(session, "turn/completed", &id) {
+                drop(sessions);
+                log_codex(app, session_id, format!("late completion ignored at state update turn={id}"));
+                return;
+            }
+        }
+        // Capture only this turn's approvals before another send can start.
+        // Answer them after releasing the sessions lock, so an IPC response
+        // or event callback never runs while that lock is held.
+        let approvals = state.take_pending_approvals(session_id);
         let turn = params.get("turn").unwrap_or(params);
         let turn_id = turn_id_from_params(params)
             .or_else(|| session.active_turn_id.clone())
@@ -8254,8 +8271,10 @@ fn handle_turn_completed(
             error_message,
             turn_id,
             thread_id,
+            approvals,
         )
     };
+    CodexAppServerState::cancel_approvals(app, approvals);
     emit(app, "claude:status", session_id, "meta", meta);
     if reason == "completed" {
         state.mark_shared_auth_valid(app, "turn-completed");
@@ -8841,6 +8860,69 @@ mod tests {
             items[0],
             json!({ "type": "image", "url": "https://example.com/screenshot.png" })
         );
+    }
+
+    #[test]
+    #[cfg(not(feature = "desktop"))]
+    fn replaced_turn_completion_cannot_delete_new_image() {
+        let (app, events) = session_sync_test_host();
+        let state = CodexAppServerState::default();
+        state.inner.sessions.lock().unwrap().insert("session-1".into(), test_codex_session());
+        let old_completion = json!({
+            "threadId": "thread-1",
+            "turn": { "id": "turn-1", "status": "interrupted" },
+        });
+        // The reader passed the early stale-event check before send_message
+        // installed the replacement turn. Its completion handler runs later.
+        assert!(state.stale_turn_notification("session-1", "turn/completed", &old_completion).is_none());
+        let (_, images) = build_turn_input("new image", vec![
+            "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jz1sAAAAASUVORK5CYII=".into(),
+        ]).unwrap();
+        let image_path = images[0].clone();
+        {
+            let mut sessions = state.inner.sessions.lock().unwrap();
+            let session = sessions.get_mut("session-1").unwrap();
+            remember_ignored_turn(session, "turn-1".into());
+            session.active_turn_id = None;
+            session.active_turn_key = Some("local-session-1-2".into());
+            session.active_turn_started = false;
+            session.temporary_image_paths = images;
+            session.assistant_text = "new turn output".into();
+        }
+        state.inner.pending_approvals.lock().unwrap().insert("new-approval".into(), PendingApproval {
+            request_id: json!(42),
+            session_id: "session-1".into(),
+            connection: Weak::new(),
+            request_data: json!({ "toolUseId": "new-approval" }),
+        });
+
+        handle_turn_completed(&app, &state, "session-1", &old_completion);
+        assert!(image_path.is_file(), "late old completion must not unlink the new upload");
+        {
+            let mut sessions = state.inner.sessions.lock().unwrap();
+            let session = sessions.get_mut("session-1").unwrap();
+            assert!(session.is_running);
+            assert_eq!(session.active_turn_key.as_deref(), Some("local-session-1-2"));
+            assert_eq!(session.assistant_text, "new turn output");
+            assert!(apply_turn_start_response(session, "local-session-1-2", "turn-2"));
+            session.ignored_turn_ids.clear();
+        }
+        // Once the server id is known, ownership also rejects older ids even
+        // if they are no longer in the bounded ignored-turn history.
+        handle_turn_completed(&app, &state, "session-1", &old_completion);
+        assert!(image_path.is_file());
+        assert!(state.inner.pending_approvals.lock().unwrap().contains_key("new-approval"));
+        assert!(events.lock().unwrap().is_empty(), "old completion must not end the new turn in the UI");
+
+        handle_turn_completed(&app, &state, "session-1", &json!({
+            "threadId": "thread-1",
+            "turn": { "id": "turn-2", "status": "completed" },
+        }));
+        assert!(!image_path.exists(), "the owning turn still cleans up its own upload");
+        assert!(!state.inner.sessions.lock().unwrap()["session-1"].is_running);
+        assert!(state.inner.pending_approvals.lock().unwrap().is_empty());
+        assert!(events.lock().unwrap().iter().any(|(topic, event)|
+            topic == "claude:turn-end" && event["payload"]["turnId"] == "turn-2"));
     }
 
     #[test]

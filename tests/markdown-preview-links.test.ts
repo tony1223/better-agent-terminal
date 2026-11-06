@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
-import { markdownHeadingId, resolveMarkdownPreviewHref } from '../renderer/src/utils/markdown-preview-links'
+import { markdownHeadingId, resolveChatMarkdownHref, resolveMarkdownPreviewHref } from '../renderer/src/utils/markdown-preview-links'
+import { Marked } from 'marked'
 import { openChatMarkdownLink } from '../renderer/src/utils/chat-markdown'
 
 const source = 'C:\\workspaces\\game_bbo\\plans\\game_reconstruction_master_plan.md'
@@ -58,5 +59,45 @@ assert.equal(events[2].detail.path, '//server/share/report.md')
 assert.deepEqual(externalUrls, [], 'file links must stay in the host preview flow')
 openChatMarkdownLink(resolve('https://example.com/report')!)
 assert.deepEqual(externalUrls, ['https://example.com/report'])
+
+const chinesePath = 'D:/ACG拆解重構兔子洞/_tmp/README.md'
+const chatCwd = 'C:/workspaces/project'
+const chatParser = new Marked({ walkTokens(token) {
+  if (token.type === 'link') token.href = resolveChatMarkdownHref(token.href, chatCwd) ?? token.href
+} })
+for (const destination of [chinesePath, `<${chinesePath}>`, encodeURI(chinesePath)]) {
+  const html = chatParser.parse(`[x](${destination})`) as string
+  const href = html.match(/href="([^"]+)"/)![1]
+  assert.ok(!href.includes('%25E'), 'Chinese characters must not be encoded twice')
+  openChatMarkdownLink(href)
+  assert.equal(events.at(-1)!.type, 'preview-markdown')
+  assert.equal(events.at(-1)!.detail.path, chinesePath)
+}
+for (const [href, cwd, path] of [
+  [chinesePath, '', chinesePath],
+  [encodeURI(chinesePath), '/remote/workspace', chinesePath],
+  ['../中文/README.md', 'C:/workspaces/project', 'C:/workspaces/中文/README.md'],
+  ['read%20me.md', 'D:/中文目錄', 'D:/中文目錄/read me.md'],
+  ['D:/中文/100%25/%2520.md', chatCwd, 'D:/中文/100%/%20.md'],
+  ['report%23one.md', 'D:/中文 #1/100%', 'D:/中文 #1/100%/report#one.md'],
+  ['C:/Users/noveltsai/.claude/CLAUDE.md', chatCwd, 'C:/Users/noveltsai/.claude/CLAUDE.md'],
+  ['\\\\server\\share\\中文\\README.md', chatCwd, '//server/share/中文/README.md'],
+] as const) {
+  const resolved = resolveChatMarkdownHref(href, cwd)!
+  openChatMarkdownLink(resolved)
+  assert.equal(events.at(-1)!.detail.path, path)
+}
+openChatMarkdownLink(resolveChatMarkdownHref(chinesePath + '#使用說明', chatCwd)!)
+assert.equal(events.at(-1)!.detail.path, chinesePath)
+assert.equal(decodeURIComponent(events.at(-1)!.detail.fragment), '#使用說明')
+openChatMarkdownLink(resolveChatMarkdownHref('D:/中文/檔案.ts:12:3', chatCwd)!)
+assert.equal(events.at(-1)!.detail.path, 'D:/中文/檔案.ts')
+assert.equal(events.at(-1)!.detail.line, 12)
+assert.equal(events.at(-1)!.detail.column, 3)
+assert.equal(resolveChatMarkdownHref('relative.md', ''), null)
+for (const invalid of ['javascript:alert(1)', 'data:text/html,hello', 'tauri://localhost/report']) {
+  assert.equal(resolveChatMarkdownHref(invalid, chatCwd), null)
+}
+assert.deepEqual(externalUrls, ['https://example.com/report'], 'local links must not use external shell opening')
 
 console.log('markdown-preview-links: passed')

@@ -1,5 +1,14 @@
 /** Resolve document links against the host file, never the WebView's origin. */
 export function resolveMarkdownPreviewHref(href: string, filePath: string): string | null {
+  return resolveMarkdownHref(href, filePath, false)
+}
+
+/** Chat links are relative to the session directory, not a source document. */
+export function resolveChatMarkdownHref(href: string, cwd: string): string | null {
+  return resolveMarkdownHref(href, cwd, true)
+}
+
+function resolveMarkdownHref(href: string, source: string, fromDirectory: boolean): string | null {
   const raw = href.trim()
   if (!raw) return null
   if (raw.startsWith('#')) return raw
@@ -10,15 +19,20 @@ export function resolveMarkdownPreviewHref(href: string, filePath: string): stri
   if (!windowsPath && /^[A-Za-z][A-Za-z0-9+.-]*:/.test(raw) && !/^file:/i.test(raw)) return null
 
   try {
-    const normalizedSource = filePath.replace(/\\/g, '/')
-    if (!/^(?:[A-Za-z]:\/|\/)/.test(normalizedSource)) return null
-    const sourceUrl = new URL((normalizedSource.startsWith('//') ? 'file:' : 'file://')
-      + (/^[A-Za-z]:\//.test(normalizedSource) ? '/' : '')
-      + encodeURI(normalizedSource).replace(/#/g, '%23').replace(/\?/g, '%3F'))
+    const normalizedSource = source.replace(/\\/g, '/')
+    const sourceUrl = /^(?:[A-Za-z]:\/|\/)/.test(normalizedSource)
+      ? new URL((normalizedSource.startsWith('//') ? 'file:' : 'file://')
+        + (/^[A-Za-z]:\//.test(normalizedSource) ? '/' : '')
+        + encodeURI(normalizedSource).replace(/#/g, '%23').replace(/\?/g, '%3F'))
+      : undefined
+    if (fromDirectory && sourceUrl && !sourceUrl.pathname.endsWith('/')) sourceUrl.pathname += '/'
+    // Absolute host paths also work when a session has no cwd. Relative links
+    // still require a host directory; never resolve them against the WebView.
+    if (!sourceUrl && !windowsPath && !/^file:/i.test(raw) && !raw.startsWith('/') && !raw.startsWith('\\\\')) return null
     const normalized = raw.replace(/\\/g, '/').replace(/%(?![A-Fa-f0-9]{2})/g, '%25')
     const url = new URL(
       windowsPath ? `file:///${normalized}` : raw.startsWith('\\\\') ? `file:${normalized}` : normalized,
-      sourceUrl,
+      sourceUrl || 'file:///',
     )
     if (url.protocol !== 'file:') return null
 
@@ -28,7 +42,7 @@ export function resolveMarkdownPreviewHref(href: string, filePath: string): stri
       url.pathname = url.pathname.slice(0, -suffix[0].length) + suffix[1]
       url.hash = `line=${suffix[2]}${suffix[3] ? `&column=${suffix[3]}` : ''}`
     }
-    if (url.host === sourceUrl.host && url.pathname === sourceUrl.pathname) return url.hash || '#'
+    if (!fromDirectory && sourceUrl && url.host === sourceUrl.host && url.pathname === sourceUrl.pathname) return url.hash || '#'
     return url.href
   } catch {
     return null

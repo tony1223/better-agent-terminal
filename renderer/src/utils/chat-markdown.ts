@@ -3,6 +3,7 @@ import { Marked } from 'marked'
 import DOMPurify from 'dompurify'
 import { WeightedLruCache } from './weighted-lru-cache'
 import { renderMermaidCodeBlock } from './markdown-mermaid'
+import { resolveChatMarkdownHref } from './markdown-preview-links'
 
 // File preview has its own renderer. Never depend on import order changing the
 // global marked singleton underneath the chat renderer and its HTML cache.
@@ -62,17 +63,6 @@ export function extractPathLinkCandidates(text: string): string[] {
     if (found.size >= 100) break
   }
   return Array.from(found)
-}
-
-function resolveRelativePath(cwd: string, rel: string): string {
-  const cwdParts = cwd.replace(/\\/g, '/').replace(/\/+$/, '').split('/')
-  const relParts = rel.replace(/\\/g, '/').split('/')
-  for (const part of relParts) {
-    if (part === '' || part === '.') continue
-    if (part === '..') { if (cwdParts.length > 1) cwdParts.pop(); continue }
-    cwdParts.push(part)
-  }
-  return cwdParts.join('/')
 }
 
 // Models occasionally hard-wrap a table row mid-cell (seen in the wild: the
@@ -135,26 +125,26 @@ export function renderChatMarkdown(text: string, cwd: string, options: { cache?:
       return `[${fileUrl}](${fileUrl})`
     }
   )
-  const parsedHtml = chatMarkdown.parse(processed) as string
-  const rawHtml = cwd
-    ? parsedHtml.replace(
-        /<a\s+([^>]*?)href="([^"#][^"]*)"/gi,
-        (match, attrs, href) => {
-          if (/^(?:https?|mailto|tel|file):/i.test(href)) return match
-          const isAbs = href.startsWith('/') || /^[A-Za-z]:[\\/]/.test(href)
-          // Strip a trailing ":line" or ":line:col" suffix so the file URL is
-          // a plain path; preserve the location as the URL fragment instead.
-          // Without this, the colon survives into url.pathname downstream and
-          // fs.stat rejects the path on Windows (':' is invalid in filenames).
-          const suffixMatch = href.match(/^(.+?\.[A-Za-z0-9]{1,10}):(\d+)(?::(\d+))?$/)
-          const cleanHref = suffixMatch ? suffixMatch[1] : href
-          const line = suffixMatch ? Number(suffixMatch[2]) : undefined
-          const column = suffixMatch?.[3] ? Number(suffixMatch[3]) : undefined
-          const absPath = isAbs ? cleanHref : resolveRelativePath(cwd, cleanHref)
-          return `<a ${attrs}href="${pathToFileUrl(absPath, line, column)}"`
-        }
-      )
-    : parsedHtml
+  // Resolve link tokens before marked serializes/escapes HTML. Converting its
+  // already-encoded href attributes with encodeURI double-encodes Chinese,
+  // spaces and percent signs (e.g. %E6 -> %25E6), producing a different file.
+  const rawHtml = chatMarkdown.parse(processed, {
+    walkTokens(token) {
+      // Preserve raw HTML anchors supported by the previous href rewrite.
+      // Their markup is still sanitized below; ordinary code tokens are left
+      // untouched, including examples containing an <a> tag.
+      if (token.type === 'html') {
+        token.text = token.text.replace(/(<a\b[^>]*?\s+href=")([^"]*)(")/gi, (match, prefix, href, suffix) => {
+          const resolved = resolveChatMarkdownHref(href, cwd)
+          return resolved === null ? match : `${prefix}${resolved}${suffix}`
+        })
+        return
+      }
+      if (token.type !== 'link') return
+      const href = resolveChatMarkdownHref(token.href, cwd)
+      if (href !== null) token.href = href
+    },
+  }) as string
   const masked: string[] = []
   const placeheld = rawHtml.replace(/<(pre|code)\b[\s\S]*?<\/\1>/gi, m => {
     masked.push(m)
