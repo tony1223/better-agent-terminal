@@ -128,7 +128,7 @@
     "@anthropic-ai/claude-code": "^2.1.321",
     "@anthropic-ai/sdk": "^1.3.0",
     "@modelcontextprotocol/sdk": "^1.32.2",
-    "@openai/codex": "0.166.0",
+    "@openai/codex": "0.167.0",
     "@vscode/ripgrep": "^1.17.1",
     "@xterm/addon-webgl": "^0.18.0",
     "papaparse": "^5.7.0",
