@@ -3541,6 +3541,12 @@ async function inProcess() {
   // expectedContextWindowForModel: hits map; falls back to base id by
   // stripping [1m]; returns null for unknown.
   assert.equal(expectedContextWindowForModel('claude-opus-5[1m]'), 1000000)
+  assert.equal(expectedContextWindowForModel('claude-fable-5-2[1m]'), 1000000)
+  for (const [preset, budget] of [['auto-compact-200k', 200000], ['auto-compact-300k', 300000], ['1m', 1000000]]) {
+    const selection = `claude-fable-5-2:${preset}`
+    assert.equal(expectedContextWindowForModel(selection), budget)
+    assert.equal(mod.sdkModelForClaudeSelection(selection), 'claude-fable-5-2[1m]')
+  }
   assert.equal(expectedContextWindowForModel('claude-fable-5-1[1m]'), 1000000)
   assert.equal(expectedContextWindowForModel('claude-opus-4-8[1m]'), 1000000)
   assert.equal(expectedContextWindowForModel('claude-opus-4-7'), 1000000)

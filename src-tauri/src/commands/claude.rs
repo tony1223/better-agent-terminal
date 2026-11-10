@@ -1632,6 +1632,13 @@ struct ClaudeModelDef {
 /// Ordered newest-first — the picker renders the rows in this order.
 const CLAUDE_MODEL_TABLE: &[ClaudeModelDef] = &[
     ClaudeModelDef {
+        id: "claude-fable-5-2",
+        label: "Fable 5.2",
+        context_window: 1_000_000,
+        windows: &[Some(200_000), Some(300_000), None],
+        description: None,
+    },
+    ClaudeModelDef {
         id: "claude-opus-5-5",
         label: "Opus 5.5",
         context_window: 1_000_000,
@@ -6405,7 +6412,10 @@ mod tests {
             .iter()
             .map(|model| model["value"].as_str().unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(values[0], "claude-opus-5-5:auto-compact-200k");
+        assert_eq!(values[0], "claude-fable-5-2:auto-compact-200k");
+        assert!(values.contains(&"claude-fable-5-2:auto-compact-300k"));
+        assert!(values.contains(&"claude-fable-5-2:1m"));
+        assert!(values.contains(&"claude-opus-5-5:auto-compact-200k"));
         assert!(values.contains(&"claude-opus-5-5:auto-compact-300k"));
         assert!(values.contains(&"claude-opus-5-5:1m"));
         assert!(values.contains(&"claude-fable-5-1:auto-compact-200k"));

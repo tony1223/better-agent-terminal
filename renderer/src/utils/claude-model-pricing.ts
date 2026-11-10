@@ -12,9 +12,11 @@ const price = (input: number, output: number): ClaudeModelPricing => ({
 
 // USD per million tokens. Keep the cache-history estimates in both panels in
 // sync. Actual SDK cost remains authoritative, especially for cumulative usage.
+// https://platform.claude.com/docs/en/models/fable-5-2/overview
 // https://platform.claude.com/docs/en/models/sonnet-5-5/overview
 // https://platform.claude.com/docs/en/models/haiku-5-5/overview
 const PRICING: Record<string, ClaudeModelPricing> = {
+  'fable-5-2': { ...price(8, 40), cacheRead: 0.20 },
   'opus-5-5': { ...price(4, 20), cacheRead: 0.20 },
   'fable-5-1': { ...price(10, 50), cacheRead: 0.25 },
   'fable-5': price(10, 50),
@@ -44,7 +46,7 @@ export function getClaudeModelPricing(
   // Newer variants precede broader family prefixes, so Sonnet 5.5 cannot
   // accidentally inherit Sonnet 5's higher cache-read price.
   for (const key of [
-    'opus-5-5', 'fable-5-1', 'fable-5', 'opus-5',
+    'fable-5-2', 'opus-5-5', 'fable-5-1', 'fable-5', 'opus-5',
     'opus-4-8', 'opus-4-7', 'opus-4-6', 'opus-4-5', 'opus-4-1',
     'sonnet-5-5', 'sonnet-5', 'sonnet-4-6', 'sonnet-4-5', 'sonnet-3-7', 'sonnet-3-5',
   ]) {

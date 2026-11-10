@@ -60,13 +60,22 @@ function main() {
   const rows = groupClaudeModelRows(CLAUDE_BUILTIN_MODELS)
 
   // New releases lead the picker without removing earlier model selections.
-  assert.equal(rows[0].key, 'claude-opus-5-5', 'Opus 5.5 should be the first row')
-  assert.equal(rows[0].label, 'Opus 5.5')
-  assert.equal(rows[1].key, 'claude-fable-5-1')
-  assert.equal(rows[2].key, 'claude-opus-5')
-  assert.equal(rows[3].key, 'claude-fable-5')
+  assert.deepEqual(rows.slice(0, 5).map(row => row.key), [
+    'claude-fable-5-2', 'claude-opus-5-5', 'claude-fable-5-1', 'claude-opus-5', 'claude-fable-5',
+  ])
+  assert.equal(rows[0].label, 'Fable 5.2')
+  const fable52 = rows[0]
+  assert.deepEqual(fable52.options.map(o => o.label), ['200K', '300K', '1M'])
+  for (const option of fable52.options) {
+    const sdkModel = sdkModelForClaudeSelection(option.value)
+    assert.equal(sdkModel, 'claude-fable-5-2[1m]')
+    assert.equal(contextWindowForClaudeSelection(option.value), 1_000_000)
+    assert.equal(claudeSelectionForModelAndWindow(sdkModel, option.window), option.value,
+      'host session metadata must restore the selected Fable 5.2 compact window')
+  }
+  assert.equal(sdkModelForClaudeSelection('claude-fable-5-2'), 'claude-fable-5-2[1m]')
 
-  const opus55 = rows[0]
+  const opus55 = rows[1]
   assert.deepEqual(opus55.options.map(o => o.label), ['200K', '300K', '1M'])
   for (const option of opus55.options) {
     const sdkModel = sdkModelForClaudeSelection(option.value)
@@ -92,7 +101,7 @@ function main() {
     `expected fewer rows than presets, got ${rows.length} vs ${CLAUDE_BUILTIN_MODELS.length}`,
   )
 
-  const fable51 = rows[1]
+  const fable51 = rows[2]
   assert.deepEqual(
     fable51.options.map(o => o.label),
     ['200K', '300K', '1M'],
@@ -106,6 +115,11 @@ function main() {
     const source = readFileSync(`renderer/src/components/${panel}.tsx`, 'utf8')
     assert.ok(source.includes('getClaudeModelPricing(model, totalIn, true)'),
       `${panel} must treat per-model SDK usage as cumulative when estimating tiered pricing`)
+  }
+  for (const model of ['claude-fable-5-2', 'claude-fable-5-2[1m]', ...fable52.options.map(o => o.value)]) {
+    assert.deepEqual(getClaudeModelPricing(model), {
+      input: 8, output: 40, cacheRead: 0.20, cacheWrite5m: 10, cacheWrite1h: 16,
+    }, `${model} must use Fable 5.2 pricing rather than the Fable 5 family fallback`)
   }
   assert.deepEqual(getClaudeModelPricing('claude-fable-5-1[1m]'), {
     input: 10, output: 50, cacheRead: 0.25, cacheWrite5m: 12.5, cacheWrite1h: 20,
