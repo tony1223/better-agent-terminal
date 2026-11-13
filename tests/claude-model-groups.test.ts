@@ -116,6 +116,14 @@ function main() {
     assert.ok(source.includes('getClaudeModelPricing(model, totalIn, true)'),
       `${panel} must treat per-model SDK usage as cumulative when estimating tiered pricing`)
   }
+  // With the default model left on "Agent default", a session that has not run
+  // a turn yet reports no model. The chip is the only visible way to open the
+  // picker, so it must render with a fallback label instead of disappearing.
+  const claudePanel = readFileSync('renderer/src/components/ClaudeAgentPanel.tsx', 'utf8')
+  assert.doesNotMatch(claudePanel, /\{currentModel && \(\s*<span\s+className="claude-status-btn"/,
+    'the Claude model chip must not be hidden while no model has been reported yet')
+  assert.match(claudePanel, /\{'<\/>'\} \{currentModelLabel \|\| t\('settings\.agentModelDefault'\)\}/,
+    'the Claude model chip must label an unset model as the agent default')
   for (const model of ['claude-fable-5-2', 'claude-fable-5-2[1m]', ...fable52.options.map(o => o.value)]) {
     assert.deepEqual(getClaudeModelPricing(model), {
       input: 8, output: 40, cacheRead: 0.20, cacheWrite5m: 10, cacheWrite1h: 16,

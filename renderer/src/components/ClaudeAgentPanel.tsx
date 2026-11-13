@@ -6289,23 +6289,24 @@ const ClaudeAgentPanelContent = memo(function ClaudeAgentPanelContent({ sessionI
               </span>
             )}
 
-            {currentModel && (
-              <span
-                className="claude-status-btn"
-                onClick={() => setShowModelList(true)}
-                title={`Model: ${currentModelLabel}${currentSdkModel !== currentModel ? ` (${currentSdkModel})` : ''} (click to select)`}
-              >
-                {'</>'} {currentModelLabel}{currentModelContextSuffix}
-                {compactWindowMismatch && (
-                  <span
-                    style={{ color: 'var(--warning, #e5c07b)', marginLeft: 4 }}
-                    title={`Auto-compact mismatch: selection expects ${Math.round(compactWindowMismatch.expected / 1000)}k, session is ${compactWindowMismatch.actual ? `${Math.round(compactWindowMismatch.actual / 1000)}k` : 'uncapped'} — reselect the model to reapply`}
-                  >
-                    {'⚠'}
-                  </span>
-                )}
-              </span>
-            )}
+            {/* Always rendered: with no default model configured, a session that
+                has not run a turn yet reports no model, and hiding the chip
+                would leave no way to pick one before the first message. */}
+            <span
+              className="claude-status-btn"
+              onClick={() => setShowModelList(true)}
+              title={`Model: ${currentModelLabel || t('settings.agentModelDefault')}${currentSdkModel !== currentModel ? ` (${currentSdkModel})` : ''} (click to select)`}
+            >
+              {'</>'} {currentModelLabel || t('settings.agentModelDefault')}{currentModelContextSuffix}
+              {compactWindowMismatch && (
+                <span
+                  style={{ color: 'var(--warning, #e5c07b)', marginLeft: 4 }}
+                  title={`Auto-compact mismatch: selection expects ${Math.round(compactWindowMismatch.expected / 1000)}k, session is ${compactWindowMismatch.actual ? `${Math.round(compactWindowMismatch.actual / 1000)}k` : 'uncapped'} — reselect the model to reapply`}
+                >
+                  {'⚠'}
+                </span>
+              )}
+            </span>
             {!isV2Session && <AgentFastModeCheckbox sessionId={sessionId}
               isStreaming={isStreaming} ensureSessionStarted={ensureSessionStarted} />}
             {!isCodexSession && !isV2Session && (
