@@ -13,6 +13,7 @@ import { checkUpdatesNow, getUpdateState, subscribeUpdate } from '../lib/auto-up
 import { CLAUDE_BUILTIN_MODELS } from '../utils/claude-model-presets'
 import { CODEX_MODELS } from '../utils/codex-models'
 import { LoginDialog } from './LoginDialog'
+import { formatAuthErrorMessage } from '../utils/error-message'
 
 interface SettingsPanelProps {
   onClose: () => void
@@ -288,7 +289,7 @@ export function SettingsPanel({ onClose, isRemoteProfile = false, remoteOrigin =
         setSwitchWarningShown(result.switchWarningShown)
       }
     } catch (e) {
-      host.debug.log?.(`[SettingsPanel] Failed to load accounts: ${e}`)
+      host.debug.log?.(`[SettingsPanel] Failed to load accounts: ${formatAuthErrorMessage(e, 'Unknown account error')}`)
     }
     setAccountsLoading(false)
   }, [])

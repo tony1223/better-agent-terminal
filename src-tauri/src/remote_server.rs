@@ -2392,6 +2392,8 @@ fn invoke_sidecar_for_remote(
     if let Some(result) = invoke_rust_for_remote(ctx, channel, &params) {
         return result;
     }
+    let method = channel_to_sidecar_method(channel);
+    let cfg = ctx.sidecar_spawn_config().map_err(|err| err.message)?;
     let claimed_claude_login = channel == "claude:auth-login-start";
     if claimed_claude_login {
         if !try_begin_claude_remote_login() {
@@ -2401,16 +2403,30 @@ fn invoke_sidecar_for_remote(
                 "terminal": false,
             }));
         }
+        match claude_cmd::prepare_claude_login(ctx) {
+            Ok(true) => {},
+            Ok(false) => {
+                clear_claude_remote_login_started();
+                return Ok(json!({ "ok": false, "error": "auth_in_progress", "terminal": false }));
+            }
+            Err(err) => {
+                clear_claude_remote_login_started();
+                return Err(err);
+            }
+        }
     }
-    let method = channel_to_sidecar_method(channel);
-    let cfg = ctx.sidecar_spawn_config().map_err(|err| err.message)?;
     let sink = ctx.sidecar_emit_sink();
     let timeout = remote_invoke_timeout(channel);
-    let result = match sidecar.call_with_emit(&cfg, Some(sink), &method, params, timeout) {
+    let result = match sidecar.call_with_emit(&cfg, Some(sink), &method, params.clone(), timeout) {
         Ok(result) => result,
         Err(err) => {
-            if claimed_claude_login {
+            if claimed_claude_login || matches!(channel, "claude:auth-login-submit-code" | "claude:auth-login-cancel") {
+                let _ = sidecar.call_with_emit(
+                    &cfg, Some(ctx.sidecar_emit_sink()), "claude.authLoginRelease",
+                    json!({ "loginId": params.get("loginId") }), INVOKE_TIMEOUT,
+                );
                 clear_claude_remote_login_started();
+                claude_cmd::rollback_claude_login()?;
             }
             return Err(err.message);
         }
@@ -2427,7 +2443,7 @@ fn invoke_sidecar_for_remote(
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let finished = finish_remote_claude_login(ctx, channel, result);
-    if terminal || finished.is_err() {
+    if terminal || finished.is_err() || (claimed_claude_login && login_id.is_none()) {
         clear_claude_remote_login_started();
     }
     if (terminal || finished.is_err()) && login_id.is_some() {

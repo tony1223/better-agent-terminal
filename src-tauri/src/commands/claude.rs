@@ -704,20 +704,21 @@ pub(crate) enum ClaudeLoginStage {
     Cancel,
 }
 
-/// Account bookkeeping wrapped around the paste-code login ceremony.
-///
-/// `claude auth login` redirects to a hosted callback rather than a localhost
-/// port, so the only way to finish a login is to paste the code back into the
-/// CLI's stdin. Desktop and remote clients both drive that through the same
-/// sidecar login driver (node-sidecar/src/handlers/claude-auth-login.mjs),
-/// which means the account bookkeeping around it has to live in one place —
-/// a desktop-only copy would drift and silently stop registering accounts.
-///
-/// - `Start` (ok)           → snapshot the active credential, so a login that
-///                            fails halfway cannot strand the user logged out.
-/// - `SubmitCode` (success) → verify via `auth status`, register and activate
-///                            the new account, attach it to the result.
-/// - any terminal stage     → restore the snapshot.
+/// Capture rollback before spawning the CLI, for both desktop and remote login.
+pub(crate) fn prepare_claude_login(ctx: &HostContext) -> Result<bool, String> {
+    let dir = ctx.data_dir().map_err(|err| err.to_string())?;
+    account_store::begin_login_snapshot(&dir).map_err(|err| {
+        format!("could not preserve the active Claude account: {err}")
+    })
+}
+
+pub(crate) fn rollback_claude_login() -> Result<(), String> {
+    account_store::finish_login_snapshot(true)
+        .map_err(|err| format!("could not restore the previous Claude login: {err}"))
+}
+
+/// Shared desktop/remote account bookkeeping for pasted codes and callbacks.
+/// Verify and activate successful logins; roll back failed terminal stages.
 pub(crate) fn finish_claude_login_stage(
     ctx: &HostContext,
     stage: ClaudeLoginStage,
@@ -737,9 +738,11 @@ pub(crate) fn finish_claude_login_stage(
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let started = result.get("ok").and_then(Value::as_bool).unwrap_or(false);
-    if stage == ClaudeLoginStage::Start && started {
-        account_store::snapshot_active_account_credential(&data_dir()?)
-            .map_err(|err| format!("could not preserve the active Claude account: {err}"))?;
+    if stage == ClaudeLoginStage::Start {
+        if !started {
+            // auth_in_progress means this attempt never spawned a CLI.
+            account_store::finish_login_snapshot(terminal).map_err(|err| err.to_string())?;
+        }
     } else if stage == ClaudeLoginStage::SubmitCode && succeeded {
         let dir = data_dir()?;
         let account = (|| {
@@ -755,6 +758,7 @@ pub(crate) fn finish_claude_login_stage(
         })();
         match account {
             Ok(account) => {
+                account_store::finish_login_snapshot(false).map_err(|err| err.to_string())?;
                 // A new login also *activates* the account, so every window is
                 // now showing a stale chip — announce it like a switch.
                 broadcast_account_changed(ctx, "claude", Some(&account.id));
@@ -766,16 +770,17 @@ pub(crate) fn finish_claude_login_stage(
                 }
             }
             Err(err) => {
-                let _ = account_store::restore_active_account_credential(&dir);
+                let rollback = rollback_claude_login();
+                if let Err(restore_err) = rollback {
+                    return Err(format!("Claude account registration failed: {err}; {restore_err}"));
+                }
                 return Err(format!(
                     "Claude login completed but the account could not be registered: {err}"
                 ));
             }
         }
     } else if terminal {
-        if let Ok(dir) = data_dir() {
-            let _ = account_store::restore_active_account_credential(&dir);
-        }
+        rollback_claude_login()?;
     }
     Ok(result)
 }
@@ -3927,13 +3932,9 @@ pub async fn claude_auth_logout(
 
 // Interactive URL ("paste code") login.
 //
-// `claude auth login` redirects to a hosted callback (platform.claude.com)
-// rather than a localhost port, so nothing local can ever observe the
-// completion — the code has to be pasted back into the CLI's stdin. That makes
-// this the only workable sign-in flow for *both* desktop and remote; desktop
-// simply gets to open the browser itself instead of asking the user to copy
-// the URL. The sidecar (claude-auth-login.mjs) holds the in-flight login
-// between the start and submit-code calls.
+// The CLI can finish through a browser callback or a pasted code. Desktop
+// opens the browser itself. The sidecar holds the login between start and
+// submit-code calls, including a callback result that arrived in the meantime.
 #[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn claude_auth_login_start(
@@ -3954,6 +3955,9 @@ pub async fn claude_auth_login_start(
         return result;
     }
     let ctx = HostContext::from_app(app);
+    if !prepare_claude_login(&ctx).map_err(|message| BridgeError { message })? {
+        return Ok(json!({ "ok": false, "error": "auth_in_progress", "terminal": false }));
+    }
     let result = call_sidecar_with_timeout_blocking(
         ctx.clone(),
         (*state).clone(),
@@ -3961,7 +3965,15 @@ pub async fn claude_auth_login_start(
         Value::Null,
         AUTH_LOGIN_TIMEOUT,
     )
-    .await?;
+    .await;
+    let result = match result {
+        Ok(result) => result,
+        Err(err) => {
+            release_claude_login(&ctx, &state, None).await;
+            rollback_claude_login().map_err(|message| BridgeError { message })?;
+            return Err(err);
+        }
+    };
     // The browser is right here on desktop, so open the sign-in page instead of
     // making the user copy the URL. The dialog still shows it as a fallback.
     if result.get("ok").and_then(Value::as_bool) == Some(true) {
@@ -4037,7 +4049,15 @@ pub async fn claude_auth_login_submit_code(
         json!({ "code": code, "loginId": login_id, "deferRelease": true }),
         AUTH_LOGIN_TIMEOUT,
     )
-    .await?;
+    .await;
+    let result = match result {
+        Ok(result) => result,
+        Err(err) => {
+            release_claude_login(&ctx, &sidecar, login_id.as_deref()).await;
+            rollback_claude_login().map_err(|message| BridgeError { message })?;
+            return Err(err);
+        }
+    };
     let terminal = result
         .get("terminal")
         .and_then(Value::as_bool)
@@ -4087,7 +4107,15 @@ pub async fn claude_auth_login_cancel(
         json!({ "loginId": login_id, "deferRelease": true }),
         DEFAULT_TIMEOUT,
     )
-    .await?;
+    .await;
+    let result = match result {
+        Ok(result) => result,
+        Err(err) => {
+            release_claude_login(&ctx, &sidecar, login_id.as_deref()).await;
+            rollback_claude_login().map_err(|message| BridgeError { message })?;
+            return Err(err);
+        }
+    };
     let terminal = result
         .get("terminal")
         .and_then(Value::as_bool)

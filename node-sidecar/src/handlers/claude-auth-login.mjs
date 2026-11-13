@@ -53,9 +53,22 @@ function cleanupLogin(session) {
   if (activeLogin === session) activeLogin = null
 }
 
-function killSession(session) {
-  if (!session || !session.child) return
-  try { session.child.kill('SIGTERM') } catch { /* ignore */ }
+async function killSession(session) {
+  if (!session?.child || session.finished) return
+  // Do not let the host restore credentials while the CLI can still write
+  // them. Escalate a stuck graceful shutdown, then wait for stdio to close.
+  let killTimer
+  try {
+    await new Promise((resolve) => {
+      session.child.once('close', resolve)
+      killTimer = setTimeout(() => {
+        try { session.child.kill('SIGKILL') } catch { /* close may already be queued */ }
+      }, 1000)
+      session.child.kill('SIGTERM')
+    })
+  } finally {
+    clearTimeout(killTimer)
+  }
 }
 
 function failureReason(session) {
@@ -65,6 +78,13 @@ function failureReason(session) {
   // CLI output may echo provider details we do not control. Keep it host-local
   // and return only a stable, non-sensitive failure category to remote clients.
   return `Claude login did not complete (exit code ${code == null ? 'unknown' : code})`
+}
+
+function loginResult(session) {
+  const succeeded = session.finished && session.exitCode === 0 && !FAILURE_RE.test(stripAnsi(session.output || ''))
+  return succeeded
+    ? { success: true, loginId: session.loginId, terminal: true }
+    : { success: false, error: failureReason(session), loginId: session.loginId, terminal: true }
 }
 
 export function sanitizeLoginError(value) {
@@ -159,7 +179,8 @@ registerHandler('claude.authLoginStart', async () => {
     if (session.urlResolve) { session.urlResolve(null); session.urlResolve = null }
     if (session.exitResolve) { session.exitResolve(); session.exitResolve = null }
   })
-  child.on('exit', (codeNum) => {
+  // close follows the final stdout/stderr chunks; exit can precede them.
+  child.on('close', (codeNum) => {
     session.finished = true
     session.exitCode = typeof codeNum === 'number' ? codeNum : null
     if (session.urlResolve) { session.urlResolve(session.url); session.urlResolve = null }
@@ -167,16 +188,19 @@ registerHandler('claude.authLoginStart', async () => {
   })
 
   // Safety net: never leave a stuck login process alive forever.
-  session.killTimer = setTimeout(() => { killSession(session); cleanupLogin(session) }, LOGIN_URL_TIMEOUT_MS + LOGIN_COMPLETE_TIMEOUT_MS)
+  session.killTimer = setTimeout(() => {
+    void killSession(session).then(() => cleanupLogin(session)).catch(() => warn('[claude-auth-login] could not stop expired login'))
+  }, LOGIN_URL_TIMEOUT_MS + LOGIN_COMPLETE_TIMEOUT_MS)
 
+  let urlTimer
   const url = await Promise.race([
     urlPromise,
-    new Promise((resolve) => setTimeout(() => resolve(session.url), LOGIN_URL_TIMEOUT_MS)),
-  ])
+    new Promise((resolve) => { urlTimer = setTimeout(() => resolve(session.url), LOGIN_URL_TIMEOUT_MS) }),
+  ]).finally(() => clearTimeout(urlTimer))
 
   if (!url) {
     const reason = session.finished ? failureReason(session) : 'login did not produce a sign-in URL'
-    killSession(session)
+    await killSession(session)
     cleanupLogin(session)
     return { ok: false, error: reason, loginId: session.loginId, terminal: true }
   }
@@ -196,18 +220,14 @@ registerHandler('claude.authLoginSubmitCode', async (params) => {
   const deferRelease = params?.deferRelease === true
   const session = activeLogin
   if (!session) return { success: false, error: 'no active login session', terminal: true }
-  if (session.finished) {
-    const result = {
-      success: false,
-      error: failureReason(session),
-      loginId: session.loginId,
-      terminal: true,
-    }
-    if (!deferRelease) cleanupLogin(session)
-    return result
-  }
   if (!loginIdMatches(session, loginId)) {
     return { success: false, error: 'invalid login session', terminal: false }
+  }
+  if (session.finished) {
+    // Browser callback login can finish before the user pastes a code.
+    const result = loginResult(session)
+    if (!deferRelease) cleanupLogin(session)
+    return result
   }
   if (!code) return { success: false, error: 'missing authorization code', terminal: false }
 
@@ -215,7 +235,7 @@ registerHandler('claude.authLoginSubmitCode', async (params) => {
   try {
     session.child.stdin?.write(`${code}\n`)
   } catch (err) {
-    killSession(session)
+    await killSession(session)
     if (!deferRelease) cleanupLogin(session)
     return {
       success: false,
@@ -225,18 +245,14 @@ registerHandler('claude.authLoginSubmitCode', async (params) => {
     }
   }
 
+  let completeTimer
   await Promise.race([
     exitPromise,
-    new Promise((resolve) => setTimeout(resolve, LOGIN_COMPLETE_TIMEOUT_MS)),
-  ])
+    new Promise((resolve) => { completeTimer = setTimeout(resolve, LOGIN_COMPLETE_TIMEOUT_MS) }),
+  ]).finally(() => clearTimeout(completeTimer))
 
-  const exitCode = session.exitCode
-  const out = stripAnsi(session.output || '')
-  const succeeded = session.finished && exitCode === 0 && !FAILURE_RE.test(out)
-  const result = succeeded
-    ? { success: true, loginId: session.loginId, terminal: true }
-    : { success: false, error: failureReason(session), loginId: session.loginId, terminal: true }
-  if (!session.finished) killSession(session)
+  const result = loginResult(session)
+  if (!session.finished) await killSession(session)
   if (!deferRelease) cleanupLogin(session)
   return result
 })
@@ -248,10 +264,10 @@ registerHandler('claude.authLoginCancel', async (params) => {
   if (!loginIdMatches(activeLogin, loginId)) {
     return { ok: false, cancelled: false, error: 'invalid login session', terminal: false }
   }
-  const activeLoginId = activeLogin.loginId
-  killSession(activeLogin)
-  if (!deferRelease) cleanupLogin(activeLogin)
-  return { ok: true, cancelled: true, loginId: activeLoginId, terminal: true }
+  const session = activeLogin
+  await killSession(session)
+  if (!deferRelease) cleanupLogin(session)
+  return { ok: true, cancelled: true, loginId: session.loginId, terminal: true }
 })
 
 // The Rust host calls release only after it has captured/restored the account.
@@ -263,7 +279,8 @@ registerHandler('claude.authLoginRelease', async (params) => {
   if (!loginIdMatches(activeLogin, loginId)) {
     return { ok: false, released: false, error: 'invalid login session' }
   }
-  killSession(activeLogin)
-  cleanupLogin(activeLogin)
+  const session = activeLogin
+  await killSession(session)
+  cleanupLogin(session)
   return { ok: true, released: true }
 })

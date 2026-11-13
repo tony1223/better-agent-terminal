@@ -7,8 +7,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::process::Command;
-use std::sync::OnceLock;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 const STORE_FILE: &str = "claude-accounts.json";
@@ -134,11 +134,45 @@ fn save_account_credential(
     account_id: &str,
     credential_json: &str,
 ) -> Result<(), AccountStoreError> {
+    // MCP connector tokens are host-local and can exceed Windows Credential
+    // Manager's 2560-byte limit. Store only the account's compact OAuth value.
+    let credential_json = account_credential(credential_json)?;
     safe_entry(account_id)?
-        .set_password(credential_json)
+        .set_password(&credential_json)
         .map_err(|err| {
             AccountStoreError::SafeStorage(format!("could not save credential: {err:?}"))
         })
+}
+
+fn account_credential(raw: &str) -> Result<String, AccountStoreError> {
+    let value: Value = serde_json::from_str(raw)?;
+    let oauth = value
+        .get("claudeAiOauth")
+        .filter(|value| value.is_object())
+        .ok_or_else(|| {
+            AccountStoreError::SafeStorage("Claude credential has no claudeAiOauth object".into())
+        })?;
+    Ok(serde_json::to_string(
+        &serde_json::json!({ "claudeAiOauth": oauth }),
+    )?)
+}
+
+fn merge_account_credential(
+    current: Option<&str>,
+    account: &str,
+) -> Result<String, AccountStoreError> {
+    // Also accepts legacy keyring entries containing the entire credentials
+    // file, without copying their stale MCP values back over the live ones.
+    let account: Value = serde_json::from_str(&account_credential(account)?)?;
+    let mut current: Value = match current {
+        Some(raw) => serde_json::from_str(raw)?,
+        None => serde_json::json!({}),
+    };
+    let object = current.as_object_mut().ok_or_else(|| {
+        AccountStoreError::SafeStorage("Claude credentials must be a JSON object".into())
+    })?;
+    object.insert("claudeAiOauth".into(), account["claudeAiOauth"].clone());
+    Ok(serde_json::to_string(&current)?)
 }
 
 fn load_account_credential(account_id: &str) -> Result<String, AccountStoreError> {
@@ -212,6 +246,14 @@ pub fn read_cli_credentials() -> Option<String> {
 }
 
 pub fn write_cli_credentials(credential_json: &str) -> bool {
+    let Ok(merged) = merge_account_credential(read_cli_credentials().as_deref(), credential_json)
+    else {
+        return false;
+    };
+    replace_cli_credentials(&merged)
+}
+
+fn replace_cli_credentials(credential_json: &str) -> bool {
     #[cfg(target_os = "macos")]
     {
         return Command::new("/usr/bin/security")
@@ -248,6 +290,161 @@ pub fn write_cli_credentials(credential_json: &str) -> bool {
         }
         true
     }
+}
+
+/// An interactive login writes both the credential store and oauthAccount.
+/// Keep the rollback in memory, including when BAT has no indexed account yet.
+struct CliLoginSnapshot {
+    credential: Option<String>,
+    #[cfg(not(target_os = "macos"))]
+    credential_path: PathBuf,
+    config_path: PathBuf,
+    oauth_account: Option<Value>,
+    started: Instant,
+}
+
+fn read_optional_file(path: &Path) -> Result<Option<String>, AccountStoreError> {
+    match fs::read_to_string(path) {
+        Ok(raw) => Ok(Some(raw)),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn read_config(path: &Path) -> Result<Value, AccountStoreError> {
+    let config = match read_optional_file(path)? {
+        Some(raw) => serde_json::from_str::<Value>(&raw)?,
+        None => serde_json::json!({}),
+    };
+    if !config.is_object() {
+        return Err(AccountStoreError::SafeStorage(
+            "Claude config must be a JSON object".into(),
+        ));
+    }
+    Ok(config)
+}
+
+impl CliLoginSnapshot {
+    fn capture(credential_path: PathBuf, config_path: PathBuf) -> Result<Self, AccountStoreError> {
+        #[cfg(target_os = "macos")]
+        let credential = {
+            let _ = credential_path;
+            read_cli_credentials()
+        };
+        #[cfg(not(target_os = "macos"))]
+        let credential = read_optional_file(&credential_path)?;
+        let config = read_config(&config_path)?;
+        Ok(Self {
+            credential,
+            #[cfg(not(target_os = "macos"))]
+            credential_path,
+            config_path,
+            oauth_account: config.get("oauthAccount").cloned(),
+            started: Instant::now(),
+        })
+    }
+
+    fn restore(&self) -> Result<(), AccountStoreError> {
+        #[cfg(not(target_os = "macos"))]
+        match &self.credential {
+            Some(raw) => {
+                fs::write(&self.credential_path, raw)?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(&self.credential_path, fs::Permissions::from_mode(0o600))?;
+                }
+            }
+            None => match fs::remove_file(&self.credential_path) {
+                Ok(()) => {}
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err.into()),
+            },
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let restored = match &self.credential {
+                Some(raw) => replace_cli_credentials(raw),
+                None if read_cli_credentials().is_none() => true,
+                None => Command::new("/usr/bin/security")
+                    .args([
+                        "delete-generic-password",
+                        "-a",
+                        &keychain_account(),
+                        "-s",
+                        CLI_KEYCHAIN_SERVICE,
+                    ])
+                    .status()
+                    .map(|status| status.success())
+                    .unwrap_or(false),
+            };
+            if !restored {
+                return Err(AccountStoreError::SafeStorage(
+                    "could not restore Claude CLI keychain credential".into(),
+                ));
+            }
+        }
+        // Restore only account identity; retain unrelated CLI config updates.
+        if self.config_path.exists() || self.oauth_account.is_some() {
+            let mut config = read_config(&self.config_path)?;
+            let object = config.as_object_mut().expect("validated config object");
+            match &self.oauth_account {
+                Some(account) => {
+                    object.insert("oauthAccount".into(), account.clone());
+                }
+                None => {
+                    object.remove("oauthAccount");
+                }
+            }
+            fs::write(&self.config_path, serde_json::to_string_pretty(&config)?)?;
+        }
+        Ok(())
+    }
+}
+
+static LOGIN_SNAPSHOT: Mutex<Option<CliLoginSnapshot>> = Mutex::new(None);
+
+/// Reserve the host-global login and capture rollback BEFORE spawning the CLI.
+/// False means another desktop or remote login already owns the reservation.
+pub fn begin_login_snapshot(app_data_dir: &Path) -> Result<bool, AccountStoreError> {
+    let mut pending = LOGIN_SNAPSHOT
+        .lock()
+        .map_err(|_| AccountStoreError::SafeStorage("Claude login state is unavailable".into()))?;
+    if let Some(snapshot) = pending.as_ref() {
+        // The sidecar kills abandoned logins after 180 seconds. Leave extra
+        // time for account finalization, then recover before a new attempt.
+        if snapshot.started.elapsed() < Duration::from_secs(300) {
+            return Ok(false);
+        }
+        snapshot.restore()?;
+        *pending = None;
+    }
+    let dir = claude_config_dir().ok_or_else(|| {
+        AccountStoreError::SafeStorage("could not resolve Claude config directory".into())
+    })?;
+    let config_path = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(|dir| PathBuf::from(dir).join(".claude.json"))
+        .or_else(|| home_dir().map(|home| home.join(".claude.json")))
+        .ok_or_else(|| {
+            AccountStoreError::SafeStorage("could not resolve Claude config path".into())
+        })?;
+    let snapshot = CliLoginSnapshot::capture(dir.join(".credentials.json"), config_path)?;
+    snapshot_active_account_credential(app_data_dir)?;
+    *pending = Some(snapshot);
+    Ok(true)
+}
+
+pub fn finish_login_snapshot(restore: bool) -> Result<(), AccountStoreError> {
+    let mut pending = LOGIN_SNAPSHOT
+        .lock()
+        .map_err(|_| AccountStoreError::SafeStorage("Claude login state is unavailable".into()))?;
+    if restore {
+        if let Some(snapshot) = pending.as_ref() {
+            snapshot.restore()?;
+        }
+    }
+    *pending = None;
+    Ok(())
 }
 
 pub fn auth_status_from_value(value: &Value) -> Option<AuthStatus> {
@@ -469,6 +666,104 @@ pub fn mark_warning_shown(app_data_dir: &Path) -> Result<(), AccountStoreError> 
 mod tests {
     use super::*;
 
+    #[test]
+    fn account_storage_omits_large_mcp_credentials() {
+        let raw = serde_json::json!({
+            "claudeAiOauth": { "accessToken": "access", "refreshToken": "refresh", "expiresAt": 123 },
+            "mcpOAuth": (0..88).map(|i| (format!("connector-{i}"), serde_json::json!({ "token": "x".repeat(400) })))
+                .collect::<serde_json::Map<String, Value>>(),
+        }).to_string();
+        assert!(raw.len() > 34_000);
+        let stored = account_credential(&raw).unwrap();
+        assert!(stored.encode_utf16().count() * 2 < 2560);
+        let value: Value = serde_json::from_str(&stored).unwrap();
+        assert_eq!(value["claudeAiOauth"]["refreshToken"], "refresh");
+        assert!(value.get("mcpOAuth").is_none());
+    }
+
+    #[test]
+    fn account_switch_preserves_live_mcp_even_for_legacy_keyring_entries() {
+        let current = r#"{"claudeAiOauth":{"accessToken":"old"},"mcpOAuth":{"connector":"live"},"other":true}"#;
+        for account in [
+            r#"{"claudeAiOauth":{"accessToken":"new"}}"#,
+            r#"{"claudeAiOauth":{"accessToken":"new"},"mcpOAuth":{"connector":"stale"}}"#,
+        ] {
+            let merged: Value =
+                serde_json::from_str(&merge_account_credential(Some(current), account).unwrap())
+                    .unwrap();
+            assert_eq!(merged["claudeAiOauth"]["accessToken"], "new");
+            assert_eq!(merged["mcpOAuth"]["connector"], "live");
+            assert_eq!(merged["other"], true);
+            let without_current: Value =
+                serde_json::from_str(&merge_account_credential(None, account).unwrap()).unwrap();
+            assert_eq!(without_current["claudeAiOauth"]["accessToken"], "new");
+            assert!(without_current.get("mcpOAuth").is_none());
+        }
+        assert!(merge_account_credential(Some("invalid"), current).is_err());
+        assert!(account_credential(r#"{"mcpOAuth":{}}"#).is_err());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn failed_first_login_restores_unindexed_cli_identity() {
+        let dir = temp_dir("first-login-rollback");
+        assert!(read_index(&dir).active_account_id.is_none());
+        let credential_path = dir.join(".credentials.json");
+        let config_path = dir.join(".claude.json");
+        let original =
+            r#"{"claudeAiOauth":{"accessToken":"original"},"mcpOAuth":{"connector":"host"}}"#;
+        fs::write(&credential_path, original).unwrap();
+        fs::write(
+            &config_path,
+            r#"{"oauthAccount":{"emailAddress":"old@example.com"},"theme":"dark"}"#,
+        )
+        .unwrap();
+        let snapshot =
+            CliLoginSnapshot::capture(credential_path.clone(), config_path.clone()).unwrap();
+        fs::write(
+            &credential_path,
+            r#"{"claudeAiOauth":{"accessToken":"new"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            &config_path,
+            r#"{"oauthAccount":{"emailAddress":"new@example.com"},"theme":"light"}"#,
+        )
+        .unwrap();
+        snapshot.restore().unwrap();
+        assert_eq!(fs::read_to_string(&credential_path).unwrap(), original);
+        let config = read_config(&config_path).unwrap();
+        assert_eq!(config["oauthAccount"]["emailAddress"], "old@example.com");
+        assert_eq!(config["theme"], "light");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn cancelled_login_restores_absent_credentials_and_account() {
+        let dir = temp_dir("no-credential-rollback");
+        let credential_path = dir.join(".credentials.json");
+        let config_path = dir.join(".claude.json");
+        let snapshot =
+            CliLoginSnapshot::capture(credential_path.clone(), config_path.clone()).unwrap();
+        fs::write(
+            &credential_path,
+            r#"{"claudeAiOauth":{"accessToken":"new"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            &config_path,
+            r#"{"oauthAccount":{"emailAddress":"new@example.com"},"other":true}"#,
+        )
+        .unwrap();
+        snapshot.restore().unwrap();
+        assert!(!credential_path.exists());
+        let config = read_config(&config_path).unwrap();
+        assert!(config.get("oauthAccount").is_none());
+        assert_eq!(config["other"], true);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "bat-account-store-{}-{}-{name}",
@@ -529,7 +824,10 @@ mod tests {
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .filter(|name| name.ends_with(".tmp"))
             .collect::<Vec<_>>();
-        assert!(leftovers.is_empty(), "temp files left behind: {leftovers:?}");
+        assert!(
+            leftovers.is_empty(),
+            "temp files left behind: {leftovers:?}"
+        );
         fs::remove_dir_all(dir).ok();
     }
 
