@@ -7,6 +7,7 @@ import { sendEvent } from '../lib/protocol.mjs'
 import { log, warn } from '../lib/logger.mjs'
 import { normalizeClaudeEffortMode, runtimeEffortForMode, isUltracodeMode } from '../lib/claude-effort.mjs'
 import { resolveDataDir } from '../lib/data-paths.mjs'
+import { readRequestJson, writeJson } from '../lib/http-json.mjs'
 import { isBatDebugEnabled, probeClaudeChannelCapabilities } from './claude-channel-capabilities.mjs'
 import { writeClaudeChannelServerScript } from './claude-channel-server.mjs'
 import { FRAME_KINDS, normalizeFrame, subEventNameFor } from './claude-channel-frames.mjs'
@@ -30,27 +31,6 @@ function requireDebug() {
 
 function safeId(value) {
   return String(value || '').replace(/[^a-zA-Z0-9_.-]/g, '_')
-}
-
-function readRequestJson(req) {
-  return new Promise((resolve, reject) => {
-    let body = ''
-    req.setEncoding('utf8')
-    req.on('data', chunk => { body += chunk })
-    req.on('end', () => {
-      try {
-        resolve(body.trim() ? JSON.parse(body) : {})
-      } catch (err) {
-        reject(err)
-      }
-    })
-    req.on('error', reject)
-  })
-}
-
-function writeJson(res, status, value) {
-  res.writeHead(status, { 'content-type': 'application/json' })
-  res.end(JSON.stringify(value))
 }
 
 function emit(name, payload) {
