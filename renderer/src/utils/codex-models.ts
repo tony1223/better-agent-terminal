@@ -19,9 +19,12 @@ export const DEFAULT_CODEX_MODEL = 'gpt-6-sol'
 // the Claude picker): the host strips the suffix before talking to the Codex
 // app-server and sends a per-thread `model_context_window` override instead.
 // The bare row uses whatever window the backend serves for the account.
-// Order follows the Codex 0.159 catalog priority. The GPT-6 family shares one
-// 1,050,000-token API window, so each gets the same 272K / 872K presets Astra had.
+// Newer Codex models lead the picker. The GPT-6 family uses the same
+// 272K / 872K context presets.
 export const CODEX_MODELS: CodexModelInfo[] = [
+  { value: 'gpt-6.2-astra', displayName: 'GPT-6.2 Astra', description: 'Most capable · complex, demanding work' },
+  { value: 'gpt-6.2-astra:272k', displayName: 'GPT-6.2 Astra (272K)', description: 'GPT-6.2 Astra · 272K context window' },
+  { value: 'gpt-6.2-astra:872k', displayName: 'GPT-6.2 Astra (872K)', description: 'GPT-6.2 Astra · 872K context window' },
   { value: 'gpt-6.1-sol', displayName: 'GPT-6.1 Sol', description: 'Latest workhorse · coding and everyday work' },
   { value: 'gpt-6.1-sol:272k', displayName: 'GPT-6.1 Sol (272K)', description: 'GPT-6.1 Sol · 272K context window' },
   { value: 'gpt-6.1-sol:872k', displayName: 'GPT-6.1 Sol (872K)', description: 'GPT-6.1 Sol · 872K context window' },

@@ -761,7 +761,7 @@ fn codex_context_window_for_model(model: &str) -> u64 {
     match codex_base_model(model) {
         // The app-server reports the authoritative value in token usage updates.
         // Keep this fallback accurate before the first update arrives.
-        "gpt-6.1-sol" | "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna" => GPT_6_CONTEXT_WINDOW_FALLBACK,
+        "gpt-6.2-astra" | "gpt-6.1-sol" | "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna" => GPT_6_CONTEXT_WINDOW_FALLBACK,
         "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna" => GPT_5_6_CONTEXT_WINDOW_FALLBACK,
         "gpt-5.5"
         | "gpt-5.4"
@@ -2090,7 +2090,7 @@ fn provider_for_model(model: &str) -> Option<&'static str> {
 }
 
 fn supports_codex_fast_mode(model: &str) -> bool {
-    matches!(codex_base_model(model), "gpt-6.1-sol" | "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna"
+    matches!(codex_base_model(model), "gpt-6.2-astra" | "gpt-6.1-sol" | "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna"
         | "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna" | "gpt-5.5")
 }
 
@@ -3184,9 +3184,12 @@ impl CodexAppServerState {
     }
 
     pub fn supported_models(&self) -> Value {
-        // Order follows the Codex 0.159 catalog priority; the GPT-6 family shares
-        // one API window, so every member gets the 272K / 872K presets Astra had.
+        // Newer Codex models lead the picker; the GPT-6 family uses the same
+        // 272K / 872K context presets.
         let mut models = vec![
+            json!({ "value": "gpt-6.2-astra", "displayName": "GPT-6.2 Astra", "description": "Most capable - complex, demanding work", "source": "builtin" }),
+            json!({ "value": "gpt-6.2-astra:272k", "displayName": "GPT-6.2 Astra (272K)", "description": "GPT-6.2 Astra - 272K context window", "source": "builtin" }),
+            json!({ "value": "gpt-6.2-astra:872k", "displayName": "GPT-6.2 Astra (872K)", "description": "GPT-6.2 Astra - 872K context window", "source": "builtin" }),
             json!({ "value": "gpt-6.1-sol", "displayName": "GPT-6.1 Sol", "description": "Latest workhorse - coding and everyday work", "source": "builtin" }),
             json!({ "value": "gpt-6.1-sol:272k", "displayName": "GPT-6.1 Sol (272K)", "description": "GPT-6.1 Sol - 272K context window", "source": "builtin" }),
             json!({ "value": "gpt-6.1-sol:872k", "displayName": "GPT-6.1 Sol (872K)", "description": "GPT-6.1 Sol - 872K context window", "source": "builtin" }),
@@ -8809,8 +8812,8 @@ mod tests {
             .iter()
             .filter_map(|model| model.get("value").and_then(Value::as_str))
             .collect::<Vec<_>>();
-        assert_eq!(values[0], "gpt-6.1-sol", "catalog priority 1 leads the picker");
-        for base in ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna"] {
+        assert_eq!(values[0], "gpt-6.2-astra", "catalog priority 1 leads the picker");
+        for base in ["gpt-6.2-astra", "gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna"] {
             assert!(values.contains(&base), "{base} missing");
             let k272 = format!("{base}:272k");
             let k872 = format!("{base}:872k");
@@ -9021,6 +9024,8 @@ mod tests {
         assert_eq!(split_codex_model_selection("vendor:model"), ("vendor:model", None));
         assert_eq!(split_codex_model_selection("gpt-6-astra:0k"), ("gpt-6-astra:0k", None));
         assert_eq!(codex_context_window_for_model("gpt-6-astra:872k"), 872_000);
+        assert_eq!(codex_context_window_for_model("gpt-6.2-astra:872k"), 872_000);
+        assert_eq!(codex_context_window_for_model("gpt-6.2-astra"), GPT_6_CONTEXT_WINDOW_FALLBACK);
         assert_eq!(codex_context_window_for_model("gpt-6.1-sol:872k"), 872_000);
         assert_eq!(codex_context_window_for_model("gpt-6-sol"), GPT_6_CONTEXT_WINDOW_FALLBACK);
         assert_eq!(codex_context_window_for_model("gpt-6-luna"), GPT_6_CONTEXT_WINDOW_FALLBACK);

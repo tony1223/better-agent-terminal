@@ -16,6 +16,9 @@ import { info as logInfo, warn as logWarn, error as logError } from '../lib/logg
 import { activeWorktrees, worktreeCreate, worktreeRehydrate, worktreeGetBranch, worktreeStatus, worktreeRemove } from './worktree.mjs'
 
 const CODEX_MODELS = [
+  { value: 'gpt-6.2-astra', displayName: 'GPT-6.2 Astra', description: 'Most capable - complex, demanding work' },
+  { value: 'gpt-6.2-astra:272k', displayName: 'GPT-6.2 Astra (272K)', description: 'GPT-6.2 Astra - 272K context window' },
+  { value: 'gpt-6.2-astra:872k', displayName: 'GPT-6.2 Astra (872K)', description: 'GPT-6.2 Astra - 872K context window' },
   { value: 'gpt-6.1-sol', displayName: 'GPT-6.1 Sol', description: 'Latest workhorse - coding and everyday work' },
   { value: 'gpt-6.1-sol:272k', displayName: 'GPT-6.1 Sol (272K)', description: 'GPT-6.1 Sol - 272K context window' },
   { value: 'gpt-6.1-sol:872k', displayName: 'GPT-6.1 Sol (872K)', description: 'GPT-6.1 Sol - 872K context window' },

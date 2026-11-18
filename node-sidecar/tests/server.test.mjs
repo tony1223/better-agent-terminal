@@ -40,8 +40,9 @@ async function inProcess() {
   const { getCodexSupportedModels, splitCodexModelSelection } = await import('../src/handlers/codex.mjs')
   const codexModels = getCodexSupportedModels()
   assert.deepEqual(
-    codexModels.slice(0, 13).map(model => model.value),
+    codexModels.slice(0, 16).map(model => model.value),
     [
+      'gpt-6.2-astra', 'gpt-6.2-astra:272k', 'gpt-6.2-astra:872k',
       'gpt-6.1-sol', 'gpt-6.1-sol:272k', 'gpt-6.1-sol:872k',
       'gpt-6-astra', 'gpt-6-astra:272k', 'gpt-6-astra:872k',
       'gpt-6-sol', 'gpt-6-sol:272k', 'gpt-6-sol:872k',
